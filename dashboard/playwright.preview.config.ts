@@ -7,9 +7,15 @@ import { defineConfig } from "@playwright/test";
 // Usage:
 //   PREVIEW_BASE_URL=https://growmore-dashboard-<hash>.vercel.app pnpm test:e2e:preview
 //
+// Preview deployments sit behind Vercel's SSO Deployment Protection, so
+// requests need the "Protection Bypass for Automation" secret (Project
+// Settings -> Deployment Protection). Set VERCEL_AUTOMATION_BYPASS_SECRET
+// locally (see .env.local, gitignored) -- never commit the value.
+//
 // There is intentionally no `webServer` block here: we never boot a local
 // server for this suite.
 const baseURL = process.env.PREVIEW_BASE_URL;
+const bypassSecret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -18,6 +24,12 @@ export default defineConfig({
   use: {
     baseURL,
     trace: "on-first-retry",
+    extraHTTPHeaders: bypassSecret
+      ? {
+          "x-vercel-protection-bypass": bypassSecret,
+          "x-vercel-set-bypass-cookie": "true",
+        }
+      : undefined,
   },
   reporter: [["list"]],
 });
