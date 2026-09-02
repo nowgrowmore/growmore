@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "growmore-bot"
+version = "0.1.0"
+description = "MCX commodity paper-trading engine (Dhan data API, backtesting, paper trading)."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "dhanhq",
+    "sqlalchemy>=2.0",
+    "alembic",
+    "psycopg[binary]",
+    "apscheduler",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "pandas",
+    "python-dotenv",
+    "pytz",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "responses",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+growmore-bot = "growmore_bot.main:main"
+
+[tool.setuptools.packages.find]
+include = ["growmore_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Keep this focused: real correctness/style issues (pycodestyle errors,
+# pyflakes, import sorting), not the full opinionated preview ruleset.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
