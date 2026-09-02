@@ -22,3 +22,9 @@
 - **No reconciliation between paper positions and any real broker state** — by design, since no
   real orders are placed, but this means the moment live trading is introduced, a reconciliation
   layer must be built from scratch.
+- **Preview deployments share the same Neon database as production.** The Vercel↔Neon marketplace
+  integration was installed without enabling "create a branch per preview deployment" (a setting in
+  the integration's Storage-tab settings in the Vercel dashboard), so `DATABASE_URL` currently
+  resolves to the same database for Development/Preview/Production. Low risk today (schema only,
+  no real trading data yet), but must be fixed — enable per-branch Neon databases — before this
+  matters (i.e. before real paper-trading data accumulates that a preview deploy could corrupt).
