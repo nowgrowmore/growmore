@@ -129,8 +129,15 @@ class DhanClient:
             )
 
     def get_quote(self, instrument: Any) -> Quote:
+        # Dhan's batched marketfeed endpoints (quote/ohlc/ltp) require security
+        # IDs as integers in the request payload, even though `security_id` is
+        # a str everywhere else (it's a str key in the JSON *response*, and in
+        # our own Instrument/CommodityPlaceholder models). Confirmed against
+        # the real API 2026-09-03 -- passing it as a string is silently
+        # rejected (non-2xx with no errorCode/errorType in the body, which
+        # `_raise_if_failed` surfaces as an all-None DhanApiError).
         response = self._sdk.quote_data(
-            {instrument.exchange_segment: [instrument.security_id]}
+            {instrument.exchange_segment: [int(instrument.security_id)]}
         )
         self._raise_if_failed(response)
         # dhanhq wraps the raw HTTP body under response["data"]; Dhan's own

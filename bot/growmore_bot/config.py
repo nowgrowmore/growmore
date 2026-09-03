@@ -15,25 +15,34 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class CommodityPlaceholder(BaseModel):
     """A default-universe commodity entry.
 
-    `security_id_placeholder` is intentionally NOT a real Dhan security id --
-    those are per-contract (they roll with expiry) and must be looked up from
-    Dhan's instrument master (see https://images.dhan.co/api-data/api-scrip-master.csv)
-    by a human before this bot can fetch real quotes for it.
+    `security_id` identifies one specific FUTCOM contract month on MCX, looked
+    up from Dhan's instrument master (https://images.dhan.co/api-data/api-scrip-master.csv)
+    -- these are NEVER guessed. Futures contracts roll: `contract_expiry` records
+    which month `security_id` currently points at, so it's obvious when this
+    needs to be refreshed (shortly before/at expiry) rather than silently going
+    stale. Looked up 2026-09-03 for the then-current front-month contract.
     """
 
     symbol: str
     name: str
     exchange_segment: str = "MCX_COMM"
-    # TODO(human): replace with the real Dhan security id for the active contract
-    # month, sourced from Dhan's instrument/scrip master -- do not guess this value.
-    security_id_placeholder: str = "TODO_LOOKUP_DHAN_SECURITY_ID"
+    security_id: str = "TODO_LOOKUP_DHAN_SECURITY_ID"
+    contract_expiry: str | None = None  # ISO date; None only for the not-yet-looked-up default
 
 
 DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
-    CommodityPlaceholder(symbol="GOLDM", name="Gold Mini"),
-    CommodityPlaceholder(symbol="SILVERM", name="Silver Mini"),
-    CommodityPlaceholder(symbol="CRUDEOILM", name="Crude Oil Mini"),
-    CommodityPlaceholder(symbol="NATURALGAS", name="Natural Gas"),
+    CommodityPlaceholder(
+        symbol="GOLDM", name="Gold Mini", security_id="569003", contract_expiry="2026-10-05"
+    ),
+    CommodityPlaceholder(
+        symbol="SILVERM", name="Silver Mini", security_id="483080", contract_expiry="2026-11-30"
+    ),
+    CommodityPlaceholder(
+        symbol="CRUDEOILM",
+        name="Crude Oil Mini",
+        security_id="565900",
+        contract_expiry="2026-09-21",
+    ),
 ]
 
 

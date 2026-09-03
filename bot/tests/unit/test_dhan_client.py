@@ -84,7 +84,13 @@ def test_get_quote_calls_data_api_and_parses_ltp(instrument):
     assert quote.close == pytest.approx(71100)
 
     sent = json.loads(responses.calls[0].request.body)
-    assert sent["MCX_COMM"] == ["999999"]
+    # Regression: Dhan's batched marketfeed endpoints (quote/ohlc/ltp) require
+    # security IDs as JSON integers in the request payload -- confirmed against
+    # the real API 2026-09-03, where sending them as strings was silently
+    # rejected. `security_id` stays a str everywhere else (it's a str key in
+    # the JSON *response*, and in our Instrument/CommodityPlaceholder models);
+    # only this outbound list needs the int cast.
+    assert sent["MCX_COMM"] == [999999]
 
 
 @responses.activate

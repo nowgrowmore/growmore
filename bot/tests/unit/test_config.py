@@ -61,18 +61,20 @@ def test_settings_trading_defaults(monkeypatch):
     assert settings.mcx_timezone == "Asia/Kolkata"
 
 
-def test_settings_default_commodity_universe_placeholders(monkeypatch):
+def test_settings_default_commodity_universe_has_real_security_ids(monkeypatch):
     from growmore_bot.config import Settings
 
     _base_env(monkeypatch)
     settings = Settings()
 
+    # Natural Gas intentionally excluded from the default universe for now.
     symbols = {c.symbol for c in settings.default_commodity_universe}
-    assert symbols == {"GOLDM", "SILVERM", "CRUDEOILM", "NATURALGAS"}
+    assert symbols == {"GOLDM", "SILVERM", "CRUDEOILM"}
     for commodity in settings.default_commodity_universe:
-        # Real Dhan security IDs are not guessed -- placeholders must be filled
-        # in by a human from Dhan's instrument master before live use.
-        assert commodity.security_id_placeholder == "TODO_LOOKUP_DHAN_SECURITY_ID"
+        # Looked up from Dhan's instrument master 2026-09-03 -- never guessed.
+        assert commodity.security_id != "TODO_LOOKUP_DHAN_SECURITY_ID"
+        assert commodity.security_id.isdigit()
+        assert commodity.contract_expiry is not None
         assert commodity.exchange_segment == "MCX_COMM"
 
 
