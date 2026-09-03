@@ -10,7 +10,7 @@ bar i is only ever a function of bars < i, plus bar i's own close.
 from __future__ import annotations
 
 from collections import deque
-from typing import Any
+from typing import Any, Optional
 
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
@@ -22,6 +22,8 @@ class DonchianBreakoutStrategy(Strategy):
         self.period = period
         self._highs: deque[float] = deque(maxlen=period)
         self._lows: deque[float] = deque(maxlen=period)
+        self._last_channel_high: Optional[float] = None
+        self._last_channel_low: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         signal = Signal(action=SignalAction.HOLD)
@@ -29,6 +31,8 @@ class DonchianBreakoutStrategy(Strategy):
         if len(self._highs) == self.period:
             channel_high = max(self._highs)
             channel_low = min(self._lows)
+            self._last_channel_high = channel_high
+            self._last_channel_low = channel_low
             close = float(bar.close)
             if close > channel_high:
                 signal = Signal(action=SignalAction.BUY)
@@ -38,6 +42,9 @@ class DonchianBreakoutStrategy(Strategy):
         self._highs.append(float(bar.high))
         self._lows.append(float(bar.low))
         return signal
+
+    def debug_state(self) -> dict[str, Optional[float]]:
+        return {"channel_high": self._last_channel_high, "channel_low": self._last_channel_low}
 
 
 __all__ = ["DonchianBreakoutStrategy"]

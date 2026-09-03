@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from growmore_bot.strategies.base import SignalAction
 from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
 
@@ -56,3 +58,13 @@ def test_sma_crossover_requires_fast_less_than_slow():
 
     with pytest.raises(ValueError):
         SmaCrossoverStrategy(fast_period=5, slow_period=3)
+
+
+def test_sma_crossover_debug_state_exposes_computed_smas():
+    strategy = SmaCrossoverStrategy(fast_period=2, slow_period=3)
+    assert strategy.debug_state() == {"fast_sma": None, "slow_sma": None}
+    for close in CLOSES[:3]:  # enough to compute both SMAs
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    state = strategy.debug_state()
+    assert state["fast_sma"] == pytest.approx(11.5)  # SMA2(11,12)
+    assert state["slow_sma"] == pytest.approx(11.0)  # SMA3(10,11,12)

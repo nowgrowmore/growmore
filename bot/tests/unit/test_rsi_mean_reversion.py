@@ -71,3 +71,11 @@ def test_rsi_mean_reversion_requires_valid_thresholds():
 def test_rsi_mean_reversion_requires_positive_period():
     with pytest.raises(ValueError):
         RsiMeanReversionStrategy(period=0)
+
+
+def test_rsi_mean_reversion_debug_state_exposes_rsi():
+    strategy = RsiMeanReversionStrategy(period=3)
+    assert strategy.debug_state() == {"rsi": None}
+    for close in [50, 48, 45, 44]:  # enough for the first computable RSI value
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    assert strategy.debug_state()["rsi"] == pytest.approx(0.0)

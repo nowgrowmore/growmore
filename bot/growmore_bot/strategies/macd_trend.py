@@ -82,5 +82,13 @@ class MacdTrendStrategy(Strategy):
             return Signal(action=SignalAction.SELL)
         return Signal(action=SignalAction.HOLD)
 
+    def debug_state(self) -> dict[str, float | None]:
+        macd = (
+            self._fast_ema - self._slow_ema
+            if self._fast_ema is not None and self._slow_ema is not None
+            else None
+        )
+        return {"macd": macd, "signal": self._signal}
+
 
 __all__ = ["MacdTrendStrategy"]

@@ -280,7 +280,7 @@ def test_buy_fill_is_logged_at_info_level(caplog):
         engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
         engine.process_tick(config=config, instrument=instrument, strategy=strategy)
 
-    assert any("BUY signal filled" in r.message for r in caplog.records)
+    assert any("BUY FILLED" in r.message for r in caplog.records)
 
 
 def test_hold_signal_is_logged_at_info_level(caplog):
@@ -334,4 +334,4 @@ def test_sell_fill_is_logged_with_pnl(caplog):
             paper_position_id=existing_position.id,
         )
 
-    assert any("SELL signal filled" in r.message for r in caplog.records)
+    assert any("SELL FILLED" in r.message for r in caplog.records)

@@ -23,6 +23,8 @@ class SmaCrossoverStrategy(Strategy):
         self.slow_period = slow_period
         self._closes: deque[float] = deque(maxlen=slow_period)
         self._prev_fast_above_slow: Optional[bool] = None
+        self._last_fast_sma: Optional[float] = None
+        self._last_slow_sma: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         self._closes.append(float(bar.close))
@@ -33,6 +35,8 @@ class SmaCrossoverStrategy(Strategy):
         closes = list(self._closes)
         fast_sma = sum(closes[-self.fast_period :]) / self.fast_period
         slow_sma = sum(closes) / self.slow_period
+        self._last_fast_sma = fast_sma
+        self._last_slow_sma = slow_sma
         fast_above_slow = fast_sma > slow_sma
 
         prev = self._prev_fast_above_slow
@@ -46,6 +50,9 @@ class SmaCrossoverStrategy(Strategy):
         if not fast_above_slow and prev:
             return Signal(action=SignalAction.SELL)
         return Signal(action=SignalAction.HOLD)
+
+    def debug_state(self) -> dict[str, Optional[float]]:
+        return {"fast_sma": self._last_fast_sma, "slow_sma": self._last_slow_sma}
 
 
 __all__ = ["SmaCrossoverStrategy"]

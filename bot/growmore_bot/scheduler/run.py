@@ -151,6 +151,7 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
             avg_entry_price=avg_entry_price,
             paper_position_id=position_id,
             cumulative_daily_pnl=daily_pnl,
+            strategy_label=f"{strategy_row.name} {strategy_row.version}",
         )
     session.commit()
 

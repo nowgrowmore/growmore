@@ -27,6 +27,8 @@ class BollingerReversionStrategy(Strategy):
         self._closes: deque[float] = deque(maxlen=period)
         self._prev_below: Optional[bool] = None
         self._prev_above: Optional[bool] = None
+        self._last_upper: Optional[float] = None
+        self._last_lower: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         self._closes.append(float(bar.close))
@@ -40,6 +42,8 @@ class BollingerReversionStrategy(Strategy):
         std = math.sqrt(variance)
         upper = mean + self.num_std * std
         lower = mean - self.num_std * std
+        self._last_upper = upper
+        self._last_lower = lower
         close = closes[-1]
 
         below = close < lower
@@ -58,6 +62,9 @@ class BollingerReversionStrategy(Strategy):
         if prev_above and not above:
             return Signal(action=SignalAction.SELL)
         return Signal(action=SignalAction.HOLD)
+
+    def debug_state(self) -> dict[str, Optional[float]]:
+        return {"upper_band": self._last_upper, "lower_band": self._last_lower}
 
 
 __all__ = ["BollingerReversionStrategy"]

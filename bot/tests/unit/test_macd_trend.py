@@ -79,3 +79,13 @@ def test_macd_trend_requires_fast_less_than_slow():
 def test_macd_trend_requires_positive_signal_period():
     with pytest.raises(ValueError):
         MacdTrendStrategy(fast_period=12, slow_period=26, signal_period=0)
+
+
+def test_macd_trend_debug_state_exposes_macd_and_signal():
+    strategy = MacdTrendStrategy(fast_period=2, slow_period=3, signal_period=2)
+    assert strategy.debug_state() == {"macd": None, "signal": None}
+    for close in CLOSES[:4]:  # enough for both macd and signal to be computable
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    state = strategy.debug_state()
+    assert state["macd"] is not None
+    assert state["signal"] is not None

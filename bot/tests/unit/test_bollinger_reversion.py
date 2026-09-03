@@ -71,3 +71,13 @@ def test_bollinger_reversion_requires_period_at_least_two():
 def test_bollinger_reversion_requires_positive_num_std():
     with pytest.raises(ValueError):
         BollingerReversionStrategy(period=20, num_std=0)
+
+
+def test_bollinger_reversion_debug_state_exposes_bands():
+    strategy = BollingerReversionStrategy(period=4, num_std=1.0)
+    assert strategy.debug_state() == {"upper_band": None, "lower_band": None}
+    for close in CLOSES[:4]:  # enough for both bands to be computable
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    state = strategy.debug_state()
+    assert state["upper_band"] is not None
+    assert state["lower_band"] is not None

@@ -48,3 +48,14 @@ def test_donchian_breakout_requires_positive_period():
 
     with pytest.raises(ValueError):
         DonchianBreakoutStrategy(period=0)
+
+
+def test_donchian_breakout_debug_state_exposes_channel():
+    strategy = DonchianBreakoutStrategy(period=2)
+    assert strategy.debug_state() == {"channel_high": None, "channel_low": None}
+    strategy.on_bar(SimpleNamespace(close=10, high=12, low=8), position_state=None)
+    strategy.on_bar(SimpleNamespace(close=10, high=14, low=6), position_state=None)
+    strategy.on_bar(SimpleNamespace(close=10, high=10, low=10), position_state=None)
+    state = strategy.debug_state()
+    assert state["channel_high"] == 14
+    assert state["channel_low"] == 6

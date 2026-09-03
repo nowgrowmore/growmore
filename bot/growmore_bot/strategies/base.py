@@ -44,5 +44,15 @@ class Strategy(ABC):
         """
         raise NotImplementedError
 
+    def debug_state(self) -> dict[str, Optional[float]]:
+        """The strategy's current computed indicator values (e.g. MACD/signal
+        line, fast/slow SMA), for logging/observability -- so a log line can
+        show *why* a signal did or didn't fire, not just that it didn't.
+        Default empty; each strategy overrides with whatever it tracks.
+        Never called from `on_bar` itself -- purely a read-only snapshot for
+        callers like PaperTradingEngine.
+        """
+        return {}
+
 
 __all__ = ["Strategy", "Signal", "SignalAction"]

@@ -64,5 +64,8 @@ class RsiMeanReversionStrategy(Strategy):
             return Signal(action=SignalAction.SELL)
         return Signal(action=SignalAction.HOLD)
 
+    def debug_state(self) -> dict[str, Optional[float]]:
+        return {"rsi": self._prev_rsi}
+
 
 __all__ = ["RsiMeanReversionStrategy"]

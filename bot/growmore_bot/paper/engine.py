@@ -42,6 +42,19 @@ from growmore_bot.strategies.base import SignalAction, Strategy
 logger = logging.getLogger(__name__)
 
 
+def _format_debug_state(strategy: Strategy) -> str:
+    """Render a strategy's `debug_state()` as e.g. "(macd=-12.34 signal=5.67)"
+    for inline logging -- so a log line shows *why* a signal did or didn't
+    fire, not just that it didn't. Empty string if the strategy exposes
+    nothing (debug_state() defaults to {}).
+    """
+    state = strategy.debug_state()
+    if not state:
+        return ""
+    parts = [f"{k}={v:.2f}" if v is not None else f"{k}=n/a" for k, v in state.items()]
+    return "(" + " ".join(parts) + ")"
+
+
 class PaperTradingEngine:
     def __init__(self, dhan_client: Any, session: Any):
         self.dhan_client = dhan_client
@@ -56,14 +69,21 @@ class PaperTradingEngine:
         avg_entry_price: Optional[float] = None,
         paper_position_id: Optional[uuid.UUID] = None,
         cumulative_daily_pnl: float = 0.0,
+        strategy_label: Optional[str] = None,
     ) -> None:
+        # Human-readable identifier for log lines -- "macd_trend v1.0 / GOLDM"
+        # instead of raw UUIDs. `strategy_label` (ideally "name vversion", from
+        # the caller's Strategy row -- see scheduler/run.py) falls back to the
+        # bare strategy_id when not provided (e.g. in tests that don't care).
+        label = f"{strategy_label or config.strategy_id} / {getattr(instrument, 'symbol', instrument)}"
+
         if not config.enabled:
             return
 
         now = datetime.now(timezone.utc)
 
         if cumulative_daily_pnl <= -float(config.daily_loss_limit):
-            self._trip_daily_loss_guard(config, now, cumulative_daily_pnl)
+            self._trip_daily_loss_guard(config, now, cumulative_daily_pnl, label)
             return
 
         quote = self.dhan_client.get_quote(instrument)
@@ -74,37 +94,36 @@ class PaperTradingEngine:
             else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
         )
         signal = strategy.on_bar(quote, position_state)
+        computed = _format_debug_state(strategy)
 
         if signal.action == SignalAction.HOLD:
             # INFO, not DEBUG: fires once per tick per enabled config (every
             # 5 minutes by default), so it's a cheap, useful "still alive and
             # checking" signal in bot.log, not log spam.
-            logger.info(
-                "HOLD -- strategy_id=%s instrument_id=%s ltp=%s",
-                config.strategy_id,
-                config.instrument_id,
-                quote.ltp,
-            )
+            logger.info("%s -- HOLD ltp=%s %s", label, quote.ltp, computed)
             return
 
         size = signal.size or 1
 
         if signal.action == SignalAction.BUY:
             self._handle_buy(
-                config, instrument, quote, current_position_qty, size, now, paper_position_id
+                config, instrument, quote, current_position_qty, size, now, label, computed,
+                paper_position_id,
             )
         elif signal.action == SignalAction.SELL:
             self._handle_sell(
-                instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size, now
+                instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size,
+                now, label, computed,
             )
 
-    def _trip_daily_loss_guard(self, config: Any, now: datetime, cumulative_daily_pnl: float) -> None:
+    def _trip_daily_loss_guard(
+        self, config: Any, now: datetime, cumulative_daily_pnl: float, label: str = ""
+    ) -> None:
         config.enabled = False
         logger.warning(
-            "Daily loss limit tripped -- disabling strategy_id=%s instrument_id=%s "
-            "(cumulative_daily_pnl=%.2f, daily_loss_limit=%.2f)",
-            config.strategy_id,
-            config.instrument_id,
+            "%s -- DAILY LOSS LIMIT TRIPPED, disabling (cumulative_daily_pnl=%.2f, "
+            "daily_loss_limit=%.2f)",
+            label or config.strategy_id,
             cumulative_daily_pnl,
             float(config.daily_loss_limit),
         )
@@ -130,17 +149,18 @@ class PaperTradingEngine:
         current_position_qty: float,
         size: float,
         now: datetime,
+        label: str = "",
+        computed: str = "",
         paper_position_id: Optional[uuid.UUID] = None,
     ) -> None:
         new_total = current_position_qty + size
         if new_total > float(config.max_position_size):
             logger.warning(
-                "BUY signal REJECTED (max_position_size) -- strategy_id=%s instrument_id=%s "
-                "requested_total=%s max_position_size=%s",
-                config.strategy_id,
-                config.instrument_id,
+                "%s -- BUY REJECTED (max_position_size): requested_total=%s max_position_size=%s %s",
+                label or config.strategy_id,
                 new_total,
                 float(config.max_position_size),
+                computed,
             )
             self.session.add(
                 AuditLog(
@@ -158,11 +178,11 @@ class PaperTradingEngine:
             return
 
         logger.info(
-            "BUY signal filled -- strategy_id=%s instrument_id=%s qty=%s price=%s",
-            config.strategy_id,
-            config.instrument_id,
+            "%s -- BUY FILLED qty=%s price=%s %s",
+            label or config.strategy_id,
             size,
             quote.ltp,
+            computed,
         )
 
         if current_position_qty == 0 or paper_position_id is None:
@@ -215,6 +235,8 @@ class PaperTradingEngine:
         quote: Any,
         size: float,
         now: datetime,
+        label: str = "",
+        computed: str = "",
     ) -> None:
         if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
             return  # Nothing open to close -- no shorting.
@@ -235,12 +257,13 @@ class PaperTradingEngine:
         self.session.add(position)
 
         logger.info(
-            "SELL signal filled -- position_id=%s qty=%s price=%s pnl=%.2f %s",
-            paper_position_id,
+            "%s -- SELL FILLED qty=%s price=%s pnl=%.2f %s %s",
+            label or paper_position_id,
             close_qty,
             quote.ltp,
             pnl,
             "(position closed)" if remaining_qty <= 0 else f"(remaining_qty={remaining_qty})",
+            computed,
         )
 
         self.session.add(
