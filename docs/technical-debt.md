@@ -28,3 +28,12 @@
   resolves to the same database for Development/Preview/Production. Low risk today (schema only,
   no real trading data yet), but must be fixed — enable per-branch Neon databases — before this
   matters (i.e. before real paper-trading data accumulates that a preview deploy could corrupt).
+- **Production dashboard has no access control yet — do not promote to production until this is
+  resolved.** The dashboard shows trading data and has a real write path (enable/disable strategies,
+  edit risk limits via `bot_config`). Vercel Authentication (SSO) already protects Preview
+  deployments, but extending it to Production requires a paid Vercel plan — attempted via API and
+  confirmed blocked: `"Vercel Authentication is not available on your plan for production
+  deployments"` (the `beautifulforce` team is on Hobby). Owner plans to upgrade to Vercel Pro
+  "in a few days" (as of 2026-09-02) and enable Vercel Authentication on Production at that point —
+  see `docs/pending-actions.md`. Until then, the `main` branch should not be promoted to production,
+  since the live URL would be publicly reachable with no auth.

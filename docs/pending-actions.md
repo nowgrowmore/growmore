@@ -45,5 +45,14 @@ continues in parallel so everything is ready to switch on the moment API access 
 - [ ] Re-review risk controls (max daily loss, per-order size caps) before any real capital is at risk.
 
 ## Infrastructure setup (one-time)
-- [ ] Confirm Vercel account access for creating a new project for this dashboard.
-- [ ] Confirm Neon account/project access for a new database for this project (separate from other projects, per isolation convention).
+- [x] Vercel project `growmore-dashboard` created (team `beautifulforce`), GitHub-connected, Neon
+  Postgres provisioned and migrated.
+- [ ] **Upgrade the `beautifulforce` Vercel team to Pro**, then enable Vercel Authentication (SSO)
+  on Production deployments (Project Settings → Deployment Protection → set to cover Production).
+  You said you'll do this "in a few days" (as of 2026-09-02). **Do not merge to `main`/promote to
+  production before this is done** — right now the dashboard has a real write path (enable/disable
+  strategies, edit risk limits) and no access control on production, only on Preview. See
+  `docs/technical-debt.md`.
+- [ ] Once on Pro and Vercel Authentication is enabled for Production, confirm only your account
+  (and anyone else you intend) is a member of the `beautifulforce` Vercel team, since team
+  membership is what gates access.
