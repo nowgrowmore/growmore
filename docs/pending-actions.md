@@ -23,17 +23,22 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 ## Before enabling anything beyond paper trading
 - [ ] Decide per-strategy virtual capital and risk limits (defaults are placeholders in `bot/growmore_bot/config.py` — currently ₹5,00,000 per strategy, review before relying on the numbers).
-- [x] First real backtest run completed 2026-09-03 (1 year of daily bars, Gold Mini / Silver Mini /
-  Crude Oil Mini × SMA Crossover / Donchian Breakout). Results only had 4-7 closed trades per pair —
-  too small a sample to act on yet. See the run's output; not yet persisted anywhere durable
-  (was run against a throwaway local Postgres, not Neon) — re-run and persist properly before using
-  these numbers to enable anything.
+- [x] Real 5-year backtest completed and **persisted to the real Neon database** 2026-09-03: 6
+  backtest runs (Gold Mini / Silver Mini / Crude Oil Mini × SMA Crossover / Donchian Breakout),
+  184 trades, 6,754 equity-curve points, visible now on the dashboard's Backtests page. Standout so
+  far: **Gold Mini + Donchian Breakout** (Sharpe 0.85, profit factor 8.80, 60% win rate, 25 trades).
+  Clear negative: **Crude Oil Mini + SMA Crossover** (Sharpe -0.26, profit factor 0.65, losing money
+  over the period). Caveats before acting on any of this: (1) the window includes the historic
+  Jan 30, 2026 gold/silver crash and Apr 2026 oil crash — real events, confirmed via news, not a
+  data error, but still a lot of influence from one extraordinary period; (2) 6 combinations were
+  compared and the best one highlighted — a "multiple comparisons" trap, so the Gold/Donchian result
+  needs out-of-sample validation (e.g. does it still hold training on the first 3 years and testing
+  on the last 2?) before it should influence what gets enabled for paper trading.
 - [ ] Decide the initial commodity list to actually trade (current default: Gold Mini, Silver Mini,
   Crude Oil Mini — Natural Gas intentionally dropped).
 - [ ] Decide whether to invest in a continuous/rolled futures series (splicing consecutive expired
-  contract-months together) for deeper backtest history — each live contract's own historical data
-  is bounded to its own listing period (~1 year for the current Gold Mini contract), not the full
-  5 years Dhan advertises for the Data API in general.
+  contract-months together) — turned out not to be needed: real per-contract history already goes
+  back the full 5 years Dhan advertises (confirmed 2026-09-03), so this is no longer a blocker.
 
 ## Before any real (live) order placement — not in scope yet
 - [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs.

@@ -22,20 +22,23 @@
 - **No reconciliation between paper positions and any real broker state** — by design, since no
   real orders are placed, but this means the moment live trading is introduced, a reconciliation
   layer must be built from scratch.
-- **Preview deployments share the same Neon database as production.** The Vercel↔Neon marketplace
-  integration was installed without enabling "create a branch per preview deployment" (a setting in
-  the integration's Storage-tab settings in the Vercel dashboard), so `DATABASE_URL` currently
-  resolves to the same database for Development/Preview/Production. Low risk today (schema only,
-  no real trading data yet), but must be fixed — enable per-branch Neon databases — before this
-  matters (i.e. before real paper-trading data accumulates that a preview deploy could corrupt).
-- **Per-contract historical depth is bounded by that contract's own listing period, not 5 years.**
-  Dhan's Data API advertises up to 5 years of historical data in general, but that's per security ID,
-  and each MCX FUTCOM contract-month is its own security ID that stops existing at expiry. Verified
-  2026-09-03: the current Gold Mini front-month contract has ~1 year of real history (its own
-  listing period), not 5. Meaningful longer-horizon backtesting needs a continuous/rolled series
-  (splicing consecutive expired contracts together) — not built yet. `default_commodity_universe` in
-  `bot/growmore_bot/config.py` now holds real security IDs for the current front-month contracts
-  (looked up 2026-09-03) instead of placeholders; these **will need updating at each contract roll**.
+- **Preview deployments share the same Neon database as production, and it now holds real data.**
+  The Vercel↔Neon marketplace integration was installed without enabling "create a branch per
+  preview deployment," so `DATABASE_URL` resolves to the same database for
+  Development/Preview/Production. This stopped being a purely theoretical risk on 2026-09-03: the
+  real 5-year backtest run (6 backtest_runs, 184 backtest_trades, 6,754 equity_curve_points) is now
+  persisted in that one shared database. A preview deploy that writes test data, or a migration
+  applied against the wrong environment, can now corrupt or delete real results. Fix — enable
+  per-branch Neon databases — before running more backtests or enabling paper trading.
+- **Historical data actually does go back the full 5 years Dhan advertises**, per the current
+  front-month contract's security ID (verified 2026-09-03: 1,263 daily bars, 2021-09 to 2026-09,
+  for Gold Mini's security ID `569003`) — an earlier note here wrongly concluded it was capped at
+  ~1 year, from only having tested a 365-day request. The large single-day moves that initially
+  looked like a possible data-splice artifact (checked 2026-09-03) turned out to be real, confirmed
+  market events (the Jan 30, 2026 gold/silver crash and the Apr 2026 oil crash) — not a data quality
+  issue. `default_commodity_universe` in `bot/growmore_bot/config.py` holds real security IDs for the
+  current front-month contracts (looked up 2026-09-03) instead of placeholders; these **will need
+  updating at each contract roll** regardless of how far back history goes.
 - **Production dashboard has no access control yet — do not promote to production until this is
   resolved.** The dashboard shows trading data and has a real write path (enable/disable strategies,
   edit risk limits via `bot_config`). Vercel Authentication (SSO) already protects Preview
