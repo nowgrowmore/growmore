@@ -39,8 +39,13 @@ Plain-language list of things only you can do or decide. Updated as the project 
   earlier, smaller 6-run pass that had wrongly favored Gold Mini + Donchian Breakout before the
   lot-size bug (see `docs/technical-debt.md`) was fixed and before RSI/MACD/Bollinger strategies
   existed to compare against.
-- [ ] Decide the initial commodity list to actually trade (current default: Gold Mini, Silver Mini,
-  Crude Oil Mini — Natural Gas intentionally dropped).
+- [x] **3 `bot_config` pairs enabled for paper trading** (2026-09-03), ₹2,50,000 virtual capital /
+  1 lot max / ₹15,000 daily loss limit each: MACD (5,13,5) + Gold Mini (the top backtest pick),
+  RSI Mean-Reversion (7, 30/70) + Copper, and MACD (12,26,9) + Aluminium Mini — the latter two
+  chosen because real live data showed them genuinely close to a signal (RSI at 26 vs. a 30
+  threshold; MACD/signal gap of ~0.2), specifically to see different strategy behaviors (a
+  mean-reversion strategy vs. two different MACD parameterizations) play out for real, not just in
+  backtest. All three ticking correctly as of this check.
 - [ ] Decide whether to invest in a continuous/rolled futures series (splicing consecutive expired
   contract-months together) — turned out not to be needed: real per-contract history already goes
   back the full 5 years Dhan advertises (confirmed 2026-09-03), so this is no longer a blocker.
