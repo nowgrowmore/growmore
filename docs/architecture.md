@@ -39,10 +39,12 @@ flowchart LR
 - **Backtest engine** (`bot/growmore_bot/backtest/`): replays historical bars, computes Sharpe/
   drawdown/win-rate/profit-factor, persists results for the dashboard's Backtests page.
 - **Paper trading engine** (`bot/growmore_bot/paper/`): on each scheduler tick, fetches live quotes
-  for enabled (strategy, instrument) pairs, simulates a fill at LTP, updates positions/P&L, enforces
-  risk guards (max position size, daily loss limit).
+  for enabled (strategy, instrument) pairs, simulates a fill at LTP, updates positions/P&L (including
+  marking open positions to market every tick, not just on a fill), enforces risk guards (max
+  position size, daily loss limit, pre-expiry close-out).
 - **Scheduler** (`bot/growmore_bot/scheduler/`): market-hours-aware polling loop, not a tick-driven
-  daemon — deliberately not HFT.
+  daemon — deliberately not HFT. Also enforces `contract_rollover.py`'s pre-expiry close-out guard
+  (mirrors Dhan's real MCX delivery rules) before evaluating any strategy for a given config.
 - **Dashboard** (`dashboard/`): Next.js on Vercel, reads the shared Postgres schema, writes only to
   `bot_config` (enable/disable toggles).
 - **Database**: Neon Postgres, shared schema, bot owns migrations (Alembic).

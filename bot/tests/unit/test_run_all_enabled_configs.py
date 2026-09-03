@@ -19,7 +19,7 @@ ever sees the live quote.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -145,6 +145,58 @@ def test_cumulative_daily_pnl_sums_only_todays_sells_for_this_pair(session):
     result = _cumulative_daily_pnl(session, strategy.id, instrument.id, now)
 
     assert result == pytest.approx(-2000)
+
+
+def test_past_close_out_cutoff_force_closes_open_position_and_skips_strategy(session):
+    # GOLDM (bullion): close-out cutoff is 8 trading days before expiry --
+    # see contract_rollover.py. Use an expiry far enough in the past that
+    # "now" is comfortably past that cutoff.
+    strategy, instrument, config = _make_strategy_instrument_config(
+        session, "macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}
+    )
+    instrument.symbol = "GOLDM"
+    instrument.contract_expiry = date(2026, 1, 9)  # long past -- any "now" in this test is after it
+    session.add(instrument)
+
+    position = PaperPosition(
+        id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
+        status="open", quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, opened_at=datetime.now(MCX_TZ) - timedelta(days=1), closed_at=None,
+    )
+    session.add(position)
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+
+    run_all_enabled_configs(session, dhan_client, now=datetime.now(MCX_TZ))
+
+    session.refresh(position)
+    assert position.status == "closed"
+    assert float(position.quantity) == pytest.approx(0)
+    # Strategy warm-up/evaluation must be skipped entirely for a config
+    # past its close-out cutoff -- no historical fetch, no fresh entries.
+    dhan_client.get_historical_ohlc.assert_not_called()
+
+
+def test_past_close_out_cutoff_blocks_new_entries_when_no_open_position(session):
+    strategy, instrument, config = _make_strategy_instrument_config(
+        session, "always_flip", {}
+    )
+    instrument.symbol = "GOLDM"
+    instrument.contract_expiry = date(2026, 1, 9)
+    session.add(instrument)
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+
+    run_all_enabled_configs(session, dhan_client, now=datetime.now(MCX_TZ))
+
+    # always_flip would BUY given the chance (no open position) -- but a
+    # config past its close-out cutoff must never open a fresh position.
+    assert session.query(PaperPosition).count() == 0
+    dhan_client.get_quote.assert_not_called()
 
 
 def test_warm_up_strategy_replays_historical_bars_in_order():

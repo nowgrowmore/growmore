@@ -359,6 +359,79 @@ def test_partial_sell_recomputes_unrealized_pnl_on_remaining_quantity():
     assert float(existing_position.unrealized_pnl) == pytest.approx(1_000_000)
 
 
+def test_force_close_for_expiry_closes_position_and_records_pnl():
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.force_close_for_expiry(
+        config=config, instrument=instrument, current_position_qty=1,
+        avg_entry_price=150000, paper_position_id=existing_position.id,
+    )
+
+    # (155000 - 150000) * 1 lot * 100 (lot size) = 500,000
+    assert float(existing_position.realized_pnl) == pytest.approx(500_000)
+    assert existing_position.status == "closed"
+    assert existing_position.closed_at is not None
+    assert existing_position.quantity == 0
+    assert float(existing_position.unrealized_pnl) == pytest.approx(0)
+
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert float(added_orders[0].pnl) == pytest.approx(500_000)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "contract_expiry_close_out"
+
+
+def test_force_close_for_expiry_is_noop_with_no_open_position():
+    config = _bot_config()
+    instrument = _instrument(config)
+    dhan_client = MagicMock()
+    session = MagicMock()
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.force_close_for_expiry(
+        config=config, instrument=instrument, current_position_qty=0,
+        avg_entry_price=None, paper_position_id=None,
+    )
+
+    dhan_client.get_quote.assert_not_called()
+    session.add.assert_not_called()
+
+
+def test_force_close_for_expiry_is_logged_at_warning_level(caplog):
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    with caplog.at_level("WARNING"):
+        engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+        engine.force_close_for_expiry(
+            config=config, instrument=instrument, current_position_qty=1,
+            avg_entry_price=150000, paper_position_id=existing_position.id,
+        )
+
+    assert any("EXPIRY CLOSE-OUT" in r.message for r in caplog.records)
+
+
 def test_buy_fill_is_logged_at_info_level(caplog):
     # Found while running the bot for real: nothing was ever logged when a
     # trade actually happened -- you'd only find out by checking the

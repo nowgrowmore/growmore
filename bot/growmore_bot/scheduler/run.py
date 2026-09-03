@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
+from growmore_bot.scheduler.contract_rollover import is_past_close_out_cutoff
 from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open
 
 logger = logging.getLogger(__name__)
@@ -125,13 +126,6 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         if strategy_row is None or instrument is None:
             continue
 
-        builder = strategy_builders.get(strategy_row.name)
-        if builder is None:
-            logger.warning("Unknown strategy %s, skipping", strategy_row.name)
-            continue
-        strategy = builder(strategy_row.params or {})
-        _warm_up_strategy(strategy, dhan_client, instrument, now)
-
         open_position = (
             session.query(PaperPosition)
             .filter_by(
@@ -144,6 +138,32 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         current_qty = float(open_position.quantity) if open_position else 0.0
         avg_entry_price = float(open_position.avg_entry_price) if open_position else None
         position_id = open_position.id if open_position else None
+
+        label = f"{strategy_row.name} {strategy_row.version} / {instrument.symbol}"
+        if is_past_close_out_cutoff(instrument.symbol, instrument.contract_expiry, now.date()):
+            # Dhan does not permit physical delivery for retail clients --
+            # see growmore_bot.scheduler.contract_rollover. Force-close
+            # whatever's open and never evaluate the strategy at all this
+            # tick, so no fresh position can be opened either. Resumes
+            # automatically once this instrument's security_id/
+            # contract_expiry are rolled to the next contract month.
+            engine.force_close_for_expiry(
+                config=config,
+                instrument=instrument,
+                current_position_qty=current_qty,
+                avg_entry_price=avg_entry_price,
+                paper_position_id=position_id,
+                label=label,
+            )
+            continue
+
+        builder = strategy_builders.get(strategy_row.name)
+        if builder is None:
+            logger.warning("Unknown strategy %s, skipping", strategy_row.name)
+            continue
+        strategy = builder(strategy_row.params or {})
+        _warm_up_strategy(strategy, dhan_client, instrument, now)
+
         daily_pnl = _cumulative_daily_pnl(session, config.strategy_id, config.instrument_id, now)
 
         engine.process_tick(

@@ -138,6 +138,71 @@ class PaperTradingEngine:
             (float(ltp) - float(position.avg_entry_price)) * float(position.quantity) * lot_size
         )
 
+    def force_close_for_expiry(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        paper_position_id: Optional[uuid.UUID],
+        label: str = "",
+    ) -> None:
+        """Force-close an open position ahead of Dhan's own pre-expiry
+        square-off (see growmore_bot.scheduler.contract_rollover) --
+        compulsory-delivery MCX contracts are never actually deliverable for
+        retail clients, so a position left open into the close-out window
+        would, in real trading, simply be liquidated by the broker anyway.
+        No-op if there's nothing open to close.
+        """
+        if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
+            return
+
+        now = datetime.now(timezone.utc)
+        quote = self.dhan_client.get_quote(instrument)
+        pnl = (float(quote.ltp) - float(avg_entry_price)) * current_position_qty * instrument.lot_size
+
+        position = self.session.get(PaperPosition, paper_position_id)
+        position.realized_pnl = float(position.realized_pnl or 0) + pnl
+        position.quantity = 0
+        position.status = "closed"
+        position.closed_at = now
+        self._mark_to_market(position, quote.ltp, instrument.lot_size)
+        self.session.add(position)
+
+        logger.warning(
+            "%s -- EXPIRY CLOSE-OUT qty=%s price=%s pnl=%.2f (contract nearing MCX Tender "
+            "Period -- Dhan does not permit physical delivery for retail clients)",
+            label or paper_position_id,
+            current_position_qty,
+            quote.ltp,
+            pnl,
+        )
+
+        self.session.add(
+            PaperOrder(
+                id=uuid.uuid4(),
+                paper_position_id=paper_position_id,
+                side="sell",
+                quantity=current_position_qty,
+                simulated_fill_price=quote.ltp,
+                filled_at=now,
+                pnl=pnl,
+            )
+        )
+        self.session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                ts=now,
+                event_type="contract_expiry_close_out",
+                payload={
+                    "strategy_id": str(config.strategy_id),
+                    "instrument_id": str(config.instrument_id),
+                    "quantity": current_position_qty,
+                    "pnl": pnl,
+                },
+            )
+        )
+
     def _trip_daily_loss_guard(
         self, config: Any, now: datetime, cumulative_daily_pnl: float, label: str = ""
     ) -> None:

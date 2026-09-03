@@ -49,6 +49,17 @@ Plain-language list of things only you can do or decide. Updated as the project 
 - [ ] Decide whether to invest in a continuous/rolled futures series (splicing consecutive expired
   contract-months together) — turned out not to be needed: real per-contract history already goes
   back the full 5 years Dhan advertises (confirmed 2026-09-03), so this is no longer a blocker.
+- [ ] **Contract rollover reminder — no calendar alert exists yet.** As of 2026-09-03 the 8
+  configured commodities' current-contract expiries are: Crude Oil Mini 2026-09-21, Nickel
+  2026-09-16, Copper/Zinc Mini/Aluminium Mini/Lead Mini 2026-09-30, Gold Mini 2026-10-05, Silver
+  Mini 2026-11-30. Per `docs/technical-debt.md`'s contract-rollover guard, each one will
+  automatically force-close any open paper position and stop taking new trades roughly 6 (base
+  metals)/8 (bullion) trading days before its own expiry — Crude Oil Mini never gets force-closed
+  (cash-settled, no delivery risk). **When that happens, ask the agent to roll it**: look up the
+  next front-month `security_id` from Dhan's instrument master and update that instrument's
+  `security_id`/`contract_expiry` in the database — the same `bot_config` picks it up automatically,
+  no other change needed. Nickel and Crude Oil Mini will need this first, likely mid-to-late
+  September 2026.
 
 ## Before any real (live) order placement — not in scope yet
 - [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs.
