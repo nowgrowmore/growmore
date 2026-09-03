@@ -3,16 +3,24 @@ cumulative-daily-P&L helper.
 
 Uses a real (in-memory SQLite) session rather than mocking the ORM query
 chain -- this is exactly the kind of wiring where deep mocks would have
-hidden the two real bugs found while first setting up real paper trading:
+hidden real bugs found while first setting up real paper trading:
 (1) three of the five strategies (RSI, MACD, Bollinger) were missing from
 `strategy_builders` entirely, so a bot_config using any of them was silently
 skipped every tick; (2) `cumulative_daily_pnl` was hardcoded to 0.0, so the
-daily_loss_limit guard never actually tripped.
+daily_loss_limit guard never actually tripped; (3) the most severe one --
+a brand-new strategy instance is built every tick (deliberately, to keep
+the scheduler stateless), which meant an indicator needing N bars of
+history (e.g. MACD needs 13+) was fed exactly one live price per tick and
+discarded, so it could NEVER accumulate enough history to produce a real
+signal, no matter how long the bot ran. Fixed by `_warm_up_strategy`
+replaying real historical daily bars into the fresh strategy before it
+ever sees the live quote.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,7 +36,11 @@ from growmore_bot.persistence.models import (
     PaperPosition,
     Strategy,
 )
-from growmore_bot.scheduler.run import _cumulative_daily_pnl, run_all_enabled_configs
+from growmore_bot.scheduler.run import (
+    _cumulative_daily_pnl,
+    _warm_up_strategy,
+    run_all_enabled_configs,
+)
 
 MCX_TZ = timezone(timedelta(hours=5, minutes=30))
 
@@ -132,3 +144,68 @@ def test_cumulative_daily_pnl_sums_only_todays_sells_for_this_pair(session):
     result = _cumulative_daily_pnl(session, strategy.id, instrument.id, now)
 
     assert result == pytest.approx(-2000)
+
+
+def test_warm_up_strategy_replays_historical_bars_in_order():
+    seen_closes = []
+
+    class _SpyStrategy:
+        def on_bar(self, bar, position_state):
+            seen_closes.append(bar.close)
+            from growmore_bot.strategies.base import Signal, SignalAction
+
+            return Signal(action=SignalAction.HOLD)
+
+    bars = [SimpleNamespace(close=c) for c in [10, 20, 30]]
+    dhan_client = MagicMock()
+    dhan_client.get_historical_ohlc.return_value = bars
+    instrument = SimpleNamespace(id=uuid.uuid4())
+
+    _warm_up_strategy(_SpyStrategy(), dhan_client, instrument, datetime.now(MCX_TZ))
+
+    assert seen_closes == [10, 20, 30]
+    # Warm-up must stop at yesterday -- today's live quote is fed separately
+    # as today's still-forming bar (see PaperTradingEngine).
+    call_kwargs = dhan_client.get_historical_ohlc.call_args.kwargs
+    assert call_kwargs["to_date"] < datetime.now(MCX_TZ).date().isoformat()
+
+
+def test_warm_up_strategy_swallows_fetch_errors():
+    class _NeverCalledStrategy:
+        def on_bar(self, bar, position_state):
+            raise AssertionError("on_bar should never be called if the fetch failed")
+
+    dhan_client = MagicMock()
+    dhan_client.get_historical_ohlc.side_effect = RuntimeError("network error")
+    instrument = SimpleNamespace(id=uuid.uuid4())
+
+    # Must not raise -- a warm-up hiccup on one tick shouldn't crash the scheduler.
+    _warm_up_strategy(_NeverCalledStrategy(), dhan_client, instrument, datetime.now(MCX_TZ))
+
+
+def test_run_all_enabled_configs_actually_produces_a_signal_after_warm_up(session):
+    # This is the end-to-end regression test for the critical bug: before
+    # the fix, this would NEVER produce a trade no matter how it was run,
+    # because a fresh, empty strategy was evaluated against exactly one
+    # live price per tick.
+    strategy, instrument, config = _make_strategy_instrument_config(
+        session, "sma_crossover", {"fast_period": 2, "slow_period": 3}
+    )
+
+    dhan_client = MagicMock()
+    # Constant history -> fast==slow (not >), so _prev_fast_above_slow ends up False.
+    dhan_client.get_historical_ohlc.return_value = [
+        SimpleNamespace(close=10) for _ in range(4)
+    ]
+    # A sharp live move flips fast (SMA2(10,100)=55) above slow (SMA3(10,10,100)=40)
+    # -- a fresh cross from False to True, i.e. a real BUY signal.
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+
+    run_all_enabled_configs(session, dhan_client)
+
+    positions = session.query(PaperPosition).filter_by(
+        strategy_id=strategy.id, instrument_id=instrument.id
+    ).all()
+    assert len(positions) == 1
+    assert positions[0].status == "open"
+    assert float(positions[0].avg_entry_price) == pytest.approx(100)

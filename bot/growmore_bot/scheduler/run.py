@@ -7,12 +7,16 @@ does anything when `is_market_open()` says MCX is trading.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open
 
 logger = logging.getLogger(__name__)
+
+# Longest lookback any strategy variant in the parameter grid needs (Donchian
+# period=55) plus real margin for weekends/MCX holidays.
+DEFAULT_WARMUP_LOOKBACK_DAYS = 150
 
 
 def tick(run_all_configs: Callable[[], None], now: Optional[datetime] = None) -> None:
@@ -46,6 +50,42 @@ def _cumulative_daily_pnl(session: Any, strategy_id: Any, instrument_id: Any, no
         .all()
     )
     return sum(float(r[0]) for r in rows)
+
+
+def _warm_up_strategy(strategy: Any, dhan_client: Any, instrument: Any, now: datetime) -> None:
+    """Rebuild a freshly-constructed strategy's indicator state from real
+    historical daily bars, up to (not including) today.
+
+    A fresh strategy instance is built every tick (see
+    run_all_enabled_configs) so the scheduler itself stays stateless -- but
+    without this, an indicator needing N bars of history (e.g. MACD needs
+    13+) would be fed exactly one live price per tick and thrown away,
+    never accumulating enough history to produce a real signal no matter
+    how long the bot ran. Found running this for real the first time --
+    see docs/technical-debt.md. Stops at yesterday's close since the live
+    quote fed right after this call represents today's still-forming bar,
+    matching what the backtest engine's next-bar-open fill discipline
+    assumes: one bar per day, not one bar per 5-minute poll.
+
+    Failures here are swallowed (logged, not raised) -- a warm-up hiccup on
+    one tick shouldn't crash the whole scheduler; the next tick tries again
+    with a fresh fetch.
+    """
+    to_date = (now.date() - timedelta(days=1)).isoformat()
+    from_date = (now.date() - timedelta(days=DEFAULT_WARMUP_LOOKBACK_DAYS)).isoformat()
+    try:
+        bars = dhan_client.get_historical_ohlc(
+            instrument, from_date=from_date, to_date=to_date, interval="day"
+        )
+    except Exception:
+        logger.exception(
+            "Failed to fetch warm-up history for instrument_id=%s -- strategy will run unwarmed "
+            "this tick",
+            getattr(instrument, "id", instrument),
+        )
+        return
+    for bar in bars:
+        strategy.on_bar(bar, None)
 
 
 def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[datetime] = None) -> None:
@@ -87,6 +127,7 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
             logger.warning("Unknown strategy %s, skipping", strategy_row.name)
             continue
         strategy = builder(strategy_row.params or {})
+        _warm_up_strategy(strategy, dhan_client, instrument, now)
 
         open_position = (
             session.query(PaperPosition)

@@ -22,6 +22,22 @@
 - **No reconciliation between paper positions and any real broker state** — by design, since no
   real orders are placed, but this means the moment live trading is introduced, a reconciliation
   layer must be built from scratch.
+- **(Fixed 2026-09-03, but worth remembering) A fresh strategy instance used to be built every
+  scheduler tick with zero warm-up.** `run_all_enabled_configs` deliberately keeps the scheduler
+  stateless — position state comes from `paper_positions`, not memory — but that meant every
+  strategy's indicator state (fast/slow EMAs, RSI averages, Donchian channel, etc.) was also
+  rebuilt from nothing every 5 minutes and fed exactly one live price before being discarded. Since
+  every one of the 5 strategies needs multiple bars of history before it can even compute a value
+  (MACD needs 13+), **the bot could have run indefinitely — sleep or no sleep — and never generated
+  a single real trade signal.** Found while running it for real for the first time. Fixed by
+  `_warm_up_strategy` (`bot/growmore_bot/scheduler/run.py`): each tick now fetches ~150 days of
+  real historical daily bars and replays them into the fresh strategy before evaluating the live
+  quote as today's still-forming bar. This also means the bot's readiness is independent of process
+  uptime — a restart after any length of sleep warms up identically from real history.
+  **Known follow-up, not yet done**: this refetches ~150 days of daily bars from Dhan on every tick
+  for every enabled config — correct, but wasteful (the historical portion barely changes
+  intraday). Caching per calendar day would cut this dramatically; not needed at today's scale
+  (one bot_config, ticks every 5 minutes), worth doing before enabling several strategies at once.
 - **Preview deployments share the same Neon database as production, and it now holds real data.**
   The Vercel↔Neon marketplace integration was installed without enabling "create a branch per
   preview deployment," so `DATABASE_URL` resolves to the same database for
