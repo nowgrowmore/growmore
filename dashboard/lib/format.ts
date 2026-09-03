@@ -1,4 +1,5 @@
 import type { BacktestRun, PaperPosition } from "./types";
+import { getStrategyInfo } from "./strategy-info";
 
 // Pure formatting/aggregation helpers. These operate on already-fetched rows
 // (numeric columns arrive as strings — see lib/types.ts) so they're testable
@@ -56,6 +57,25 @@ export function formatStrategyParams(
     .sort()
     .map((key) => `${key}=${params[key]}`)
     .join(", ");
+}
+
+/** Multi-line, human-readable explanation of a strategy's parameters for a
+ * hover tooltip, e.g. "fast_period=5 -- Bars averaged for the quick-reacting
+ * moving average...". Falls back to the plain key=value label (no
+ * explanation available) for a strategy name not in STRATEGY_INFO. */
+export function formatStrategyParamsTooltip(
+  strategyName: string,
+  params: Record<string, number | string> | null | undefined
+): string {
+  if (!params || Object.keys(params).length === 0) return "";
+  const info = getStrategyInfo(strategyName);
+  return Object.keys(params)
+    .sort()
+    .map((key) => {
+      const paramInfo = info?.params[key];
+      return paramInfo ? `${key}=${params[key]} -- ${paramInfo.explain}` : `${key}=${params[key]}`;
+    })
+    .join("\n");
 }
 
 /** "9 Sep 2025 → 1 Sep 2026" style label for a backtest's price-data window

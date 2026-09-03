@@ -8,6 +8,7 @@ import {
   formatNumber,
   formatProfitFactor,
   formatStrategyParams,
+  formatStrategyParamsTooltip,
   sortBacktestRuns,
   summarizePositions,
   toNumber,
@@ -209,5 +210,26 @@ describe("formatDateRange", () => {
   it("renders an em dash when either bound is missing", () => {
     expect(formatDateRange(null, "2026-09-01T00:00:00Z")).toBe("—");
     expect(formatDateRange("2025-09-02T00:00:00Z", undefined)).toBe("—");
+  });
+});
+
+describe("formatStrategyParamsTooltip", () => {
+  it("explains each param for a known strategy, sorted by key", () => {
+    const tooltip = formatStrategyParamsTooltip("sma_crossover", {
+      slow_period: 20,
+      fast_period: 5,
+    });
+    const lines = tooltip.split("\n");
+    expect(lines[0]).toBe("fast_period=5 -- Bars averaged for the quick-reacting moving average. Smaller = reacts sooner, but more false signals.");
+    expect(lines[1]).toBe("slow_period=20 -- Bars averaged for the baseline moving average it's compared against. Larger = smoother, slower to react.");
+  });
+
+  it("falls back to a plain key=value line for an unrecognized strategy", () => {
+    expect(formatStrategyParamsTooltip("some_future_strategy", { x: 1 })).toBe("x=1");
+  });
+
+  it("returns an empty string for missing or empty params", () => {
+    expect(formatStrategyParamsTooltip("sma_crossover", null)).toBe("");
+    expect(formatStrategyParamsTooltip("sma_crossover", {})).toBe("");
   });
 });

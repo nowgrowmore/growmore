@@ -8,10 +8,12 @@ import {
   formatPercent,
   formatProfitFactor,
   formatStrategyParams,
+  formatStrategyParamsTooltip,
   sortBacktestRuns,
   toNumber,
   type BacktestSortKey,
 } from "@/lib/format";
+import { STRATEGY_INFO } from "@/lib/strategy-info";
 
 export const dynamic = "force-dynamic";
 
@@ -125,10 +127,13 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
           <tbody>
             {sorted.map((run) => (
               <tr key={run.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
-                <td className="px-3 py-2">
+                <td className="px-3 py-2" title={run.strategy_name ? STRATEGY_INFO[run.strategy_name]?.summary : undefined}>
                   {run.strategy_name} <span className="text-[color:var(--text-muted)]">v{run.strategy_version}</span>
                 </td>
-                <td className="px-3 py-2 text-[color:var(--text-secondary)]">
+                <td
+                  className="px-3 py-2 text-[color:var(--text-secondary)]"
+                  title={formatStrategyParamsTooltip(run.strategy_name ?? "", run.strategy_params) || undefined}
+                >
                   {formatStrategyParams(run.strategy_params)}
                 </td>
                 <td className="px-3 py-2">{run.instrument_symbol}</td>
@@ -173,6 +178,28 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
           </Fragment>
         ))}
       </dl>
+
+      <div className="rounded-lg border border-[color:var(--border-hairline)] bg-[color:var(--surface-1)] p-4">
+        <h3 className="mb-3 text-sm font-semibold">Strategy reference</h3>
+        <div className="flex flex-col gap-4">
+          {Object.entries(STRATEGY_INFO).map(([name, info]) => (
+            <div key={name}>
+              <p className="text-sm font-medium">{info.label}</p>
+              <p className="text-sm text-[color:var(--text-secondary)]">{info.summary}</p>
+              <dl className="mt-1 grid grid-cols-1 gap-x-4 gap-y-1 pl-3 text-xs sm:grid-cols-[max-content_1fr]">
+                {Object.entries(info.params).map(([key, param]) => (
+                  <Fragment key={key}>
+                    <dt className="text-[color:var(--text-muted)]">
+                      {key} <span className="italic">({param.label})</span>
+                    </dt>
+                    <dd className="text-[color:var(--text-secondary)] sm:col-start-2">{param.explain}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
