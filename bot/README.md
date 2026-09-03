@@ -42,6 +42,37 @@ before running the bot for the first time.
 placeholder values (a fake Dhan token, a local Postgres URL) so the test
 suite can run without real secrets.
 
+### Daily access-token refresh
+
+Dhan access tokens expire every 24 hours. Two optional settings enable
+**automatic** refresh so you don't have to regenerate one by hand each
+morning -- see `growmore_bot/broker/token_refresh.py`:
+
+- `DHAN_PIN` -- your Dhan trading PIN.
+- `DHAN_TOTP_SECRET` -- the raw base32 seed shown alongside the QR code when
+  you set up TOTP on Dhan (`web.dhan.co` -> Profile -> DhanHQ Trading APIs ->
+  Set-up TOTP). **Not** a live 6-digit code -- most authenticator apps don't
+  let you view this again once scanned, so if you don't have it saved,
+  reset TOTP on Dhan to get a fresh one, and save the text key this time
+  (a password manager, not a plain note).
+
+Add both to the repo-root `.env.local`. With them set, the running bot
+(`python -m growmore_bot.main`) checks every tick and refreshes automatically
+whenever the token is within 2 hours of expiring -- no separate daily step.
+Without them, the bot behaves as before: it raises a clear
+`DhanTokenExpiredError` once the token actually expires, and you regenerate
+one manually via `web.dhan.co`.
+
+You can also run the refresh check on its own (e.g. from a daily cron job
+before market open, or just to check status):
+
+```bash
+python -m growmore_bot.broker.token_refresh
+```
+
+It never prints the PIN, TOTP secret, or the token itself -- only whether a
+refresh happened.
+
 `growmore_bot/config.py` also ships default trading parameters: ₹5,00,000
 virtual capital, a 5-minute polling interval, MCX market hours
 (09:00-23:30 IST), and a default commodity universe (Gold Mini, Silver Mini,

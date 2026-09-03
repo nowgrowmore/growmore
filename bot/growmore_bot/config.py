@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     dhan_client_id: str = Field(validation_alias="DHAN_CLIENT_ID")
     dhan_access_token: str = Field(validation_alias="DHAN_ACCESS_TOKEN")
     dhan_env: Literal["sandbox", "production"] = Field(validation_alias="DHAN_ENV")
+    # Only needed for headless daily token refresh (see
+    # growmore_bot/broker/token_refresh.py) -- optional so Settings() keeps
+    # working for everything else without them configured.
+    dhan_pin: str | None = Field(default=None, validation_alias="DHAN_PIN")
+    dhan_totp_secret: str | None = Field(default=None, validation_alias="DHAN_TOTP_SECRET")
 
     # --- Database ---
     database_url: str = Field(validation_alias="DATABASE_URL")

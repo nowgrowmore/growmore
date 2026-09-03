@@ -115,21 +115,50 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
 
 
 def start(poll_interval_seconds: Optional[int] = None) -> None:
-    """Start the APScheduler polling loop. Blocks forever; run as the main process."""
+    """Start the APScheduler polling loop. Blocks forever; run as the main process.
+
+    Settings are re-read fresh from disk every tick (cheap -- just parses the
+    env file, no network call) rather than captured once at startup, so a
+    long-running process picks up a token refreshed by
+    growmore_bot.broker.token_refresh -- either run separately (e.g. a daily
+    cron before market open) or automatically here each tick if DHAN_PIN and
+    DHAN_TOTP_SECRET are configured. Without those two set, this falls back
+    to the old behaviour: refresh_access_token_if_needed() raises a clear
+    error once the token actually expires, same as before.
+    """
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     from growmore_bot.broker.dhan_client import DhanClient
-    from growmore_bot.config import Settings
+    from growmore_bot.broker.token_refresh import DhanTokenRefreshError, refresh_if_needed
+    from growmore_bot.config import _REPO_ROOT_ENV_LOCAL, Settings
     from growmore_bot.persistence.db import session_scope
 
-    settings = Settings()
-    interval = poll_interval_seconds or settings.default_polling_interval_seconds
-    dhan_client = DhanClient(
-        client_id=settings.dhan_client_id, access_token=settings.dhan_access_token
-    )
+    initial_settings = Settings()
+    interval = poll_interval_seconds or initial_settings.default_polling_interval_seconds
 
     def _job() -> None:
+        settings = Settings()  # re-read each tick to notice an externally-refreshed token
+
+        if settings.dhan_pin and settings.dhan_totp_secret:
+            try:
+                if refresh_if_needed(
+                    current_token=settings.dhan_access_token,
+                    client_id=settings.dhan_client_id,
+                    pin=settings.dhan_pin,
+                    totp_secret=settings.dhan_totp_secret,
+                    env_file=_REPO_ROOT_ENV_LOCAL,
+                ):
+                    settings = Settings()  # re-read again to pick up the just-written token
+            except DhanTokenRefreshError:
+                logger.exception("Automatic Dhan token refresh failed")
+
+        dhan_client = DhanClient(
+            client_id=settings.dhan_client_id, access_token=settings.dhan_access_token
+        )
+        # Final safety check -- raises clearly if the token is still expired
+        # (e.g. PIN/TOTP not configured, or the refresh above just failed).
         dhan_client.refresh_access_token_if_needed()
+
         with session_scope() as session:
             tick(run_all_configs=lambda: run_all_enabled_configs(session, dhan_client))
 
