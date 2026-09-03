@@ -18,7 +18,7 @@ reason.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pyotp
@@ -28,6 +28,7 @@ import responses
 from growmore_bot.broker.token_refresh import (
     DhanTokenRefreshError,
     generate_access_token_via_totp,
+    is_new_trading_day,
     refresh_if_needed,
     write_access_token_to_env_file,
 )
@@ -221,6 +222,51 @@ def test_refresh_if_needed_retries_a_transient_invalid_totp_and_then_succeeds(tm
     assert "token-after-retry" in env_file.read_text()
     assert len(responses.calls) == 2
     assert len(sleeps) == 1  # slept once, between the two attempts
+
+
+@responses.activate
+def test_refresh_if_needed_force_true_ignores_threshold(tmp_path: Path):
+    # SEBI's retail algo API guidance expects an automatic session reset
+    # before each trading day -- force=True is how the scheduler triggers
+    # that, independent of how much validity the current token has left.
+    env_file = tmp_path / ".env.local"
+    current_token = _make_jwt(datetime.now(timezone.utc) + timedelta(hours=20))
+    env_file.write_text(f"DHAN_ACCESS_TOKEN={current_token}\n")
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"accessToken": "forced-fresh-session-token", "expiryTime": "2026-09-04T12:00:00Z"},
+        status=200,
+    )
+
+    refreshed = refresh_if_needed(
+        current_token=current_token,
+        client_id="1113562866",
+        pin="1234",
+        totp_secret=TOTP_SECRET,
+        env_file=env_file,
+        threshold=timedelta(hours=2),
+        force=True,
+    )
+
+    assert refreshed is True
+    assert "forced-fresh-session-token" in env_file.read_text()
+
+
+def test_is_new_trading_day_true_when_never_reset():
+    assert is_new_trading_day(None, date(2026, 9, 4)) is True
+
+
+def test_is_new_trading_day_false_on_same_day():
+    assert is_new_trading_day(date(2026, 9, 4), date(2026, 9, 4)) is False
+
+
+def test_is_new_trading_day_true_on_later_day():
+    assert is_new_trading_day(date(2026, 9, 3), date(2026, 9, 4)) is True
+
+
+def test_is_new_trading_day_false_if_somehow_earlier():
+    assert is_new_trading_day(date(2026, 9, 5), date(2026, 9, 4)) is False
 
 
 @responses.activate

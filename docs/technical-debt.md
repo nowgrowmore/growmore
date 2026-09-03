@@ -17,7 +17,11 @@
   table and `bot.log`, which should cover the "keep audit-ready logs" expectation, but this hasn't
   been checked against Dhan's specific technical requirements for 2FA/OAuth on API sessions — worth
   confirming with Dhan directly before live trading, since our current setup uses a long-lived access
-  token refreshed via TOTP, not a per-session OAuth+2FA flow).
+  token refreshed via TOTP, not a per-session OAuth+2FA flow). **(Fixed 2026-09-04)** the "automatic
+  session reset before each trading day" expectation specifically: `scheduler/run.py`'s `start()` now
+  forces a fresh Dhan session via `token_refresh.refresh_if_needed(force=True)` once per IST calendar
+  day (`token_refresh.is_new_trading_day`), independent of how much validity the current token has
+  left — previously it only ever refreshed reactively, within 2 hours of expiry.
 - **Dhan sandbox not used for market data.** Confirmed via Dhan docs that sandbox fills all orders
   at a fixed ₹100 and does not provide real quotes — unsuitable for realistic paper-trade
   simulation. We use the production Data API (read-only) for real prices instead; see
@@ -94,14 +98,21 @@
      gets force-squared-off ~8 trading days before expiry, base metals ~6, both well ahead of Dhan's
      own forced square-off; Crude Oil Mini is cash-settled and gets no forced close-out, matching
      Dhan's own behavior) and `run_all_enabled_configs` force-closes any open position and skips
-     strategy evaluation entirely (no fresh entries) for a config past that cutoff. **Rolling to the
-     next contract month is still a manual step**: once a symbol hits its cutoff, someone (the agent,
-     on request) looks up the next front-month `security_id` from Dhan's instrument master the same
-     way the current 8 were sourced, and updates that one `instruments` row's `security_id` +
-     `contract_expiry` in place — `bot_config` keeps the same `instrument_id` FK throughout, so
-     existing enabled configs resume trading automatically the moment the row is updated, no other
-     change needed. No calendar reminder exists yet for when each of the 8 commodities' current
-     contracts will need this — see `docs/pending-actions.md`.
+     strategy evaluation entirely (no fresh entries) for a config past that cutoff. **(Fixed
+     2026-09-04) Rolling to the next contract month is now automatic**, attempted on every tick a
+     config is past its cutoff: `growmore_bot/broker/instrument_master.py` downloads Dhan's real
+     public instrument master CSV (schema confirmed against a live file 2026-09-04) and
+     `contract_rollover.roll_to_next_contract()` finds the immediate next MCX FUTCOM contract for
+     that symbol, **validates it with a real live quote request before committing anything**, and
+     only then updates that one `instruments` row's `security_id`/`contract_expiry` in place (writing
+     an audit_log `contract_rolled` entry) — `bot_config` keeps the same `instrument_id` FK
+     throughout, so existing enabled configs resume trading automatically, no other change needed.
+     Refuses to guess and falls back to the pre-existing manual process (someone looks up the next
+     `security_id` by hand and updates the row) whenever the match is ambiguous, the fetch fails, or
+     the candidate's quote looks implausible — logged as a warning either way. Known minor
+     inefficiency: refetches the ~200k-line CSV every tick while stuck in this fallback state, which
+     only happens during the few days between hitting cutoff and a successful roll — not worth
+     caching given how rarely and briefly this occurs.
   4. **No handling of MCX special/shortened sessions** (e.g. Muhurat trading, circular-announced
      early closures for specific events) — these aren't predictable from a weekday+holiday-list
      check alone and would need to be sourced from MCX's own circulars if this ever matters for a

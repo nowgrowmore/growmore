@@ -147,6 +147,23 @@ def test_cumulative_daily_pnl_sums_only_todays_sells_for_this_pair(session):
     assert result == pytest.approx(-2000)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_instrument_master_network_calls(monkeypatch):
+    # run_all_enabled_configs fetches Dhan's real instrument master over the
+    # network when a config is past its close-out cutoff (see
+    # test_past_close_out_cutoff_attempts_automatic_rollover for the one test
+    # that overrides this to verify the attempt itself) -- never allow that
+    # in the rest of this file's tests, which mock the Dhan client entirely.
+    from growmore_bot.scheduler import run as run_module
+
+    monkeypatch.setattr(
+        run_module,
+        "fetch_instrument_master_csv",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected real instrument-master fetch")),
+        raising=False,
+    )
+
+
 def test_past_close_out_cutoff_force_closes_open_position_and_skips_strategy(session):
     # GOLDM (bullion): close-out cutoff is 8 trading days before expiry --
     # see contract_rollover.py. Use an expiry far enough in the past that
@@ -177,6 +194,34 @@ def test_past_close_out_cutoff_force_closes_open_position_and_skips_strategy(ses
     # Strategy warm-up/evaluation must be skipped entirely for a config
     # past its close-out cutoff -- no historical fetch, no fresh entries.
     dhan_client.get_historical_ohlc.assert_not_called()
+
+
+def test_past_close_out_cutoff_attempts_automatic_rollover(session, monkeypatch):
+    strategy, instrument, config = _make_strategy_instrument_config(session, "always_flip", {})
+    instrument.symbol = "GOLDM"
+    instrument.contract_expiry = date(2026, 1, 9)
+    session.add(instrument)
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+
+    from growmore_bot.scheduler import run as run_module
+
+    monkeypatch.setattr(
+        run_module, "fetch_instrument_master_csv", lambda: "FAKE_CSV", raising=False
+    )
+    roll_calls = []
+
+    def _fake_roll(session_arg, dhan_client_arg, instrument_arg, csv_text):
+        roll_calls.append((instrument_arg.symbol, csv_text))
+        return False  # no real CSV to roll against in this test -- just verify it's attempted
+
+    monkeypatch.setattr(run_module, "roll_to_next_contract", _fake_roll, raising=False)
+
+    run_all_enabled_configs(session, dhan_client, now=datetime.now(MCX_TZ))
+
+    assert roll_calls == [("GOLDM", "FAKE_CSV")]
 
 
 def test_past_close_out_cutoff_blocks_new_entries_when_no_open_position(session):

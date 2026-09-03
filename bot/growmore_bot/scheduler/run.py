@@ -7,10 +7,11 @@ does anything when `is_market_open()` says MCX is trading.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 
-from growmore_bot.scheduler.contract_rollover import is_past_close_out_cutoff
+from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
+from growmore_bot.scheduler.contract_rollover import is_past_close_out_cutoff, roll_to_next_contract
 from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open
 
 logger = logging.getLogger(__name__)
@@ -155,6 +156,20 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
                 paper_position_id=position_id,
                 label=label,
             )
+            try:
+                csv_text = fetch_instrument_master_csv()
+                roll_to_next_contract(session, dhan_client, instrument, csv_text)
+            except Exception:
+                # A failed automatic rollover attempt (network hiccup, Dhan's
+                # instrument master temporarily unreachable, etc.) just means
+                # this tick falls back to the existing manual process -- the
+                # close-out guard above already made sure nothing unsafe
+                # happens in the meantime. Retried again next tick.
+                logger.exception(
+                    "Automatic contract rollover attempt failed for %s -- will retry next tick "
+                    "(manual rollover remains available in the meantime)",
+                    label,
+                )
             continue
 
         builder = strategy_builders.get(strategy_row.name)
@@ -190,21 +205,37 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
     DHAN_TOTP_SECRET are configured. Without those two set, this falls back
     to the old behaviour: refresh_access_token_if_needed() raises a clear
     error once the token actually expires, same as before.
+
+    Also forces a fresh session once per calendar day (IST), independent of
+    how much validity the current token has left -- SEBI's retail algo API
+    guidance expects an automatic session reset before each trading day, not
+    just a reactive refresh once a token is about to expire. Tracked via
+    `last_forced_reset_date`, held in this closure -- resets to None (so the
+    very next tick forces a reset) whenever the process restarts, which is
+    itself a reasonable proxy for "start of a fresh session" too.
     """
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     from growmore_bot.broker.dhan_client import DhanClient
-    from growmore_bot.broker.token_refresh import DhanTokenRefreshError, refresh_if_needed
+    from growmore_bot.broker.token_refresh import (
+        DhanTokenRefreshError,
+        is_new_trading_day,
+        refresh_if_needed,
+    )
     from growmore_bot.config import _REPO_ROOT_ENV_LOCAL, Settings
     from growmore_bot.persistence.db import session_scope
 
     initial_settings = Settings()
     interval = poll_interval_seconds or initial_settings.default_polling_interval_seconds
+    last_forced_reset_date: Optional[date] = None
 
     def _job() -> None:
+        nonlocal last_forced_reset_date
         settings = Settings()  # re-read each tick to notice an externally-refreshed token
 
         if settings.dhan_pin and settings.dhan_totp_secret:
+            today = datetime.now(MCX_TIMEZONE).date()
+            force = is_new_trading_day(last_forced_reset_date, today)
             try:
                 if refresh_if_needed(
                     current_token=settings.dhan_access_token,
@@ -212,8 +243,11 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
                     pin=settings.dhan_pin,
                     totp_secret=settings.dhan_totp_secret,
                     env_file=_REPO_ROOT_ENV_LOCAL,
+                    force=force,
                 ):
                     settings = Settings()  # re-read again to pick up the just-written token
+                    if force:
+                        last_forced_reset_date = today
             except DhanTokenRefreshError:
                 logger.exception("Automatic Dhan token refresh failed")
 

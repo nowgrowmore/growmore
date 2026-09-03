@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -99,6 +99,17 @@ def write_access_token_to_env_file(env_file: Path, new_token: str) -> None:
     env_file.write_text("".join(lines))
 
 
+def is_new_trading_day(last_reset_date: Optional[date], today: date) -> bool:
+    """True if `today` is a later calendar day than the last time a forced
+    daily session reset happened (or none has happened yet this process).
+
+    Used to satisfy SEBI's retail algo API guidance for an automatic
+    session reset before each trading day, independent of how much validity
+    the current access token has left -- see `refresh_if_needed(force=...)`.
+    """
+    return last_reset_date is None or today > last_reset_date
+
+
 def refresh_if_needed(
     current_token: str,
     client_id: str,
@@ -110,10 +121,17 @@ def refresh_if_needed(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    force: bool = False,
 ) -> bool:
     """Refresh the access token (and update `env_file`) if it's within
-    `threshold` of expiring, or already expired. Returns True if a refresh
-    happened, False if the current token still has enough time left.
+    `threshold` of expiring, already expired, or `force=True`. Returns True
+    if a refresh happened, False if the current token still has enough time
+    left (never the case when `force=True`).
+
+    `force=True` exists for `scheduler.run`'s daily session-reset check (see
+    `is_new_trading_day`) -- SEBI's retail algo API guidance expects an
+    automatic session reset before each trading day, not just a reactive
+    refresh once a token is about to expire.
 
     Retries up to `max_attempts` times on failure -- observed for real that
     a valid TOTP code can be rejected by a fluke of timing (see module
@@ -123,9 +141,10 @@ def refresh_if_needed(
     `env_file` is left untouched in that case.
     """
     now = now or datetime.now(timezone.utc)
-    exp = _decode_jwt_exp(current_token)
-    if exp is not None and now < exp - threshold:
-        return False
+    if not force:
+        exp = _decode_jwt_exp(current_token)
+        if exp is not None and now < exp - threshold:
+            return False
 
     last_error: Optional[DhanTokenRefreshError] = None
     for attempt in range(1, max_attempts + 1):
@@ -150,6 +169,7 @@ __all__ = [
     "generate_access_token_via_totp",
     "write_access_token_to_env_file",
     "refresh_if_needed",
+    "is_new_trading_day",
     "DEFAULT_REFRESH_THRESHOLD",
 ]
 
