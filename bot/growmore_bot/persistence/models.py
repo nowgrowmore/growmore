@@ -161,6 +161,11 @@ class PaperOrder(Base):
     quantity: Mapped[float] = mapped_column(Numeric, nullable=False)
     simulated_fill_price: Mapped[float] = mapped_column(Numeric, nullable=False)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Realized P&L this specific sell fill locked in (lot-size-scaled), NULL
+    # for buy fills. Needed to compute a strategy/instrument's cumulative
+    # *daily* P&L for the daily_loss_limit risk guard -- PaperPosition only
+    # tracks cumulative-ever realized_pnl, not a per-day breakdown.
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
     paper_position: Mapped["PaperPosition"] = relationship(back_populates="orders")
 

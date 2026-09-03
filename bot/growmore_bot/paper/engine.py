@@ -17,6 +17,17 @@ On each scheduler tick, for a given (bot_config, instrument, strategy):
 This module never calls Dhan's Order API -- `dhan_client` is expected to be a
 growmore_bot.broker.dhan_client.DhanClient (or a mock of one in tests), whose
 wrapper only exposes Data API methods in the first place.
+
+Units: `size` (from Signal.size, default 1) and every `quantity`/
+`max_position_size` value are in human-friendly LOT units -- "2" means 2
+lots, matching what someone configuring bot_config would expect, not 2 raw
+grams/kg/barrels. `instrument.lot_size` (the real MCX contract unit, e.g.
+Gold Mini=100g) only scales the computed rupee P&L on a sell/close -- the
+same real-vs-raw-unit fix already applied to BacktestEngine (see
+docs/technical-debt.md). Found and fixed together with a second real gap:
+`_handle_sell` used to only ever write a PaperOrder row and never actually
+closed the PaperPosition or recorded realized P&L, so a position would
+stay "open" forever with nothing tracked.
 """
 from __future__ import annotations
 
@@ -67,9 +78,13 @@ class PaperTradingEngine:
         size = signal.size or 1
 
         if signal.action == SignalAction.BUY:
-            self._handle_buy(config, instrument, quote, current_position_qty, size, now)
+            self._handle_buy(
+                config, instrument, quote, current_position_qty, size, now, paper_position_id
+            )
         elif signal.action == SignalAction.SELL:
-            self._handle_sell(current_position_qty, paper_position_id, quote, size, now)
+            self._handle_sell(
+                instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size, now
+            )
 
     def _trip_daily_loss_guard(self, config: Any, now: datetime, cumulative_daily_pnl: float) -> None:
         config.enabled = False
@@ -95,6 +110,7 @@ class PaperTradingEngine:
         current_position_qty: float,
         size: float,
         now: datetime,
+        paper_position_id: Optional[uuid.UUID] = None,
     ) -> None:
         new_total = current_position_qty + size
         if new_total > float(config.max_position_size):
@@ -113,8 +129,8 @@ class PaperTradingEngine:
             )
             return
 
-        position_id = uuid.uuid4()
-        if current_position_qty == 0:
+        if current_position_qty == 0 or paper_position_id is None:
+            position_id = uuid.uuid4()
             self.session.add(
                 PaperPosition(
                     id=position_id,
@@ -129,6 +145,20 @@ class PaperTradingEngine:
                     closed_at=None,
                 )
             )
+        else:
+            # Adding to an existing position -- blend the average entry price
+            # over the combined quantity rather than leaving the position's
+            # own quantity/avg_entry_price stale (a real gap found while
+            # first wiring up real paper trading).
+            position_id = paper_position_id
+            position = self.session.get(PaperPosition, paper_position_id)
+            blended_avg = (
+                float(position.avg_entry_price) * current_position_qty + float(quote.ltp) * size
+            ) / new_total
+            position.avg_entry_price = blended_avg
+            position.quantity = new_total
+            self.session.add(position)
+
         self.session.add(
             PaperOrder(
                 id=uuid.uuid4(),
@@ -142,23 +172,41 @@ class PaperTradingEngine:
 
     def _handle_sell(
         self,
+        instrument: Any,
         current_position_qty: float,
+        avg_entry_price: Optional[float],
         paper_position_id: Optional[uuid.UUID],
         quote: Any,
         size: float,
         now: datetime,
     ) -> None:
-        if current_position_qty <= 0 or paper_position_id is None:
+        if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
             return  # Nothing open to close -- no shorting.
+
+        close_qty = min(size, current_position_qty)
+        remaining_qty = current_position_qty - close_qty
+        # Real rupee P&L needs the instrument's real lot size (e.g. Gold
+        # Mini=100g) -- `close_qty` itself stays in lot units.
+        pnl = (float(quote.ltp) - float(avg_entry_price)) * close_qty * instrument.lot_size
+
+        position = self.session.get(PaperPosition, paper_position_id)
+        position.realized_pnl = float(position.realized_pnl or 0) + pnl
+        position.quantity = remaining_qty
+        if remaining_qty <= 0:
+            position.status = "closed"
+            position.closed_at = now
+            position.unrealized_pnl = 0
+        self.session.add(position)
 
         self.session.add(
             PaperOrder(
                 id=uuid.uuid4(),
                 paper_position_id=paper_position_id,
                 side="sell",
-                quantity=min(size, current_position_qty),
+                quantity=close_qty,
                 simulated_fill_price=quote.ltp,
                 filled_at=now,
+                pnl=pnl,
             )
         )
 

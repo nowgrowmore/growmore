@@ -24,7 +24,31 @@ def tick(run_all_configs: Callable[[], None], now: Optional[datetime] = None) ->
     run_all_configs()
 
 
-def run_all_enabled_configs(session: Any, dhan_client: Any) -> None:
+def _cumulative_daily_pnl(session: Any, strategy_id: Any, instrument_id: Any, now: datetime) -> float:
+    """Sum today's (MCX-timezone calendar day) realized P&L for this
+    strategy/instrument pair, from PaperOrder.pnl (set only on sell fills --
+    see PaperTradingEngine._handle_sell). PaperPosition.realized_pnl is
+    cumulative-ever, not per-day, so it can't answer "has today breached the
+    daily loss limit" on its own.
+    """
+    from growmore_bot.persistence.models import PaperOrder, PaperPosition
+
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (
+        session.query(PaperOrder.pnl)
+        .join(PaperPosition, PaperOrder.paper_position_id == PaperPosition.id)
+        .filter(
+            PaperPosition.strategy_id == strategy_id,
+            PaperPosition.instrument_id == instrument_id,
+            PaperOrder.filled_at >= day_start,
+            PaperOrder.pnl.isnot(None),
+        )
+        .all()
+    )
+    return sum(float(r[0]) for r in rows)
+
+
+def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[datetime] = None) -> None:
     """Fetch every enabled bot_config row and run one paper-trading tick each.
 
     Strategy instances are built fresh each tick from `strategies.name` +
@@ -33,12 +57,20 @@ def run_all_enabled_configs(session: Any, dhan_client: Any) -> None:
     """
     from growmore_bot.paper.engine import PaperTradingEngine
     from growmore_bot.persistence.models import BotConfig, Instrument, PaperPosition, Strategy
+    from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
+    from growmore_bot.strategies.macd_trend import MacdTrendStrategy
+    from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
     from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
+
+    now = now or datetime.now(MCX_TIMEZONE)
 
     strategy_builders: dict[str, Callable[[dict], Any]] = {
         "sma_crossover": lambda params: SmaCrossoverStrategy(**params),
         "donchian_breakout": lambda params: DonchianBreakoutStrategy(**params),
+        "rsi_mean_reversion": lambda params: RsiMeanReversionStrategy(**params),
+        "macd_trend": lambda params: MacdTrendStrategy(**params),
+        "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
     }
 
     engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
@@ -68,6 +100,7 @@ def run_all_enabled_configs(session: Any, dhan_client: Any) -> None:
         current_qty = float(open_position.quantity) if open_position else 0.0
         avg_entry_price = float(open_position.avg_entry_price) if open_position else None
         position_id = open_position.id if open_position else None
+        daily_pnl = _cumulative_daily_pnl(session, config.strategy_id, config.instrument_id, now)
 
         engine.process_tick(
             config=config,
@@ -76,6 +109,7 @@ def run_all_enabled_configs(session: Any, dhan_client: Any) -> None:
             current_position_qty=current_qty,
             avg_entry_price=avg_entry_price,
             paper_position_id=position_id,
+            cumulative_daily_pnl=daily_pnl,
         )
     session.commit()
 
