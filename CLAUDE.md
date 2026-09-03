@@ -44,9 +44,11 @@ Vercel/Neon for analytics. See `docs/architecture.md` for the full picture.
 
 ## Compliance context (why some things are gated)
 
-- SEBI requires every API-placed order to carry an exchange-assigned Algo-ID starting 2026-04-01.
-  This project is paper-trading only for now — that requirement is tracked in
-  `docs/technical-debt.md` as a gate for a future live-trading phase, not implemented.
+- SEBI requires every API-placed order to carry an exchange-assigned Algo-ID starting 2026-04-01 —
+  but self-built "White Box" strategies under 10 orders/second (this bot, by a wide margin) are
+  exempt from formal exchange strategy registration; static IP, 2FA/OAuth API sessions, and audit
+  logging still apply. This project is paper-trading only for now — see `docs/technical-debt.md` and
+  `docs/pending-actions.md` for the full picture before any live-trading phase.
 - Dhan mandates a static IP for its Order APIs. The bot currently runs on the owner's local machine
   (no static IP) and only calls read-only Data APIs (quotes/historical) — this is intentional, not
   an oversight, and is also tracked in `docs/technical-debt.md`.

@@ -62,8 +62,18 @@ Plain-language list of things only you can do or decide. Updated as the project 
   September 2026.
 
 ## Before any real (live) order placement — not in scope yet
-- [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs.
-- [ ] SEBI Algo-ID registration/tagging becomes mandatory from 2026-04-01 for API-placed orders.
+- [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs, and this turns out to be
+  part of SEBI's Algo-ID framework's requirements too, not just a Dhan-specific policy.
+- [ ] **SEBI Algo-ID — smaller lift than originally thought, verified 2026-09-04.** This bot's order
+  rate (polls every 5 minutes) is nowhere near the 10-orders/second-per-exchange threshold that
+  triggers formal exchange strategy registration, and a self-built strategy like this one qualifies
+  as "White Box" (transparent logic, not sold to others) — the lighter-touch category. So the
+  multi-week exchange-approval process most articles describe likely does NOT apply here. What's
+  still needed: (1) the static IP above, (2) confirm with Dhan directly what their specific
+  2FA/OAuth-based API session requirements are for retail algo API access — our current setup uses a
+  long-lived access token refreshed via TOTP, which may not satisfy a per-session OAuth+2FA
+  expectation, worth a direct check before going live, (3) keep the existing `audit_log`/`bot.log`
+  trail, which should already cover the "audit-ready logs" expectation.
 - [ ] Re-review risk controls (max daily loss, per-order size caps) before any real capital is at risk.
 
 ## Infrastructure setup (one-time)

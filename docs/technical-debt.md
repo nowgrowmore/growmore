@@ -4,8 +4,20 @@
   only). Blocks real order placement, which Dhan requires a static IP for. Plan: move to a small
   VPS with an elastic/static IP when live trading is actually pursued — no code change needed, just
   the new host.
-- **No SEBI Algo-ID handling.** Required for any API-placed order from 2026-04-01. Not needed for
-  paper trading (we never call the Order API), but must be built before any live-trading phase.
+- **No SEBI Algo-ID handling.** Not needed for paper trading (we never call the Order API). Verified
+  2026-09-04 that this is a much smaller lift than first assumed: SEBI's framework exempts self-built
+  "White Box" strategies (logic transparent to the owner, not sold to others — this bot qualifies)
+  from formal exchange strategy registration as long as order rate stays under **10 orders/second per
+  exchange per client** — this bot polls every 5 minutes, nowhere near that threshold, so no
+  multi-week exchange-approval process is expected to apply before live trading. What DOES still
+  apply regardless of the exemption: a static IP whitelisted with the broker (see the item above —
+  same underlying requirement, now confirmed to be part of this SEBI framework too, not just a
+  Dhan-specific policy), 2FA on every API session, OAuth-based authentication (not a long-lived bare
+  API key), and broker-side order tagging/audit logging (the bot already keeps its own `audit_log`
+  table and `bot.log`, which should cover the "keep audit-ready logs" expectation, but this hasn't
+  been checked against Dhan's specific technical requirements for 2FA/OAuth on API sessions — worth
+  confirming with Dhan directly before live trading, since our current setup uses a long-lived access
+  token refreshed via TOTP, not a per-session OAuth+2FA flow).
 - **Dhan sandbox not used for market data.** Confirmed via Dhan docs that sandbox fills all orders
   at a fixed ₹100 and does not provide real quotes — unsuitable for realistic paper-trade
   simulation. We use the production Data API (read-only) for real prices instead; see
