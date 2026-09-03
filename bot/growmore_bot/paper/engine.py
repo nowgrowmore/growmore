@@ -31,12 +31,15 @@ stay "open" forever with nothing tracked.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from growmore_bot.persistence.models import AuditLog, PaperOrder, PaperPosition
 from growmore_bot.strategies.base import SignalAction, Strategy
+
+logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
@@ -73,6 +76,15 @@ class PaperTradingEngine:
         signal = strategy.on_bar(quote, position_state)
 
         if signal.action == SignalAction.HOLD:
+            # INFO, not DEBUG: fires once per tick per enabled config (every
+            # 5 minutes by default), so it's a cheap, useful "still alive and
+            # checking" signal in bot.log, not log spam.
+            logger.info(
+                "HOLD -- strategy_id=%s instrument_id=%s ltp=%s",
+                config.strategy_id,
+                config.instrument_id,
+                quote.ltp,
+            )
             return
 
         size = signal.size or 1
@@ -88,6 +100,14 @@ class PaperTradingEngine:
 
     def _trip_daily_loss_guard(self, config: Any, now: datetime, cumulative_daily_pnl: float) -> None:
         config.enabled = False
+        logger.warning(
+            "Daily loss limit tripped -- disabling strategy_id=%s instrument_id=%s "
+            "(cumulative_daily_pnl=%.2f, daily_loss_limit=%.2f)",
+            config.strategy_id,
+            config.instrument_id,
+            cumulative_daily_pnl,
+            float(config.daily_loss_limit),
+        )
         self.session.add(
             AuditLog(
                 id=uuid.uuid4(),
@@ -114,6 +134,14 @@ class PaperTradingEngine:
     ) -> None:
         new_total = current_position_qty + size
         if new_total > float(config.max_position_size):
+            logger.warning(
+                "BUY signal REJECTED (max_position_size) -- strategy_id=%s instrument_id=%s "
+                "requested_total=%s max_position_size=%s",
+                config.strategy_id,
+                config.instrument_id,
+                new_total,
+                float(config.max_position_size),
+            )
             self.session.add(
                 AuditLog(
                     id=uuid.uuid4(),
@@ -128,6 +156,14 @@ class PaperTradingEngine:
                 )
             )
             return
+
+        logger.info(
+            "BUY signal filled -- strategy_id=%s instrument_id=%s qty=%s price=%s",
+            config.strategy_id,
+            config.instrument_id,
+            size,
+            quote.ltp,
+        )
 
         if current_position_qty == 0 or paper_position_id is None:
             position_id = uuid.uuid4()
@@ -197,6 +233,15 @@ class PaperTradingEngine:
             position.closed_at = now
             position.unrealized_pnl = 0
         self.session.add(position)
+
+        logger.info(
+            "SELL signal filled -- position_id=%s qty=%s price=%s pnl=%.2f %s",
+            paper_position_id,
+            close_qty,
+            quote.ltp,
+            pnl,
+            "(position closed)" if remaining_qty <= 0 else f"(remaining_qty={remaining_qty})",
+        )
 
         self.session.add(
             PaperOrder(

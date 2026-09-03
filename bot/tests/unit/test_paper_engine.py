@@ -263,3 +263,75 @@ def test_buy_adding_to_existing_position_blends_avg_entry_price():
     # blended = (150000*1 + 160000*1) / 2 = 155000
     assert existing_position.quantity == 2
     assert float(existing_position.avg_entry_price) == pytest.approx(155000)
+
+
+def test_buy_fill_is_logged_at_info_level(caplog):
+    # Found while running the bot for real: nothing was ever logged when a
+    # trade actually happened -- you'd only find out by checking the
+    # dashboard/database, not bot.log.
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=71234.5, open=71000, high=71500, low=70900, close=71100)
+    session = MagicMock()
+
+    with caplog.at_level("INFO"):
+        engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+        engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert any("BUY signal filled" in r.message for r in caplog.records)
+
+
+def test_hold_signal_is_logged_at_info_level(caplog):
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+
+    with caplog.at_level("INFO"):
+        engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+        engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert any("HOLD" in r.message for r in caplog.records)
+
+
+def test_max_position_size_rejection_is_logged(caplog):
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+
+    with caplog.at_level("INFO"):
+        engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+        engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert any("REJECTED" in r.message for r in caplog.records)
+
+
+def test_sell_fill_is_logged_with_pnl(caplog):
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.SELL, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    with caplog.at_level("INFO"):
+        engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+        engine.process_tick(
+            config=config, instrument=instrument, strategy=strategy,
+            current_position_qty=1, avg_entry_price=150000,
+            paper_position_id=existing_position.id,
+        )
+
+    assert any("SELL signal filled" in r.message for r in caplog.records)

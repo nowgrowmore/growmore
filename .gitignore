@@ -30,3 +30,7 @@ test-results/
 
 # OS
 .DS_Store
+
+# Runtime logs
+bot/bot.log
+*.log
