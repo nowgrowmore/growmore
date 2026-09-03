@@ -76,6 +76,7 @@ def _make_strategy_instrument_config(session, strategy_name, params, enabled=Tru
         ("rsi_mean_reversion", {"period": 7, "oversold": 30, "overbought": 70}),
         ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}),
         ("bollinger_reversion", {"period": 20, "num_std": 2.0}),
+        ("always_flip", {}),
     ],
 )
 def test_all_five_strategies_are_actually_runnable(session, strategy_name, params):

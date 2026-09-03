@@ -97,6 +97,17 @@ class PaperTradingEngine:
         computed = _format_debug_state(strategy)
 
         if signal.action == SignalAction.HOLD:
+            # Mark the open position to market against this tick's real
+            # quote -- HOLD is by far the most common outcome, and until
+            # this was added, unrealized_pnl was only ever written once (as
+            # 0) at open and once more (also 0) at close, so it never
+            # reflected real market movement in between. Found via the
+            # dashboard showing every open position stuck at zero
+            # unrealized P&L.
+            if current_position_qty != 0 and paper_position_id is not None:
+                position = self.session.get(PaperPosition, paper_position_id)
+                self._mark_to_market(position, quote.ltp, instrument.lot_size)
+                self.session.add(position)
             # INFO, not DEBUG: fires once per tick per enabled config (every
             # 5 minutes by default), so it's a cheap, useful "still alive and
             # checking" signal in bot.log, not log spam.
@@ -115,6 +126,17 @@ class PaperTradingEngine:
                 instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size,
                 now, label, computed,
             )
+
+    @staticmethod
+    def _mark_to_market(position: Any, ltp: Any, lot_size: int) -> None:
+        """Recompute a position's unrealized P&L against a real quote.
+
+        Safe to call with quantity=0 (e.g. right after a full close) --
+        yields 0, which is the correct value.
+        """
+        position.unrealized_pnl = (
+            (float(ltp) - float(position.avg_entry_price)) * float(position.quantity) * lot_size
+        )
 
     def _trip_daily_loss_guard(
         self, config: Any, now: datetime, cumulative_daily_pnl: float, label: str = ""
@@ -213,6 +235,7 @@ class PaperTradingEngine:
             ) / new_total
             position.avg_entry_price = blended_avg
             position.quantity = new_total
+            self._mark_to_market(position, quote.ltp, instrument.lot_size)
             self.session.add(position)
 
         self.session.add(
@@ -253,7 +276,7 @@ class PaperTradingEngine:
         if remaining_qty <= 0:
             position.status = "closed"
             position.closed_at = now
-            position.unrealized_pnl = 0
+        self._mark_to_market(position, quote.ltp, instrument.lot_size)
         self.session.add(position)
 
         logger.info(

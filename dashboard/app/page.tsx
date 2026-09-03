@@ -42,26 +42,42 @@ export default async function OverviewPage() {
           <p className="text-sm text-[color:var(--text-muted)]">No open positions.</p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
-            <table className="w-full min-w-[640px] text-sm">
+            <table className="w-full min-w-[820px] text-sm">
               <thead>
                 <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
                   <th className="px-3 py-2 font-medium">Strategy</th>
                   <th className="px-3 py-2 font-medium">Instrument</th>
-                  <th className="px-3 py-2 font-medium text-right">Qty</th>
+                  <th className="px-3 py-2 font-medium">Contract expiry</th>
+                  <th className="px-3 py-2 font-medium text-right">Qty (lots)</th>
                   <th className="px-3 py-2 font-medium text-right">Avg entry</th>
+                  <th className="px-3 py-2 font-medium text-right">Notional exposure</th>
                   <th className="px-3 py-2 font-medium text-right">Unrealized P&amp;L</th>
                 </tr>
               </thead>
               <tbody>
                 {openPositions.map((p) => {
                   const unrealized = toNumber(p.unrealized_pnl);
+                  const lotSize = toNumber(p.instrument_lot_size) || 1;
+                  const notional = toNumber(p.avg_entry_price) * toNumber(p.quantity) * lotSize;
                   return (
                     <tr key={p.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
                       <td className="px-3 py-2">{p.strategy_name}</td>
                       <td className="px-3 py-2">{p.instrument_symbol}</td>
+                      <td className="px-3 py-2 text-[color:var(--text-secondary)]">
+                        {p.contract_expiry
+                          ? new Date(p.contract_expiry).toLocaleDateString("en-GB", {
+                              day: "numeric",
+                              month: "short",
+                              year: "numeric",
+                            })
+                          : "—"}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums">{p.quantity}</td>
                       <td className="px-3 py-2 text-right tabular-nums">
                         {formatCurrency(toNumber(p.avg_entry_price))}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-[color:var(--text-secondary)]">
+                        {formatCurrency(notional)}
                       </td>
                       <td
                         className={`px-3 py-2 text-right tabular-nums ${

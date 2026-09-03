@@ -81,6 +81,18 @@
   only the live scheduler's day/time gating. Priority: #1 and #2 before running unattended into
   November 2026; #3 and #4 are lower priority (rare, and mostly relevant once real order placement
   exists, given the stakes of a session-timing mistake are much higher with real money).
+- **(Fixed 2026-09-03) `unrealized_pnl` was never marked to market for open
+  positions.** `PaperTradingEngine._handle_buy` wrote `unrealized_pnl=0` once
+  at position open and `_handle_sell` reset it to `0` again on close
+  (`bot/growmore_bot/paper/engine.py`), but nothing ever recomputed it in
+  between -- so every open position showed ₹0.00 unrealized P&L on the
+  dashboard no matter how far the real price had moved, while realized P&L
+  (only ever written on a closing sell fill) was correct. Found via the
+  dashboard looking visibly wrong while an `always_flip` demo position was
+  open. Fixed by marking the open position to market against the tick's real
+  quote on every HOLD (the common case, previously not touched at all), and
+  by recomputing it after any partial buy/sell that changes quantity or
+  average entry price (`PaperTradingEngine._mark_to_market`).
 - **Production dashboard has no access control yet — do not promote to production until this is
   resolved.** The dashboard shows trading data and has a real write path (enable/disable strategies,
   edit risk limits via `bot_config`). Vercel Authentication (SSO) already protects Preview

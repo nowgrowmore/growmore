@@ -21,6 +21,8 @@ erDiagram
         text exchange_segment "e.g. MCX_COMM"
         text security_id "Dhan instrument id"
         text name
+        integer lot_size "real MCX contract unit, e.g. Gold Mini=100g"
+        date contract_expiry "current front-month contract's last trading day, display-only"
     }
     STRATEGIES {
         uuid id PK

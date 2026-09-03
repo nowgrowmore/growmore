@@ -13,9 +13,9 @@ growmore_bot/persistence/migrations/ (Alembic).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -47,6 +47,12 @@ class Instrument(Base):
     # at very different price levels (confirmed 2026-09-03: base metals showed implausibly tiny
     # drawdowns purely from this scaling bug). Defaults to 1 for backward compatibility.
     lot_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Current front-month contract's last trading day (from
+    # CommodityPlaceholder.contract_expiry in config.py -- looked up from real
+    # MCX contract specs, never guessed). Nullable: purely informational for
+    # display (dashboard trade log/positions), not read by any trading logic.
+    # Will need updating at each contract roll, same as security_id/lot_size.
+    contract_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     backtest_runs: Mapped[list["BacktestRun"]] = relationship(back_populates="instrument")
     paper_positions: Mapped[list["PaperPosition"]] = relationship(back_populates="instrument")

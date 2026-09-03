@@ -265,6 +265,100 @@ def test_buy_adding_to_existing_position_blends_avg_entry_price():
     assert float(existing_position.avg_entry_price) == pytest.approx(155000)
 
 
+def test_hold_marks_open_position_to_market():
+    # Found via the dashboard: unrealized_pnl was written once at open (as 0)
+    # and never touched again until close (also reset to 0) -- so every open
+    # position showed zero unrealized P&L no matter how far the real price
+    # had moved. HOLD is the most common tick outcome, so this is the case
+    # that matters most.
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000,
+        paper_position_id=existing_position.id,
+    )
+
+    # (155000 - 150000) * 1 lot * 100 (lot size) = 500,000
+    assert float(existing_position.unrealized_pnl) == pytest.approx(500_000)
+
+
+def test_hold_with_no_open_position_does_not_touch_the_db():
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    session.get.assert_not_called()
+
+
+def test_buy_adding_to_existing_position_recomputes_unrealized_pnl():
+    config = _bot_config(max_position_size=10)
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=160000, open=160000, high=160000, low=160000, close=160000)
+    session = MagicMock()
+
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000,
+        paper_position_id=existing_position.id,
+    )
+
+    # blended avg = 155000, new_total = 2 -> (160000-155000)*2*100 = 1,000,000
+    assert float(existing_position.unrealized_pnl) == pytest.approx(1_000_000)
+
+
+def test_partial_sell_recomputes_unrealized_pnl_on_remaining_quantity():
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.SELL, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=3, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=3, avg_entry_price=150000,
+        paper_position_id=existing_position.id,
+    )
+
+    # remaining_qty=2 -> (155000-150000)*2*100 = 1,000,000
+    assert float(existing_position.unrealized_pnl) == pytest.approx(1_000_000)
+
+
 def test_buy_fill_is_logged_at_info_level(caplog):
     # Found while running the bot for real: nothing was ever logged when a
     # trade actually happened -- you'd only find out by checking the

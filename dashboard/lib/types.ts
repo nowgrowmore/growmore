@@ -10,6 +10,8 @@ export interface Instrument {
   exchange_segment: string;
   security_id: string;
   name: string;
+  lot_size: number | string;
+  contract_expiry: string | null;
 }
 
 export interface Strategy {
@@ -73,6 +75,8 @@ export interface PaperPosition {
   // Joined convenience fields.
   strategy_name?: string;
   instrument_symbol?: string;
+  instrument_lot_size?: number | string;
+  contract_expiry?: string | null;
 }
 
 export interface PaperOrder {
@@ -82,10 +86,15 @@ export interface PaperOrder {
   quantity: string;
   simulated_fill_price: string;
   filled_at: string;
+  // Realized P&L this fill locked in (lot-size-scaled); NULL for buy fills.
+  pnl: string | null;
   // Joined convenience fields (populated by getTradeLog()).
   strategy_name?: string;
   instrument_symbol?: string;
   position_status?: "open" | "closed";
+  instrument_lot_size?: number | string;
+  contract_expiry?: string | null;
+  exchange_segment?: string;
 }
 
 export interface BotConfig {

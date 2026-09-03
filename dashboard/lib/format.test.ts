@@ -111,12 +111,54 @@ describe("summarizePositions", () => {
     expect(summary.totalRealizedPnl).toBeCloseTo(300);
   });
 
-  it("returns zeros for an empty list", () => {
+  it("returns zeros/nulls for an empty list", () => {
     expect(summarizePositions([])).toEqual({
       openPositionCount: 0,
       totalUnrealizedPnl: 0,
       totalRealizedPnl: 0,
+      netPnl: 0,
+      closedTradeCount: 0,
+      winRatePct: null,
+      bestTrade: null,
+      worstTrade: null,
     });
+  });
+
+  it("computes net P&L as realized + unrealized", () => {
+    const positions = [
+      makePosition({ id: "1", status: "open", unrealized_pnl: "150.5", realized_pnl: "0" }),
+      makePosition({ id: "2", status: "closed", unrealized_pnl: "0", realized_pnl: "300" }),
+    ];
+
+    expect(summarizePositions(positions).netPnl).toBeCloseTo(450.5);
+  });
+
+  it("computes win rate, best trade, and worst trade across closed positions only", () => {
+    const positions = [
+      makePosition({ id: "1", status: "open", unrealized_pnl: "999", realized_pnl: "0" }),
+      makePosition({ id: "2", status: "closed", realized_pnl: "500" }),
+      makePosition({ id: "3", status: "closed", realized_pnl: "-200" }),
+      makePosition({ id: "4", status: "closed", realized_pnl: "100" }),
+    ];
+
+    const summary = summarizePositions(positions);
+
+    expect(summary.closedTradeCount).toBe(3);
+    // 2 wins (500, 100) out of 3 closed trades
+    expect(summary.winRatePct).toBeCloseTo((2 / 3) * 100);
+    expect(summary.bestTrade).toBeCloseTo(500);
+    expect(summary.worstTrade).toBeCloseTo(-200);
+  });
+
+  it("winRatePct/bestTrade/worstTrade are null when nothing has closed yet", () => {
+    const positions = [makePosition({ id: "1", status: "open", unrealized_pnl: "10" })];
+
+    const summary = summarizePositions(positions);
+
+    expect(summary.closedTradeCount).toBe(0);
+    expect(summary.winRatePct).toBeNull();
+    expect(summary.bestTrade).toBeNull();
+    expect(summary.worstTrade).toBeNull();
   });
 });
 

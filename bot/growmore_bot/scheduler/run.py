@@ -97,6 +97,7 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
     """
     from growmore_bot.paper.engine import PaperTradingEngine
     from growmore_bot.persistence.models import BotConfig, Instrument, PaperPosition, Strategy
+    from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
     from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
     from growmore_bot.strategies.macd_trend import MacdTrendStrategy
@@ -111,6 +112,8 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         "rsi_mean_reversion": lambda params: RsiMeanReversionStrategy(**params),
         "macd_trend": lambda params: MacdTrendStrategy(**params),
         "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
+        # Demo-only, not a real trading strategy -- see always_flip.py.
+        "always_flip": lambda params: AlwaysFlipStrategy(**params),
     }
 
     engine = PaperTradingEngine(dhan_client=dhan_client, session=session)

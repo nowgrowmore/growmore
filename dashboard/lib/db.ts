@@ -74,7 +74,9 @@ export async function getOpenPaperPositions(): Promise<PaperPosition[]> {
     select
       p.*,
       s.name as strategy_name,
-      i.symbol as instrument_symbol
+      i.symbol as instrument_symbol,
+      i.lot_size as instrument_lot_size,
+      i.contract_expiry as contract_expiry
     from paper_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
@@ -90,7 +92,9 @@ export async function getAllPaperPositions(limit = 200): Promise<PaperPosition[]
     select
       p.*,
       s.name as strategy_name,
-      i.symbol as instrument_symbol
+      i.symbol as instrument_symbol,
+      i.lot_size as instrument_lot_size,
+      i.contract_expiry as contract_expiry
     from paper_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
@@ -158,6 +162,9 @@ export async function getTradeLog(limit = 100): Promise<PaperOrder[]> {
       o.*,
       s.name as strategy_name,
       i.symbol as instrument_symbol,
+      i.lot_size as instrument_lot_size,
+      i.contract_expiry as contract_expiry,
+      i.exchange_segment as exchange_segment,
       p.status as position_status
     from paper_orders o
     join paper_positions p on p.id = o.paper_position_id

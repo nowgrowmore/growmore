@@ -95,26 +95,57 @@ export interface PnlSummary {
   openPositionCount: number;
   totalUnrealizedPnl: number;
   totalRealizedPnl: number;
+  /** realized + unrealized across everything passed in. */
+  netPnl: number;
+  closedTradeCount: number;
+  /** % of closed positions with realized_pnl > 0. Null with no closed trades yet -- distinct from 0%. */
+  winRatePct: number | null;
+  /** Highest/lowest realized_pnl among closed positions. Null with no closed trades yet. */
+  bestTrade: number | null;
+  worstTrade: number | null;
 }
 
 /**
  * Aggregate P&L summary cards from a list of paper positions. Realized P&L
  * is summed across ALL positions (open and closed); unrealized P&L only
  * applies to currently open positions but is summed defensively over
- * whatever is passed in, in case a caller already filtered.
+ * whatever is passed in, in case a caller already filtered. Win
+ * rate/best/worst trade only consider CLOSED positions -- an open position's
+ * unrealized P&L hasn't been "won" or "lost" yet.
  */
 export function summarizePositions(positions: PaperPosition[]): PnlSummary {
   let openPositionCount = 0;
   let totalUnrealizedPnl = 0;
   let totalRealizedPnl = 0;
+  let closedTradeCount = 0;
+  let winCount = 0;
+  let bestTrade: number | null = null;
+  let worstTrade: number | null = null;
 
   for (const p of positions) {
     if (p.status === "open") openPositionCount += 1;
     totalUnrealizedPnl += toNumber(p.unrealized_pnl);
     totalRealizedPnl += toNumber(p.realized_pnl);
+
+    if (p.status === "closed") {
+      closedTradeCount += 1;
+      const pnl = toNumber(p.realized_pnl);
+      if (pnl > 0) winCount += 1;
+      bestTrade = bestTrade === null ? pnl : Math.max(bestTrade, pnl);
+      worstTrade = worstTrade === null ? pnl : Math.min(worstTrade, pnl);
+    }
   }
 
-  return { openPositionCount, totalUnrealizedPnl, totalRealizedPnl };
+  return {
+    openPositionCount,
+    totalUnrealizedPnl,
+    totalRealizedPnl,
+    netPnl: totalUnrealizedPnl + totalRealizedPnl,
+    closedTradeCount,
+    winRatePct: closedTradeCount === 0 ? null : (winCount / closedTradeCount) * 100,
+    bestTrade,
+    worstTrade,
+  };
 }
 
 /** Sort key + comparator helpers for the backtests table. */

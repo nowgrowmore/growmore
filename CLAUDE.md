@@ -25,6 +25,11 @@ Vercel/Neon for analytics. See `docs/architecture.md` for the full picture.
   automatically via Vercel's GitHub integration on push — don't try to replicate that manually.
   **Production promotion (`vercel:deploy prod`) requires explicit user confirmation every time** —
   never run it unprompted, even if a task seems to imply "ship it."
+- **Always commit and push work-in-progress changes on the current feature branch** once the local
+  test suites are green, without waiting to be asked — this is what triggers the automatic preview
+  deploy above, and the account owner wants to review changes on a live preview URL as they land, not
+  only when explicitly requested. This still never means pushing directly to `main` or promoting to
+  production — those stay gated exactly as described above.
 - **Keep the docs set current** whenever a change affects it: `docs/architecture.md` (Mermaid
   diagrams), `docs/db-schema.md` (schema/ER), `docs/technical-debt.md` (known shortcuts/deferred
   work), `docs/pending-actions.md` (plain-language items only the account owner can decide/do).
