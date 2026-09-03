@@ -55,6 +55,32 @@
   issue. `default_commodity_universe` in `bot/growmore_bot/config.py` holds real security IDs for the
   current front-month contracts (looked up 2026-09-03) instead of placeholders; these **will need
   updating at each contract roll** regardless of how far back history goes.
+- **Market-hours gating (`bot/growmore_bot/scheduler/market_hours.py`) is a rough approximation,
+  not the real MCX calendar.** Currently just weekday + a fixed 9:00 AM–11:30 PM IST window.
+  Correct for right now (Sept 2026) and for every commodity this bot trades, but has real gaps:
+  1. **No MCX holiday calendar.** Only weekends are excluded — the bot would think the market is
+     open on an actual MCX trading holiday (MCX publishes ~14-15/year) and poll all day for nothing
+     (harmless — no positions since there's no real data moving on Dhan's side either — but noisy
+     and worth fixing before running this unattended for months). Needs either a hardcoded, annually
+     -updated holiday list, or checking whether Dhan's API exposes an exchange-holiday endpoint
+     (not yet researched — worth checking before hand-maintaining a list).
+  2. **The 11:30 PM close doesn't account for MCX's seasonal shift to 11:55 PM IST**, which happens
+     roughly November–March (bullion/base-metals/energy contracts extend 25 minutes once the US
+     moves off daylight saving time, to stay aligned with international market close). Hardcoded
+     today; will silently cut the bot off 25 minutes early once that seasonal window arrives, unless
+     fixed before then.
+  3. **No handling of a contract's last trading day.** `CommodityPlaceholder.contract_expiry`
+     (`bot/growmore_bot/config.py`) already records each instrument's active contract's expiry date,
+     but `is_market_open()` doesn't use it — MCX sometimes shortens the trading session on a
+     contract's actual expiry/last-trading day, which this doesn't account for.
+  4. **No handling of MCX special/shortened sessions** (e.g. Muhurat trading, circular-announced
+     early closures for specific events) — these aren't predictable from a weekday+holiday-list
+     check alone and would need to be sourced from MCX's own circulars if this ever matters for a
+     specific date.
+  None of this affects backtesting (Dhan's historical data already only contains real trading days),
+  only the live scheduler's day/time gating. Priority: #1 and #2 before running unattended into
+  November 2026; #3 and #4 are lower priority (rare, and mostly relevant once real order placement
+  exists, given the stakes of a session-timing mistake are much higher with real money).
 - **Production dashboard has no access control yet — do not promote to production until this is
   resolved.** The dashboard shows trading data and has a real write path (enable/disable strategies,
   edit risk limits via `bot_config`). Vercel Authentication (SSO) already protects Preview
