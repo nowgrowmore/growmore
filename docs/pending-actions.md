@@ -23,17 +23,15 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 ## Before enabling anything beyond paper trading
 - [ ] Decide per-strategy virtual capital and risk limits (defaults are placeholders in `bot/growmore_bot/config.py` — currently ₹5,00,000 per strategy, review before relying on the numbers).
-- [x] Real 5-year backtest completed and **persisted to the real Neon database** 2026-09-03: 6
-  backtest runs (Gold Mini / Silver Mini / Crude Oil Mini × SMA Crossover / Donchian Breakout),
-  184 trades, 6,754 equity-curve points, visible now on the dashboard's Backtests page. Standout so
-  far: **Gold Mini + Donchian Breakout** (Sharpe 0.85, profit factor 8.80, 60% win rate, 25 trades).
-  Clear negative: **Crude Oil Mini + SMA Crossover** (Sharpe -0.26, profit factor 0.65, losing money
-  over the period). Caveats before acting on any of this: (1) the window includes the historic
-  Jan 30, 2026 gold/silver crash and Apr 2026 oil crash — real events, confirmed via news, not a
-  data error, but still a lot of influence from one extraordinary period; (2) 6 combinations were
-  compared and the best one highlighted — a "multiple comparisons" trap, so the Gold/Donchian result
-  needs out-of-sample validation (e.g. does it still hold training on the first 3 years and testing
-  on the last 2?) before it should influence what gets enabled for paper trading.
+- [x] Full strategy/parameter sweep completed and **persisted to the real Neon database** 2026-09-03:
+  112 backtest runs (5 strategy families × 14 parameter variants × 8 commodities), 2,586 trades,
+  120,540 equity-curve points — see **[docs/backtest-results.md](backtest-results.md)** for the
+  ranked top 5 and full caveats before acting on any of it (multiple-comparisons risk, no
+  out-of-sample validation yet, position-sizing isn't margin-normalized across commodities). Current
+  standout: **MACD Trend (5,13,5) + Gold Mini** (CAGR 78.2%, Sharpe 1.56, 91 trades) — supersedes an
+  earlier, smaller 6-run pass that had wrongly favored Gold Mini + Donchian Breakout before the
+  lot-size bug (see `docs/technical-debt.md`) was fixed and before RSI/MACD/Bollinger strategies
+  existed to compare against.
 - [ ] Decide the initial commodity list to actually trade (current default: Gold Mini, Silver Mini,
   Crude Oil Mini — Natural Gas intentionally dropped).
 - [ ] Decide whether to invest in a continuous/rolled futures series (splicing consecutive expired
