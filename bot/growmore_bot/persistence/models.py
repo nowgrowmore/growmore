@@ -190,12 +190,72 @@ class BotConfig(Base):
     virtual_capital: Mapped[float] = mapped_column(Numeric, nullable=False)
     max_position_size: Mapped[float] = mapped_column(Numeric, nullable=False)
     daily_loss_limit: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # "paper" (default) or "live" -- a REAL order is only ever placed when
+    # this is "live" AND Settings().live_trading_enabled is also True (see
+    # CLAUDE.md non-negotiables and growmore_bot/scheduler/run.py). Two
+    # independent gates, deliberately: flipping one alone never enables real
+    # trading.
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="paper")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
     strategy: Mapped["Strategy"] = relationship(back_populates="bot_configs")
     instrument: Mapped["Instrument"] = relationship(back_populates="bot_configs")
+
+
+class LivePosition(Base):
+    """Mirrors PaperPosition exactly, but for REAL orders placed via
+    growmore_bot.broker.dhan_order_client -- kept as an entirely separate
+    table (not a shared "mode" column on paper_positions) so real and
+    simulated trading data can never be confused with each other, in the
+    database or on the dashboard.
+    """
+
+    __tablename__ = "live_positions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    strategy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("strategies.id"), nullable=False
+    )
+    instrument_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("instruments.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")  # open|closed
+    quantity: Mapped[float] = mapped_column(Numeric, nullable=False)
+    avg_entry_price: Mapped[float] = mapped_column(Numeric, nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    strategy: Mapped["Strategy"] = relationship()
+    instrument: Mapped["Instrument"] = relationship()
+    orders: Mapped[list["LiveOrder"]] = relationship(
+        back_populates="live_position", cascade="all, delete-orphan"
+    )
+
+
+class LiveOrder(Base):
+    """Mirrors PaperOrder, plus `broker_order_id` -- Dhan's own order ID,
+    needed to look the order up again on Dhan's side for reconciliation.
+    """
+
+    __tablename__ = "live_orders"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    live_position_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("live_positions.id"), nullable=False
+    )
+    side: Mapped[str] = mapped_column(Text, nullable=False)  # buy|sell
+    quantity: Mapped[float] = mapped_column(Numeric, nullable=False)
+    broker_order_id: Mapped[str] = mapped_column(Text, nullable=False)
+    order_status: Mapped[str] = mapped_column(Text, nullable=False)  # Dhan's orderStatus
+    fill_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    live_position: Mapped["LivePosition"] = relationship(back_populates="orders")
 
 
 class AuditLog(Base):

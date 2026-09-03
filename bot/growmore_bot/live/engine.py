@@ -1,0 +1,359 @@
+"""Live trading engine -- places REAL orders via DhanOrderClient.
+
+Deliberately mirrors growmore_bot.paper.engine.PaperTradingEngine's
+interface and risk guards (max_position_size, daily_loss_limit) closely, so
+a strategy behaves identically whether a bot_config is in "paper" or "live"
+mode -- the only difference is a BUY/SELL signal calls a real Order API
+instead of simulating a fill. Persists to LivePosition/LiveOrder (never
+PaperPosition/PaperOrder) so real and simulated data can never mix.
+
+Known approximation, documented rather than hidden: a MARKET order's
+initial response only carries an order ID and an initial status (e.g.
+"TRANSIT"), not a confirmed fill price -- Dhan reports the real fill
+asynchronously. `avg_entry_price`/exit price here use the tick's live quote
+LTP at the moment the order was placed, same convention as the paper
+engine, but for a REAL order this is an approximation of the actual fill,
+not a guarantee. No reconciliation against Dhan's own order/position state
+exists yet -- see docs/technical-debt.md.
+
+Known gap, also documented rather than silently handled: tripping the
+daily_loss_limit guard disables the bot_config (stops new entries) but does
+NOT automatically place a closing order for whatever's still open -- doing
+that safely (e.g. handling a failed closing order under duress) needs more
+design than this first version attempts. A tripped live guard needs a human
+to look at the open position and decide.
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from growmore_bot.persistence.models import AuditLog, LiveOrder, LivePosition
+from growmore_bot.strategies.base import SignalAction, Strategy
+
+logger = logging.getLogger(__name__)
+
+
+def _format_debug_state(strategy: Strategy) -> str:
+    state = strategy.debug_state()
+    if not state:
+        return ""
+    parts = [f"{k}={v:.2f}" if v is not None else f"{k}=n/a" for k, v in state.items()]
+    return "(" + " ".join(parts) + ")"
+
+
+class LiveTradingEngine:
+    def __init__(self, dhan_client: Any, order_client: Any, session: Any):
+        self.dhan_client = dhan_client
+        self.order_client = order_client
+        self.session = session
+
+    def process_tick(
+        self,
+        config: Any,
+        instrument: Any,
+        strategy: Strategy,
+        current_position_qty: float = 0.0,
+        avg_entry_price: Optional[float] = None,
+        live_position_id: Optional[uuid.UUID] = None,
+        cumulative_daily_pnl: float = 0.0,
+        strategy_label: Optional[str] = None,
+    ) -> None:
+        label = f"LIVE {strategy_label or config.strategy_id} / {getattr(instrument, 'symbol', instrument)}"
+
+        if not config.enabled:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        if cumulative_daily_pnl <= -float(config.daily_loss_limit):
+            self._trip_daily_loss_guard(config, now, cumulative_daily_pnl, label)
+            return
+
+        quote = self.dhan_client.get_quote(instrument)
+
+        position_state = (
+            None
+            if current_position_qty == 0
+            else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
+        )
+        signal = strategy.on_bar(quote, position_state)
+        computed = _format_debug_state(strategy)
+
+        if signal.action == SignalAction.HOLD:
+            if current_position_qty != 0 and live_position_id is not None:
+                position = self.session.get(LivePosition, live_position_id)
+                self._mark_to_market(position, quote.ltp, instrument.lot_size)
+                self.session.add(position)
+            logger.info("%s -- HOLD ltp=%s %s", label, quote.ltp, computed)
+            return
+
+        size = signal.size or 1
+
+        if signal.action == SignalAction.BUY:
+            self._handle_buy(
+                config, instrument, quote, current_position_qty, size, now, label, computed,
+                live_position_id,
+            )
+        elif signal.action == SignalAction.SELL:
+            self._handle_sell(
+                instrument, current_position_qty, avg_entry_price, live_position_id, quote, size,
+                now, label, computed,
+            )
+
+    def force_close_for_expiry(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        live_position_id: Optional[uuid.UUID],
+        label: str = "",
+    ) -> None:
+        """Force-close a REAL open position ahead of Dhan's own pre-expiry
+        square-off (see growmore_bot.scheduler.contract_rollover) by placing
+        a real closing SELL order. No-op if there's nothing open.
+        """
+        if current_position_qty <= 0 or live_position_id is None or avg_entry_price is None:
+            return
+
+        now = datetime.now(timezone.utc)
+        quote = self.dhan_client.get_quote(instrument)
+        placed = self.order_client.place_market_order(
+            instrument, transaction_type="SELL", quantity=current_position_qty
+        )
+        pnl = (float(quote.ltp) - float(avg_entry_price)) * current_position_qty * instrument.lot_size
+
+        position = self.session.get(LivePosition, live_position_id)
+        position.realized_pnl = float(position.realized_pnl or 0) + pnl
+        position.quantity = 0
+        position.status = "closed"
+        position.closed_at = now
+        self._mark_to_market(position, quote.ltp, instrument.lot_size)
+        self.session.add(position)
+
+        logger.warning(
+            "%s -- LIVE EXPIRY CLOSE-OUT (REAL MONEY) qty=%s ltp=%s pnl=%.2f broker_order_id=%s "
+            "status=%s (contract nearing MCX Tender Period)",
+            label or live_position_id,
+            current_position_qty,
+            quote.ltp,
+            pnl,
+            placed.order_id,
+            placed.order_status,
+        )
+
+        self.session.add(
+            LiveOrder(
+                id=uuid.uuid4(),
+                live_position_id=live_position_id,
+                side="sell",
+                quantity=current_position_qty,
+                broker_order_id=placed.order_id,
+                order_status=placed.order_status,
+                fill_price=quote.ltp,
+                filled_at=now,
+                pnl=pnl,
+            )
+        )
+        self.session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                ts=now,
+                event_type="live_contract_expiry_close_out",
+                payload={
+                    "strategy_id": str(config.strategy_id),
+                    "instrument_id": str(config.instrument_id),
+                    "quantity": current_position_qty,
+                    "pnl": pnl,
+                    "broker_order_id": placed.order_id,
+                },
+            )
+        )
+
+    @staticmethod
+    def _mark_to_market(position: Any, ltp: Any, lot_size: int) -> None:
+        position.unrealized_pnl = (
+            (float(ltp) - float(position.avg_entry_price)) * float(position.quantity) * lot_size
+        )
+
+    def _trip_daily_loss_guard(
+        self, config: Any, now: datetime, cumulative_daily_pnl: float, label: str = ""
+    ) -> None:
+        config.enabled = False
+        logger.warning(
+            "%s -- DAILY LOSS LIMIT TRIPPED, disabling (cumulative_daily_pnl=%.2f, "
+            "daily_loss_limit=%.2f) -- any still-open REAL position needs manual review, "
+            "this guard does not auto-close it",
+            label or config.strategy_id,
+            cumulative_daily_pnl,
+            float(config.daily_loss_limit),
+        )
+        self.session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                ts=now,
+                event_type="live_risk_guard_daily_loss_limit_tripped",
+                payload={
+                    "strategy_id": str(config.strategy_id),
+                    "instrument_id": str(config.instrument_id),
+                    "cumulative_daily_pnl": cumulative_daily_pnl,
+                    "daily_loss_limit": float(config.daily_loss_limit),
+                },
+            )
+        )
+
+    def _handle_buy(
+        self,
+        config: Any,
+        instrument: Any,
+        quote: Any,
+        current_position_qty: float,
+        size: float,
+        now: datetime,
+        label: str = "",
+        computed: str = "",
+        live_position_id: Optional[uuid.UUID] = None,
+    ) -> None:
+        new_total = current_position_qty + size
+        if new_total > float(config.max_position_size):
+            logger.warning(
+                "%s -- BUY REJECTED (max_position_size): requested_total=%s max_position_size=%s %s",
+                label or config.strategy_id,
+                new_total,
+                float(config.max_position_size),
+                computed,
+            )
+            self.session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    ts=now,
+                    event_type="live_risk_guard_max_position_size_rejected",
+                    payload={
+                        "strategy_id": str(config.strategy_id),
+                        "instrument_id": str(config.instrument_id),
+                        "requested_total": new_total,
+                        "max_position_size": float(config.max_position_size),
+                    },
+                )
+            )
+            return
+
+        placed = self.order_client.place_market_order(
+            instrument, transaction_type="BUY", quantity=size
+        )
+
+        logger.warning(
+            "%s -- LIVE BUY PLACED (REAL MONEY) qty=%s ltp=%s broker_order_id=%s status=%s %s",
+            label or config.strategy_id,
+            size,
+            quote.ltp,
+            placed.order_id,
+            placed.order_status,
+            computed,
+        )
+
+        if current_position_qty == 0 or live_position_id is None:
+            position_id = uuid.uuid4()
+            self.session.add(
+                LivePosition(
+                    id=position_id,
+                    strategy_id=config.strategy_id,
+                    instrument_id=instrument.id,
+                    status="open",
+                    quantity=size,
+                    avg_entry_price=quote.ltp,
+                    realized_pnl=0,
+                    unrealized_pnl=0,
+                    opened_at=now,
+                    closed_at=None,
+                )
+            )
+        else:
+            position_id = live_position_id
+            position = self.session.get(LivePosition, live_position_id)
+            blended_avg = (
+                float(position.avg_entry_price) * current_position_qty + float(quote.ltp) * size
+            ) / new_total
+            position.avg_entry_price = blended_avg
+            position.quantity = new_total
+            self._mark_to_market(position, quote.ltp, instrument.lot_size)
+            self.session.add(position)
+
+        self.session.add(
+            LiveOrder(
+                id=uuid.uuid4(),
+                live_position_id=position_id,
+                side="buy",
+                quantity=size,
+                broker_order_id=placed.order_id,
+                order_status=placed.order_status,
+                fill_price=quote.ltp,
+                filled_at=now,
+            )
+        )
+
+    def _handle_sell(
+        self,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        live_position_id: Optional[uuid.UUID],
+        quote: Any,
+        size: float,
+        now: datetime,
+        label: str = "",
+        computed: str = "",
+    ) -> None:
+        if current_position_qty <= 0 or live_position_id is None or avg_entry_price is None:
+            return  # Nothing open to close -- no shorting.
+
+        close_qty = min(size, current_position_qty)
+        remaining_qty = current_position_qty - close_qty
+
+        placed = self.order_client.place_market_order(
+            instrument, transaction_type="SELL", quantity=close_qty
+        )
+
+        pnl = (float(quote.ltp) - float(avg_entry_price)) * close_qty * instrument.lot_size
+
+        position = self.session.get(LivePosition, live_position_id)
+        position.realized_pnl = float(position.realized_pnl or 0) + pnl
+        position.quantity = remaining_qty
+        if remaining_qty <= 0:
+            position.status = "closed"
+            position.closed_at = now
+        self._mark_to_market(position, quote.ltp, instrument.lot_size)
+        self.session.add(position)
+
+        logger.warning(
+            "%s -- LIVE SELL PLACED (REAL MONEY) qty=%s ltp=%s pnl=%.2f broker_order_id=%s "
+            "status=%s %s %s",
+            label or live_position_id,
+            close_qty,
+            quote.ltp,
+            pnl,
+            placed.order_id,
+            placed.order_status,
+            "(position closed)" if remaining_qty <= 0 else f"(remaining_qty={remaining_qty})",
+            computed,
+        )
+
+        self.session.add(
+            LiveOrder(
+                id=uuid.uuid4(),
+                live_position_id=live_position_id,
+                side="sell",
+                quantity=close_qty,
+                broker_order_id=placed.order_id,
+                order_status=placed.order_status,
+                fill_price=quote.ltp,
+                filled_at=now,
+                pnl=pnl,
+            )
+        )
+
+
+__all__ = ["LiveTradingEngine"]

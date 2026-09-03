@@ -106,6 +106,28 @@ def test_settings_default_commodity_universe_has_real_security_ids(monkeypatch):
         assert commodity.lot_size > 0
 
 
+def test_live_trading_disabled_by_default(monkeypatch):
+    # CLAUDE.md non-negotiable: real order placement requires an explicit
+    # live-mode flag that defaults off.
+    from growmore_bot.config import Settings
+
+    _base_env(monkeypatch)
+    monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+    settings = Settings()
+
+    assert settings.live_trading_enabled is False
+
+
+def test_live_trading_enabled_requires_explicit_env_var(monkeypatch):
+    from growmore_bot.config import Settings
+
+    _base_env(monkeypatch)
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    settings = Settings()
+
+    assert settings.live_trading_enabled is True
+
+
 def test_settings_overridable_polling_interval(monkeypatch):
     from growmore_bot.config import Settings
 

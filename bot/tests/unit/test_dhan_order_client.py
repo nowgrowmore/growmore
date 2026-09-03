@@ -1,0 +1,119 @@
+"""Tests for growmore_bot.broker.dhan_order_client.DhanOrderClient --
+the ONLY module in this codebase allowed to call Dhan's real Order API.
+
+No real network calls: HTTP is mocked with `responses` against the real
+dhanhq base URL and the real /orders endpoint (schema confirmed against the
+installed dhanhq==2.2.0 SDK source, 2026-09-04: POST /orders, exchangeSegment
+"MCX_COMM", productType "MARGIN" for carry-forward commodity positions
+-- NOT "INTRADAY", which would auto-square-off same day and silently break
+every multi-day-holding strategy this bot runs).
+"""
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+import responses
+
+API_BASE = "https://api.dhan.co/v2"
+
+
+@pytest.fixture
+def instrument():
+    return SimpleNamespace(
+        id="instrument-uuid",
+        symbol="GOLDM",
+        exchange_segment="MCX_COMM",
+        security_id="569003",
+    )
+
+
+def _make_client(live_trading_enabled: bool = True, session=None):
+    from growmore_bot.broker.dhan_order_client import DhanOrderClient
+
+    return DhanOrderClient(
+        client_id="test-client",
+        access_token="test-token",
+        live_trading_enabled=live_trading_enabled,
+        session=session or MagicMock(),
+    )
+
+
+def test_refuses_to_place_order_when_live_trading_disabled(instrument):
+    from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
+
+    session = MagicMock()
+    client = _make_client(live_trading_enabled=False, session=session)
+
+    with pytest.raises(LiveTradingDisabledError):
+        client.place_market_order(instrument, transaction_type="BUY", quantity=1)
+
+    session.add.assert_not_called()
+
+
+@responses.activate
+def test_places_a_real_market_order_and_writes_audit_log(instrument):
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"orderId": "112111182198", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    placed = client.place_market_order(instrument, transaction_type="BUY", quantity=1)
+
+    assert placed.order_id == "112111182198"
+    assert placed.order_status == "TRANSIT"
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["transactionType"] == "BUY"
+    assert sent["exchangeSegment"] == "MCX_COMM"
+    assert sent["securityId"] == "569003"
+    assert sent["orderType"] == "MARKET"
+    # Carry-forward, not INTRADAY -- our strategies hold across days.
+    assert sent["productType"] == "MARGIN"
+    assert sent["quantity"] == 1
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_order_placed"
+    assert audit_entries[0].payload["broker_order_id"] == "112111182198"
+    assert audit_entries[0].payload["transaction_type"] == "BUY"
+
+
+@responses.activate
+def test_rejects_invalid_transaction_type(instrument):
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    with pytest.raises(ValueError):
+        client.place_market_order(instrument, transaction_type="HOLD", quantity=1)
+
+    session.add.assert_not_called()
+
+
+@responses.activate
+def test_order_api_failure_raises_and_writes_audit_log(instrument):
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"errorCode": "DH-901", "errorMessage": "Insufficient balance"},
+        status=400,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    with pytest.raises(DhanOrderError):
+        client.place_market_order(instrument, transaction_type="SELL", quantity=1)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_order_failed"

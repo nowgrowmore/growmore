@@ -14,9 +14,8 @@ Plain-language list of things only you can do or decide. Updated as the project 
   working for Gold Mini, Silver Mini, and Crude Oil Mini (Natural Gas dropped from the default
   universe per your call). Found and fixed a real bug along the way: Dhan's quote endpoint needs
   security IDs as integers, not strings (`bot/growmore_bot/broker/dhan_client.py`).
-- [ ] **Fund the Dhan account ledger balance** — it showed ₹0.00 when the Data API subscription was
-  activated, and the ₹499+GST renewal debits from that same balance in ~29 days. Add funds before
-  then or the subscription may lapse.
+- [x] **Fund the Dhan account ledger balance** — done (2026-09-04). Covers the ₹499+GST/month Data
+  API renewal; also the real capital that would back any live order once that's ever enabled.
 - [ ] Confirm you're comfortable with the production key having order-placement capability at the
   API level even though our bot will never call those endpoints (Dhan doesn't offer a data-only
   key). Access is scoped by what our code calls, not by the key itself.
@@ -63,6 +62,18 @@ Plain-language list of things only you can do or decide. Updated as the project 
   path actually worked, since it's new and unproven against a real live rollover yet.
 
 ## Before any real (live) order placement — not in scope yet
+
+- [x] **Real order-placement code path built** (2026-09-04) — `dhan_order_client.py` +
+  `live/engine.py` + `bot_config.mode`, fully tested, off end to end. See `docs/technical-debt.md`
+  for exactly what it does and its known gaps (no fill reconciliation, no auto-close on a tripped
+  daily-loss-limit).
+- [ ] **How to actually turn this on, when the items below are ready:** (1) set `LIVE_TRADING_ENABLED
+  =true` in the bot's `.env.local`, (2) directly update the specific `bot_config` row(s) you want live
+  to `mode = 'live'` in the database (no dashboard UI for this, deliberately) — everything else (which
+  strategy, which instrument, risk limits) stays exactly as already configured for paper trading.
+  Both switches are independent; flipping only one does nothing. Ask the agent to do this when you're
+  ready — don't do it via raw SQL yourself without walking through the current state of the items
+  below first.
 - [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs, and this turns out to be
   part of SEBI's Algo-ID framework's requirements too, not just a Dhan-specific policy.
 - [ ] **SEBI Algo-ID — smaller lift than originally thought, verified 2026-09-04.** This bot's order

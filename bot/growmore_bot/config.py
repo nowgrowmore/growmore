@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     # --- Database ---
     database_url: str = Field(validation_alias="DATABASE_URL")
 
+    # --- Live trading kill switch (see CLAUDE.md non-negotiables) ---
+    # Off by default. Even when True, a real order additionally requires the
+    # specific bot_config row to have mode="live" (see persistence.models) --
+    # both gates must be open. Never read anywhere except
+    # growmore_bot.broker.dhan_order_client and growmore_bot.scheduler.run.
+    live_trading_enabled: bool = Field(default=False, validation_alias="LIVE_TRADING_ENABLED")
+
     # --- Trading defaults ---
     default_virtual_capital: float = Field(
         default=500_000, validation_alias="DEFAULT_VIRTUAL_CAPITAL"

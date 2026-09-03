@@ -53,7 +53,7 @@ def session():
         yield s
 
 
-def _make_strategy_instrument_config(session, strategy_name, params, enabled=True):
+def _make_strategy_instrument_config(session, strategy_name, params, enabled=True, mode="paper"):
     strategy = Strategy(id=uuid.uuid4(), name=strategy_name, version="v1", params=params)
     instrument = Instrument(
         id=uuid.uuid4(), symbol="GOLDM", exchange_segment="MCX_COMM",
@@ -62,6 +62,7 @@ def _make_strategy_instrument_config(session, strategy_name, params, enabled=Tru
     config = BotConfig(
         id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
         enabled=enabled, virtual_capital=250_000, max_position_size=10, daily_loss_limit=5_000,
+        mode=mode,
     )
     session.add_all([strategy, instrument, config])
     session.commit()
@@ -242,6 +243,77 @@ def test_past_close_out_cutoff_blocks_new_entries_when_no_open_position(session)
     # config past its close-out cutoff must never open a fresh position.
     assert session.query(PaperPosition).count() == 0
     dhan_client.get_quote.assert_not_called()
+
+
+def test_live_mode_config_skipped_entirely_when_live_trading_globally_disabled(session):
+    # Both gates (bot_config.mode="live" AND the global kill switch) must be
+    # open -- a live config must never silently fall back to paper trading.
+    _make_strategy_instrument_config(session, "always_flip", {}, mode="live")
+    dhan_client = MagicMock()
+
+    run_all_enabled_configs(session, dhan_client, live_trading_enabled=False)
+
+    dhan_client.get_quote.assert_not_called()
+    assert session.query(PaperPosition).count() == 0
+
+
+def test_live_mode_config_places_a_real_order_when_fully_enabled(session):
+    from growmore_bot.broker.dhan_order_client import PlacedOrder
+    from growmore_bot.persistence.models import LiveOrder, LivePosition
+
+    _make_strategy_instrument_config(session, "always_flip", {}, mode="live")
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD1", order_status="TRANSIT")
+
+    run_all_enabled_configs(
+        session, dhan_client, order_client=order_client, live_trading_enabled=True
+    )
+
+    order_client.place_market_order.assert_called_once()
+    assert session.query(LivePosition).count() == 1
+    assert session.query(LiveOrder).count() == 1
+    # Never touches paper tables for a live-mode config.
+    assert session.query(PaperPosition).count() == 0
+
+
+def test_live_mode_config_past_close_out_cutoff_places_a_real_closing_order(session):
+    from growmore_bot.broker.dhan_order_client import PlacedOrder
+    from growmore_bot.persistence.models import LiveOrder, LivePosition
+
+    strategy, instrument, config = _make_strategy_instrument_config(
+        session, "macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, mode="live"
+    )
+    instrument.symbol = "GOLDM"
+    instrument.contract_expiry = date(2026, 1, 9)
+    session.add(instrument)
+
+    position = LivePosition(
+        id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
+        status="open", quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, opened_at=datetime.now(MCX_TZ) - timedelta(days=1), closed_at=None,
+    )
+    session.add(position)
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD2", order_status="TRANSIT")
+
+    run_all_enabled_configs(
+        session, dhan_client, now=datetime.now(MCX_TZ), order_client=order_client,
+        live_trading_enabled=True,
+    )
+
+    order_client.place_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1
+    )
+    session.refresh(position)
+    assert position.status == "closed"
+    assert session.query(LiveOrder).count() == 1
+    dhan_client.get_historical_ohlc.assert_not_called()
 
 
 def test_warm_up_strategy_replays_historical_bars_in_order():

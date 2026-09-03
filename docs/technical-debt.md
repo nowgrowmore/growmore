@@ -1,5 +1,32 @@
 # Technical Debt / Known Limitations
 
+- **(Built 2026-09-04, still OFF) Real order placement now exists but is gated behind two
+  independent switches, both required.** `growmore_bot/broker/dhan_order_client.py` is the only
+  module allowed to call Dhan's Order API (schema verified against the installed `dhanhq` SDK's own
+  source — `exchangeSegment="MCX_COMM"`, `productType="MARGIN"` for carry-forward, `orderType=
+  "MARKET"` — not guessed, and not the conflicting "MCX_FO" a scraped doc page claimed). Every call
+  requires `Settings().live_trading_enabled` (env `LIVE_TRADING_ENABLED`, off by default) AND the
+  specific `bot_config.mode == "live"` (new column, defaults `"paper"` for every existing row, no
+  dashboard UI to change it — must be set directly in the database, deliberately, so it's never an
+  accidental click). `growmore_bot/live/engine.py` mirrors `PaperTradingEngine`'s interface and risk
+  guards (max_position_size, daily_loss_limit, pre-expiry close-out) exactly, persisting to new
+  `live_positions`/`live_orders` tables (never `paper_positions`/`paper_orders`, so real and
+  simulated data can never mix). Full TDD coverage, all mocked (no real order was ever placed while
+  building this). Known gaps, left as gaps rather than silently papered over:
+  1. **No fill reconciliation.** A `MARKET` order's response only carries an order ID and an initial
+     status (e.g. `"TRANSIT"`), not a confirmed fill price — `live_positions.avg_entry_price` uses
+     the tick's live quote LTP as an approximation, same convention as the paper engine, but for a
+     real order this could differ from the actual fill (slippage). No code polls Dhan's
+     `get_order_by_id` to confirm/correct this yet.
+  2. **Daily-loss-limit trip on a live config doesn't auto-close the real position.** It disables the
+     bot_config (stops new entries) but leaves whatever's open for a human to decide on — closing it
+     automatically would need its own careful design (e.g. what if the closing order itself fails).
+  3. **Dashboard doesn't read `live_positions`/`live_orders` or expose `bot_config.mode` at all
+     yet** — not urgent while `live_trading_enabled` stays False, but needed before this is ever
+     actually used, so real activity is visible somewhere.
+  Still blocked on the items below (static IP, Dhan's specific session requirements) before this
+  could ever safely be turned on for real — see `docs/pending-actions.md` for the activation
+  checklist.
 - **Bot runs on a local machine, no static IP.** Fine for paper trading (read-only Data API calls
   only). Blocks real order placement, which Dhan requires a static IP for. Plan: move to a small
   VPS with an elastic/static IP when live trading is actually pursued — no code change needed, just

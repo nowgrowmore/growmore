@@ -30,24 +30,41 @@ def tick(run_all_configs: Callable[[], None], now: Optional[datetime] = None) ->
     run_all_configs()
 
 
-def _cumulative_daily_pnl(session: Any, strategy_id: Any, instrument_id: Any, now: datetime) -> float:
+def _cumulative_daily_pnl(
+    session: Any,
+    strategy_id: Any,
+    instrument_id: Any,
+    now: datetime,
+    order_model: Any = None,
+    position_model: Any = None,
+    position_fk_attr: str = "paper_position_id",
+) -> float:
     """Sum today's (MCX-timezone calendar day) realized P&L for this
-    strategy/instrument pair, from PaperOrder.pnl (set only on sell fills --
-    see PaperTradingEngine._handle_sell). PaperPosition.realized_pnl is
-    cumulative-ever, not per-day, so it can't answer "has today breached the
-    daily loss limit" on its own.
+    strategy/instrument pair, from an order model's `.pnl` (set only on sell
+    fills -- see PaperTradingEngine._handle_sell / LiveTradingEngine's
+    equivalents). A position model's `realized_pnl` is cumulative-ever, not
+    per-day, so it can't answer "has today breached the daily loss limit" on
+    its own.
+
+    Defaults to PaperOrder/PaperPosition; pass `order_model=LiveOrder,
+    position_model=LivePosition, position_fk_attr="live_position_id"` for a
+    live-mode bot_config.
     """
     from growmore_bot.persistence.models import PaperOrder, PaperPosition
 
+    order_model = order_model or PaperOrder
+    position_model = position_model or PaperPosition
+
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    fk_column = getattr(order_model, position_fk_attr)
     rows = (
-        session.query(PaperOrder.pnl)
-        .join(PaperPosition, PaperOrder.paper_position_id == PaperPosition.id)
+        session.query(order_model.pnl)
+        .join(position_model, fk_column == position_model.id)
         .filter(
-            PaperPosition.strategy_id == strategy_id,
-            PaperPosition.instrument_id == instrument_id,
-            PaperOrder.filled_at >= day_start,
-            PaperOrder.pnl.isnot(None),
+            position_model.strategy_id == strategy_id,
+            position_model.instrument_id == instrument_id,
+            order_model.filled_at >= day_start,
+            order_model.pnl.isnot(None),
         )
         .all()
     )
@@ -90,15 +107,37 @@ def _warm_up_strategy(strategy: Any, dhan_client: Any, instrument: Any, now: dat
         strategy.on_bar(bar, None)
 
 
-def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[datetime] = None) -> None:
-    """Fetch every enabled bot_config row and run one paper-trading tick each.
+def run_all_enabled_configs(
+    session: Any,
+    dhan_client: Any,
+    now: Optional[datetime] = None,
+    order_client: Optional[Any] = None,
+    live_trading_enabled: bool = False,
+) -> None:
+    """Fetch every enabled bot_config row and run one trading tick each.
 
     Strategy instances are built fresh each tick from `strategies.name` +
     `strategies.params` -- this keeps the scheduler stateless between ticks
-    (position state is read from `paper_positions`, not held in memory).
+    (position state is read from the DB, not held in memory).
+
+    Each bot_config's `mode` ("paper", the default, or "live") picks
+    PaperTradingEngine/paper_positions or LiveTradingEngine/live_positions --
+    see CLAUDE.md non-negotiables. A `mode="live"` config is skipped
+    ENTIRELY (not silently downgraded to paper trading) whenever
+    `live_trading_enabled` is False -- both gates must be open for a real
+    order to ever be considered. `order_client` (a DhanOrderClient) is only
+    required when at least one enabled config is actually live; `start()`
+    only constructs one when `Settings().live_trading_enabled` is True.
     """
+    from growmore_bot.live.engine import LiveTradingEngine
     from growmore_bot.paper.engine import PaperTradingEngine
-    from growmore_bot.persistence.models import BotConfig, Instrument, PaperPosition, Strategy
+    from growmore_bot.persistence.models import (
+        BotConfig,
+        Instrument,
+        LivePosition,
+        PaperPosition,
+        Strategy,
+    )
     from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
     from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
@@ -118,7 +157,12 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         "always_flip": lambda params: AlwaysFlipStrategy(**params),
     }
 
-    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    paper_engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    live_engine = (
+        LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+        if order_client is not None
+        else None
+    )
 
     configs = session.query(BotConfig).filter_by(enabled=True).all()
     for config in configs:
@@ -127,8 +171,23 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         if strategy_row is None or instrument is None:
             continue
 
+        label = f"{strategy_row.name} {strategy_row.version} / {instrument.symbol}"
+        is_live = getattr(config, "mode", "paper") == "live"
+
+        if is_live and not live_trading_enabled:
+            # Both gates (bot_config.mode AND the global kill switch) must be
+            # open -- never fall back to paper trading for a config marked
+            # live, that would silently hide a misconfiguration.
+            logger.warning(
+                "%s is mode=live but live_trading_enabled is globally False -- skipping entirely "
+                "this tick (not falling back to paper trading)",
+                label,
+            )
+            continue
+
+        position_model = LivePosition if is_live else PaperPosition
         open_position = (
-            session.query(PaperPosition)
+            session.query(position_model)
             .filter_by(
                 strategy_id=config.strategy_id,
                 instrument_id=config.instrument_id,
@@ -140,7 +199,6 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         avg_entry_price = float(open_position.avg_entry_price) if open_position else None
         position_id = open_position.id if open_position else None
 
-        label = f"{strategy_row.name} {strategy_row.version} / {instrument.symbol}"
         if is_past_close_out_cutoff(instrument.symbol, instrument.contract_expiry, now.date()):
             # Dhan does not permit physical delivery for retail clients --
             # see growmore_bot.scheduler.contract_rollover. Force-close
@@ -148,14 +206,24 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
             # tick, so no fresh position can be opened either. Resumes
             # automatically once this instrument's security_id/
             # contract_expiry are rolled to the next contract month.
-            engine.force_close_for_expiry(
-                config=config,
-                instrument=instrument,
-                current_position_qty=current_qty,
-                avg_entry_price=avg_entry_price,
-                paper_position_id=position_id,
-                label=label,
-            )
+            if is_live:
+                live_engine.force_close_for_expiry(
+                    config=config,
+                    instrument=instrument,
+                    current_position_qty=current_qty,
+                    avg_entry_price=avg_entry_price,
+                    live_position_id=position_id,
+                    label=label,
+                )
+            else:
+                paper_engine.force_close_for_expiry(
+                    config=config,
+                    instrument=instrument,
+                    current_position_qty=current_qty,
+                    avg_entry_price=avg_entry_price,
+                    paper_position_id=position_id,
+                    label=label,
+                )
             try:
                 csv_text = fetch_instrument_master_csv()
                 roll_to_next_contract(session, dhan_client, instrument, csv_text)
@@ -179,18 +247,43 @@ def run_all_enabled_configs(session: Any, dhan_client: Any, now: Optional[dateti
         strategy = builder(strategy_row.params or {})
         _warm_up_strategy(strategy, dhan_client, instrument, now)
 
-        daily_pnl = _cumulative_daily_pnl(session, config.strategy_id, config.instrument_id, now)
+        if is_live:
+            from growmore_bot.persistence.models import LiveOrder
 
-        engine.process_tick(
-            config=config,
-            instrument=instrument,
-            strategy=strategy,
-            current_position_qty=current_qty,
-            avg_entry_price=avg_entry_price,
-            paper_position_id=position_id,
-            cumulative_daily_pnl=daily_pnl,
-            strategy_label=f"{strategy_row.name} {strategy_row.version}",
-        )
+            daily_pnl = _cumulative_daily_pnl(
+                session,
+                config.strategy_id,
+                config.instrument_id,
+                now,
+                order_model=LiveOrder,
+                position_model=LivePosition,
+                position_fk_attr="live_position_id",
+            )
+        else:
+            daily_pnl = _cumulative_daily_pnl(session, config.strategy_id, config.instrument_id, now)
+
+        if is_live:
+            live_engine.process_tick(
+                config=config,
+                instrument=instrument,
+                strategy=strategy,
+                current_position_qty=current_qty,
+                avg_entry_price=avg_entry_price,
+                live_position_id=position_id,
+                cumulative_daily_pnl=daily_pnl,
+                strategy_label=f"{strategy_row.name} {strategy_row.version}",
+            )
+        else:
+            paper_engine.process_tick(
+                config=config,
+                instrument=instrument,
+                strategy=strategy,
+                current_position_qty=current_qty,
+                avg_entry_price=avg_entry_price,
+                paper_position_id=position_id,
+                cumulative_daily_pnl=daily_pnl,
+                strategy_label=f"{strategy_row.name} {strategy_row.version}",
+            )
     session.commit()
 
 
@@ -259,7 +352,28 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
         dhan_client.refresh_access_token_if_needed()
 
         with session_scope() as session:
-            tick(run_all_configs=lambda: run_all_enabled_configs(session, dhan_client))
+            order_client = None
+            if settings.live_trading_enabled:
+                # Only ever constructed when the global kill switch is on --
+                # see CLAUDE.md non-negotiables. Still requires a config's
+                # own mode="live" (checked in run_all_enabled_configs) before
+                # anything actually gets ordered.
+                from growmore_bot.broker.dhan_order_client import DhanOrderClient
+
+                order_client = DhanOrderClient(
+                    client_id=settings.dhan_client_id,
+                    access_token=settings.dhan_access_token,
+                    live_trading_enabled=settings.live_trading_enabled,
+                    session=session,
+                )
+            tick(
+                run_all_configs=lambda: run_all_enabled_configs(
+                    session,
+                    dhan_client,
+                    order_client=order_client,
+                    live_trading_enabled=settings.live_trading_enabled,
+                )
+            )
 
     scheduler = BlockingScheduler(timezone=MCX_TIMEZONE)
     scheduler.add_job(_job, "interval", seconds=interval, next_run_time=datetime.now(MCX_TIMEZONE))

@@ -20,6 +20,8 @@ EXPECTED_TABLES = {
     "equity_curve_points",
     "paper_positions",
     "paper_orders",
+    "live_positions",
+    "live_orders",
     "bot_config",
     "audit_log",
 }
