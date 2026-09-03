@@ -7,10 +7,14 @@ docs/pending-actions.md). No real network calls in these tests: the Dhan
 HTTP call is mocked with `responses`; TOTP codes are generated for real via
 pyotp against a throwaway test secret, since that part is pure local math.
 
-Note: the exact response field names (`accessToken`, `expiryTime`) are per
-Dhan's documented API guide, not yet confirmed against a live call (the
-account owner didn't have the PIN/TOTP secret in hand at the time this was
-written) -- verify against the real endpoint on first live use.
+Note: the response field names (`accessToken`, `expiryTime`) were confirmed
+against a real live call 2026-09-03. That same live testing also surfaced a
+real, observed failure mode worth testing for: a valid TOTP code can still
+be rejected ("Invalid TOTP") if the code expires in the second or two
+between being generated and Dhan's server validating the request -- a
+timing fluke, not a wrong secret. Retried immediately with a freshly
+generated code, it succeeded. `refresh_if_needed` retries for exactly this
+reason.
 """
 from __future__ import annotations
 
@@ -178,3 +182,83 @@ def test_refresh_if_needed_refreshes_when_already_expired(tmp_path: Path):
     )
 
     assert refreshed is True
+
+
+@responses.activate
+def test_refresh_if_needed_retries_a_transient_invalid_totp_and_then_succeeds(tmp_path: Path):
+    # Regression: observed for real 2026-09-03 -- a valid TOTP code can still
+    # be rejected if it expires between being generated and the server
+    # validating the request. The very next attempt (fresh code) succeeded.
+    env_file = tmp_path / ".env.local"
+    current_token = _make_jwt(datetime.now(timezone.utc) - timedelta(minutes=5))
+    env_file.write_text(f"DHAN_ACCESS_TOKEN={current_token}\n")
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"message": "Invalid TOTP", "status": "error"},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"accessToken": "token-after-retry", "expiryTime": "2026-09-04T12:00:00Z"},
+        status=200,
+    )
+
+    sleeps = []
+    refreshed = refresh_if_needed(
+        current_token=current_token,
+        client_id="1113562866",
+        pin="1234",
+        totp_secret=TOTP_SECRET,
+        env_file=env_file,
+        threshold=timedelta(hours=2),
+        max_attempts=3,
+        sleep=sleeps.append,
+    )
+
+    assert refreshed is True
+    assert "token-after-retry" in env_file.read_text()
+    assert len(responses.calls) == 2
+    assert len(sleeps) == 1  # slept once, between the two attempts
+
+
+@responses.activate
+def test_refresh_if_needed_gives_up_after_max_attempts(tmp_path: Path):
+    env_file = tmp_path / ".env.local"
+    current_token = _make_jwt(datetime.now(timezone.utc) - timedelta(minutes=5))
+    env_file.write_text(f"DHAN_ACCESS_TOKEN={current_token}\n")
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"message": "Invalid TOTP", "status": "error"},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"message": "Invalid TOTP", "status": "error"},
+        status=200,
+    )
+    responses.add(
+        responses.POST,
+        "https://auth.dhan.co/app/generateAccessToken",
+        json={"message": "Invalid TOTP", "status": "error"},
+        status=200,
+    )
+
+    with pytest.raises(DhanTokenRefreshError, match="Invalid TOTP"):
+        refresh_if_needed(
+            current_token=current_token,
+            client_id="1113562866",
+            pin="1234",
+            totp_secret=TOTP_SECRET,
+            env_file=env_file,
+            threshold=timedelta(hours=2),
+            max_attempts=3,
+            sleep=lambda _: None,
+        )
+
+    assert len(responses.calls) == 3
+    # The original (still-expired) token must be left untouched on failure.
+    assert current_token in env_file.read_text()

@@ -20,13 +20,13 @@ Plain-language list of things only you can do or decide. Updated as the project 
 - [ ] Confirm you're comfortable with the production key having order-placement capability at the
   API level even though our bot will never call those endpoints (Dhan doesn't offer a data-only
   key). Access is scoped by what our code calls, not by the key itself.
-- [x] Automatic daily token refresh built (`bot/growmore_bot/broker/token_refresh.py`,
-  2026-09-03) — needs `DHAN_PIN` and `DHAN_TOTP_SECRET` in the repo-root `.env.local` to activate.
-  **You don't currently have the raw TOTP secret saved** (only scanned the QR code) — most
-  authenticator apps can't reveal it after the fact. Reset TOTP on Dhan
-  (`web.dhan.co → Profile → DhanHQ Trading APIs → Set-up TOTP`) to get a fresh QR + text key, and
-  save the text key (a password manager, not a plain note) before scanning it again. Without this,
-  the bot still runs fine but you'll need to regenerate the access token by hand every 24 hours.
+- [x] **Automatic daily token refresh fully working**, verified end-to-end 2026-09-03: `DHAN_PIN`
+  and `DHAN_TOTP_SECRET` are set in the repo-root `.env.local`, and a real call to Dhan's headless
+  `generateAccessToken` endpoint succeeded (a fresh 24h token was issued). The running bot
+  (`python -m growmore_bot.main`) now refreshes itself automatically whenever the token is within
+  2 hours of expiring — no more manual daily regeneration. (One early test attempt failed with
+  "Invalid TOTP" — turned out to be a one-off timing fluke, not a wrong secret or a bug; confirmed
+  by comparing a locally-generated code against the authenticator app in real time before retrying.)
 
 ## Before enabling anything beyond paper trading
 - [ ] Decide per-strategy virtual capital and risk limits (defaults are placeholders in `bot/growmore_bot/config.py` — currently ₹5,00,000 per strategy, review before relying on the numbers).

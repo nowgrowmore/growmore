@@ -23,18 +23,21 @@ is the raw base32 seed shown alongside the QR code when TOTP was set up on
 Dhan (web.dhan.co -> Profile -> DhanHQ Trading APIs -> Set-up TOTP) -- NOT
 a live 6-digit code, which changes every 30 seconds and can't be stored.
 
-Not yet verified against a live call: the account owner didn't have the
-PIN/TOTP secret in hand when this was written, so the response field names
-below (accessToken, expiryTime) are per Dhan's documented API guide, not
-confirmed against a real response. Verify on first live use and adjust the
-parsing in generate_access_token_via_totp() if the real shape differs.
+Response field names (accessToken, expiryTime) were confirmed against a
+real live call 2026-09-03. That same live testing surfaced a real failure
+mode `refresh_if_needed` now retries for: a valid TOTP code can still be
+rejected ("Invalid TOTP") if it expires in the second or two between being
+generated and Dhan's server validating the request -- a timing fluke, not
+a wrong secret. The very next attempt (with a freshly generated code)
+succeeded.
 """
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pyotp
 import requests
@@ -45,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 GENERATE_ACCESS_TOKEN_URL = "https://auth.dhan.co/app/generateAccessToken"
 DEFAULT_REFRESH_THRESHOLD = timedelta(hours=2)
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_RETRY_DELAY_SECONDS = 5.0
 
 
 class DhanTokenRefreshError(RuntimeError):
@@ -102,20 +107,42 @@ def refresh_if_needed(
     env_file: Path,
     threshold: timedelta = DEFAULT_REFRESH_THRESHOLD,
     now: Optional[datetime] = None,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """Refresh the access token (and update `env_file`) if it's within
     `threshold` of expiring, or already expired. Returns True if a refresh
     happened, False if the current token still has enough time left.
+
+    Retries up to `max_attempts` times on failure -- observed for real that
+    a valid TOTP code can be rejected by a fluke of timing (see module
+    docstring), and each retry generates a brand-new code rather than
+    reusing the one that just failed. Only raises DhanTokenRefreshError
+    after every attempt has failed; the original (still-expiring) token in
+    `env_file` is left untouched in that case.
     """
     now = now or datetime.now(timezone.utc)
     exp = _decode_jwt_exp(current_token)
     if exp is not None and now < exp - threshold:
         return False
 
-    new_token, expiry_raw = generate_access_token_via_totp(client_id, pin, totp_secret)
-    write_access_token_to_env_file(env_file, new_token)
-    logger.info("Dhan access token refreshed, new expiry: %s", expiry_raw)
-    return True
+    last_error: Optional[DhanTokenRefreshError] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            new_token, expiry_raw = generate_access_token_via_totp(client_id, pin, totp_secret)
+        except DhanTokenRefreshError as e:
+            last_error = e
+            logger.warning("Dhan token refresh attempt %s/%s failed: %s", attempt, max_attempts, e)
+            if attempt < max_attempts:
+                sleep(retry_delay_seconds)
+            continue
+        write_access_token_to_env_file(env_file, new_token)
+        logger.info("Dhan access token refreshed, new expiry: %s", expiry_raw)
+        return True
+
+    assert last_error is not None
+    raise last_error
 
 
 __all__ = [

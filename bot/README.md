@@ -63,6 +63,11 @@ Without them, the bot behaves as before: it raises a clear
 `DhanTokenExpiredError` once the token actually expires, and you regenerate
 one manually via `web.dhan.co`.
 
+Retries up to 3 times (5s apart) on failure: verified for real that a valid
+TOTP code can occasionally be rejected ("Invalid TOTP") purely from timing
+(the code expires in the second or two between being generated and Dhan's
+server validating it) -- retrying with a freshly generated code succeeds.
+
 You can also run the refresh check on its own (e.g. from a daily cron job
 before market open, or just to check status):
 
