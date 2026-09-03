@@ -6,10 +6,20 @@ file and never committed. See bot/README.md for local setup.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Repo-root .env.local, resolved from this file's own location -- NOT relative
+# to the current working directory. A relative "​.env.local" here only worked
+# if you happened to `cd` to the exact right place first; `python -m
+# growmore_bot.main` run from bot/ (the documented way to run it) would
+# silently look for bot/.env.local, which doesn't exist, and Settings() would
+# fail with "field required" for every secret even though .env.local is
+# sitting right there at the repo root.
+_REPO_ROOT_ENV_LOCAL = Path(__file__).resolve().parents[2] / ".env.local"
 
 
 class CommodityPlaceholder(BaseModel):
@@ -102,7 +112,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env.local",
+        env_file=str(_REPO_ROOT_ENV_LOCAL),
         env_file_encoding="utf-8",
         extra="ignore",
     )

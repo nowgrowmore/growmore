@@ -14,6 +14,23 @@ def _base_env(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/growmore_test")
 
 
+def test_env_file_resolves_to_repo_root_not_cwd():
+    # Regression: env_file used to be the relative string ".env.local", which
+    # pydantic-settings resolves against the *current working directory* --
+    # so `python -m growmore_bot.main` run from bot/ (the documented way to
+    # run it) silently looked for bot/.env.local (doesn't exist) instead of
+    # the real .env.local at the repo root, and every secret failed with
+    # "field required" even though .env.local was sitting right there.
+    from growmore_bot.config import _REPO_ROOT_ENV_LOCAL
+
+    assert _REPO_ROOT_ENV_LOCAL.is_absolute()
+    assert _REPO_ROOT_ENV_LOCAL.name == ".env.local"
+    repo_root = _REPO_ROOT_ENV_LOCAL.parent
+    # The repo root has both bot/ and docs/ as siblings -- bot/ itself does not.
+    assert (repo_root / "bot").is_dir()
+    assert (repo_root / "docs").is_dir()
+
+
 def test_settings_loads_required_fields_from_env(monkeypatch):
     from growmore_bot.config import Settings
 
