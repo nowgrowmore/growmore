@@ -48,9 +48,20 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    def __init__(self, strategy: Strategy, initial_capital: float):
+    def __init__(self, strategy: Strategy, initial_capital: float, lot_size: int = 1):
+        """`lot_size` is the real contract trading unit (e.g. Gold Mini=100 grams,
+        Copper=2500 kg -- see growmore_bot.config.CommodityPlaceholder). Defaults
+        to 1 (a single raw unit of the price series) for backward compatibility;
+        every existing caller/test that doesn't pass it behaves exactly as
+        before. Folded into `qty` once at fill time so every downstream
+        calculation (cash, mark-to-market, exit P&L) is automatically scaled --
+        profit factor and win rate are unaffected (they're ratios/signs of
+        uniformly-scaled trade P&Ls), only Sharpe and max drawdown change,
+        since those are computed against the (unscaled) initial_capital.
+        """
         self.strategy = strategy
         self.initial_capital = initial_capital
+        self.lot_size = lot_size
 
     def run(self, bars: Sequence[Any]) -> BacktestResult:
         trades: list[Trade] = []
@@ -68,7 +79,7 @@ class BacktestEngine:
                 fill_price = float(bar.open)
 
                 if signal.action == SignalAction.BUY and position_qty == 0:
-                    qty = signal.size or 1
+                    qty = (signal.size or 1) * self.lot_size
                     position_qty = qty
                     position_entry_price = fill_price
                     open_trade = Trade(side="buy", entry_price=fill_price, entered_at=bar.timestamp)

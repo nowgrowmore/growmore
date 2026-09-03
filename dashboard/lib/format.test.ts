@@ -3,8 +3,11 @@ import type { BacktestRun, PaperPosition } from "./types";
 import {
   filterBacktestRuns,
   formatCurrency,
+  formatDateRange,
   formatPercent,
   formatNumber,
+  formatProfitFactor,
+  formatStrategyParams,
   sortBacktestRuns,
   summarizePositions,
   toNumber,
@@ -162,5 +165,49 @@ describe("filterBacktestRuns", () => {
 
   it("returns all rows when no filters are given", () => {
     expect(filterBacktestRuns(runs, {})).toHaveLength(3);
+  });
+});
+
+describe("formatProfitFactor", () => {
+  it("renders null as the infinite symbol, not the generic missing-value dash", () => {
+    // Regression: backtest_runs.profit_factor is NULL specifically to mean
+    // "infinite" (zero losing trades) -- see BacktestEngine.run_and_persist.
+    // The generic formatNumber(null) => "—" reads as absent data, which is
+    // a different and misleading claim.
+    expect(formatProfitFactor(null)).toBe("∞");
+    expect(formatProfitFactor(undefined)).toBe("∞");
+  });
+
+  it("formats a real profit factor like formatNumber", () => {
+    expect(formatProfitFactor("2.5")).toBe("2.50");
+    expect(formatProfitFactor(0)).toBe("0.00");
+  });
+});
+
+describe("formatStrategyParams", () => {
+  it("renders params sorted by key as key=value pairs", () => {
+    expect(formatStrategyParams({ slow_period: 20, fast_period: 5 })).toBe(
+      "fast_period=5, slow_period=20"
+    );
+  });
+
+  it("renders an em dash for missing or empty params", () => {
+    expect(formatStrategyParams(null)).toBe("—");
+    expect(formatStrategyParams(undefined)).toBe("—");
+    expect(formatStrategyParams({})).toBe("—");
+  });
+});
+
+describe("formatDateRange", () => {
+  it("renders a start -> end label", () => {
+    // en-GB's short month for September is "Sept" (an ICU quirk, not a typo).
+    expect(formatDateRange("2025-09-02T00:00:00Z", "2026-09-01T00:00:00Z")).toBe(
+      "2 Sept 2025 → 1 Sept 2026"
+    );
+  });
+
+  it("renders an em dash when either bound is missing", () => {
+    expect(formatDateRange(null, "2026-09-01T00:00:00Z")).toBe("—");
+    expect(formatDateRange("2025-09-02T00:00:00Z", undefined)).toBe("—");
   });
 });

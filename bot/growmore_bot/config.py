@@ -21,6 +21,12 @@ class CommodityPlaceholder(BaseModel):
     which month `security_id` currently points at, so it's obvious when this
     needs to be refreshed (shortly before/at expiry) rather than silently going
     stale. Looked up 2026-09-03 for the then-current front-month contract.
+
+    `lot_size` is the real MCX contract trading unit (looked up from MCX's
+    official contract specs / mirrored broker spec pages 2026-09-03, never
+    guessed) -- without it, a backtest treats every instrument as "1 raw unit
+    of the price series," which makes Sharpe/Max Drawdown incomparable across
+    commodities at very different price levels.
     """
 
     symbol: str
@@ -28,20 +34,68 @@ class CommodityPlaceholder(BaseModel):
     exchange_segment: str = "MCX_COMM"
     security_id: str = "TODO_LOOKUP_DHAN_SECURITY_ID"
     contract_expiry: str | None = None  # ISO date; None only for the not-yet-looked-up default
+    lot_size: int = 1
 
 
 DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
     CommodityPlaceholder(
-        symbol="GOLDM", name="Gold Mini", security_id="569003", contract_expiry="2026-10-05"
+        symbol="GOLDM",
+        name="Gold Mini",
+        security_id="569003",
+        contract_expiry="2026-10-05",
+        lot_size=100,  # 100 grams
     ),
     CommodityPlaceholder(
-        symbol="SILVERM", name="Silver Mini", security_id="483080", contract_expiry="2026-11-30"
+        symbol="SILVERM",
+        name="Silver Mini",
+        security_id="483080",
+        contract_expiry="2026-11-30",
+        lot_size=5,  # 5 kg
     ),
     CommodityPlaceholder(
         symbol="CRUDEOILM",
         name="Crude Oil Mini",
         security_id="565900",
         contract_expiry="2026-09-21",
+        lot_size=10,  # 10 barrels
+    ),
+    CommodityPlaceholder(
+        symbol="COPPER",
+        name="Copper",
+        security_id="571298",
+        contract_expiry="2026-09-30",
+        lot_size=2500,  # 2500 kg
+    ),
+    CommodityPlaceholder(
+        symbol="ZINCMINI",
+        name="Zinc Mini",
+        security_id="571302",
+        contract_expiry="2026-09-30",
+        lot_size=1000,  # 1 metric tonne
+    ),
+    CommodityPlaceholder(
+        symbol="NICKEL",
+        name="Nickel",
+        security_id="571304",
+        contract_expiry="2026-09-16",
+        # 250 kg effective the Sept-2025 contract revision onward (was 1500 kg
+        # before). Applied uniformly across our whole backtest window for now --
+        # see docs/technical-debt.md for the pre-revision-date caveat this implies.
+        lot_size=250,
+    ),
+    CommodityPlaceholder(
+        symbol="ALUMINI",
+        name="Aluminium Mini",
+        security_id="571296",
+        contract_expiry="2026-09-30",
+        lot_size=1000,  # 1 metric tonne
+    ),
+    CommodityPlaceholder(
+        symbol="LEADMINI",
+        name="Lead Mini",
+        security_id="571299",
+        contract_expiry="2026-09-30",
+        lot_size=1000,  # 1 metric tonne
     ),
 ]
 

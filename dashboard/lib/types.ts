@@ -34,7 +34,11 @@ export interface BacktestRun {
   // Joined convenience fields (populated by getBacktestRuns()).
   strategy_name?: string;
   strategy_version?: string;
+  strategy_params?: Record<string, number | string> | null;
   instrument_symbol?: string;
+  // count(*) from Postgres comes back as a string (bigint), same convention
+  // as the numeric columns above.
+  trade_count?: string | number;
 }
 
 export interface BacktestTrade {

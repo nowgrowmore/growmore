@@ -1,22 +1,28 @@
+import { Fragment } from "react";
 import Link from "next/link";
 import { getBacktestRuns } from "@/lib/db";
 import {
   filterBacktestRuns,
+  formatDateRange,
   formatNumber,
   formatPercent,
+  formatProfitFactor,
+  formatStrategyParams,
   sortBacktestRuns,
+  toNumber,
   type BacktestSortKey,
 } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
-const SORT_COLUMNS: { key: BacktestSortKey; label: string }[] = [
-  { key: "started_at", label: "Started" },
-  { key: "sharpe_ratio", label: "Sharpe" },
-  { key: "max_drawdown_pct", label: "Max drawdown" },
-  { key: "win_rate_pct", label: "Win rate" },
-  { key: "profit_factor", label: "Profit factor" },
-  { key: "cagr_pct", label: "CAGR" },
+const SORT_COLUMNS: { key: BacktestSortKey; label: string; explain: string }[] = [
+  { key: "started_at", label: "Started", explain: "When this backtest was run (not the price data's own dates -- see Timeframe)." },
+  { key: "trade_count", label: "Trades", explain: "Closed trades in this run. Higher is more statistically trustworthy -- treat anything under ~15 as too thin to act on, regardless of how good the other numbers look." },
+  { key: "sharpe_ratio", label: "Sharpe", explain: "Risk-adjusted return: reward per unit of volatility taken. Higher is better. Rough guide: <0.5 weak, 0.5-1 okay, >1 good, >2 excellent." },
+  { key: "max_drawdown_pct", label: "Max drawdown", explain: "The worst peak-to-trough decline this run lived through. Lower is better -- it's literally how much pain before recovery." },
+  { key: "win_rate_pct", label: "Win rate", explain: "% of closed trades that were profitable. Higher is generally better, but read it together with profit factor -- a high win rate with small wins and rare huge losses can still lose money overall." },
+  { key: "profit_factor", label: "Profit factor", explain: "Gross profit / gross loss. Above 1 means net profitable over the sample; higher is better. \"inf\" means zero losing trades in the sample -- a sign the sample is very thin, not proof the strategy never loses." },
+  { key: "cagr_pct", label: "CAGR", explain: "Annualized growth rate of this run's equity curve. Higher is better, but sensitive to the exact start/end dates of a short backtest -- weigh it less than Sharpe/profit factor for short runs." },
 ];
 
 interface BacktestsPageProps {
@@ -77,7 +83,8 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
       <h2 className="text-base font-semibold">Backtest runs</h2>
       <p className="max-w-2xl text-sm text-[color:var(--text-secondary)]">
         Review Sharpe, drawdown, win rate, and profit factor here before enabling a strategy for
-        live paper trading on the Strategies page.
+        live paper trading on the Strategies page. Column headers explain what each metric means
+        and whether higher or lower is better -- also summarized in the legend below the table.
       </p>
 
       <div className="flex flex-wrap gap-4 text-sm">
@@ -100,9 +107,13 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
           <thead>
             <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
               <th className="px-3 py-2 font-medium">Strategy</th>
+              <th className="px-3 py-2 font-medium">Params</th>
               <th className="px-3 py-2 font-medium">Instrument</th>
+              <th className="px-3 py-2 font-medium" title="The price-data window this backtest was run over -- distinct from when it was actually run (see Started).">
+                Timeframe
+              </th>
               {SORT_COLUMNS.map((col) => (
-                <th key={col.key} className="px-3 py-2 font-medium">
+                <th key={col.key} className="px-3 py-2 font-medium" title={col.explain}>
                   <Link href={sortHref(col.key)} className="hover:underline">
                     {col.label}
                     {sortKey === col.key ? (direction === "asc" ? " ↑" : " ↓") : ""}
@@ -117,8 +128,15 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
                 <td className="px-3 py-2">
                   {run.strategy_name} <span className="text-[color:var(--text-muted)]">v{run.strategy_version}</span>
                 </td>
+                <td className="px-3 py-2 text-[color:var(--text-secondary)]">
+                  {formatStrategyParams(run.strategy_params)}
+                </td>
                 <td className="px-3 py-2">{run.instrument_symbol}</td>
+                <td className="px-3 py-2 whitespace-nowrap text-[color:var(--text-secondary)]">
+                  {formatDateRange(run.period_start, run.period_end)}
+                </td>
                 <td className="px-3 py-2">{new Date(run.started_at).toLocaleDateString()}</td>
+                <td className="px-3 py-2 tabular-nums">{toNumber(run.trade_count)}</td>
                 <td className="px-3 py-2 tabular-nums">{formatNumber(run.sharpe_ratio ? Number(run.sharpe_ratio) : null)}</td>
                 <td className="px-3 py-2 tabular-nums">
                   {formatPercent(run.max_drawdown_pct ? Number(run.max_drawdown_pct) : null)}
@@ -126,9 +144,7 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
                 <td className="px-3 py-2 tabular-nums">
                   {formatPercent(run.win_rate_pct ? Number(run.win_rate_pct) : null)}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {formatNumber(run.profit_factor ? Number(run.profit_factor) : null)}
-                </td>
+                <td className="px-3 py-2 tabular-nums">{formatProfitFactor(run.profit_factor)}</td>
                 <td className="px-3 py-2 tabular-nums">
                   {formatPercent(run.cagr_pct ? Number(run.cagr_pct) : null)}
                 </td>
@@ -136,7 +152,7 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
             ))}
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={2 + SORT_COLUMNS.length} className="px-3 py-6 text-center text-[color:var(--text-muted)]">
+                <td colSpan={4 + SORT_COLUMNS.length} className="px-3 py-6 text-center text-[color:var(--text-muted)]">
                   No backtest runs match these filters.
                 </td>
               </tr>
@@ -144,6 +160,19 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
           </tbody>
         </table>
       </div>
+
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-2 rounded-lg border border-[color:var(--border-hairline)] bg-[color:var(--surface-1)] p-4 text-sm sm:grid-cols-2">
+        <dt className="font-medium">Timeframe</dt>
+        <dd className="text-[color:var(--text-secondary)] sm:col-start-2">
+          The price-data window backtested, not when the run was executed (see Started).
+        </dd>
+        {SORT_COLUMNS.filter((c) => c.key !== "started_at").map((col) => (
+          <Fragment key={col.key}>
+            <dt className="font-medium">{col.label}</dt>
+            <dd className="text-[color:var(--text-secondary)] sm:col-start-2">{col.explain}</dd>
+          </Fragment>
+        ))}
+      </dl>
     </div>
   );
 }

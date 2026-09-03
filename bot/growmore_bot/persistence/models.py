@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Numeric, Text, Uuid, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -41,6 +41,12 @@ class Instrument(Base):
     exchange_segment: Mapped[str] = mapped_column(Text, nullable=False)  # e.g. MCX_COMM
     security_id: Mapped[str] = mapped_column(Text, nullable=False)  # Dhan instrument id
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Real contract trading unit (e.g. Gold Mini=100, Copper=2500 -- looked up from MCX's official
+    # contract specs, never guessed). Without this, BacktestEngine treated every instrument as "1
+    # raw unit of the price series," which made Sharpe/Max Drawdown incomparable across commodities
+    # at very different price levels (confirmed 2026-09-03: base metals showed implausibly tiny
+    # drawdowns purely from this scaling bug). Defaults to 1 for backward compatibility.
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
     backtest_runs: Mapped[list["BacktestRun"]] = relationship(back_populates="instrument")
     paper_positions: Mapped[list["PaperPosition"]] = relationship(back_populates="instrument")

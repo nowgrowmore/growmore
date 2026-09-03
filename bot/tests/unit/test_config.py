@@ -69,13 +69,24 @@ def test_settings_default_commodity_universe_has_real_security_ids(monkeypatch):
 
     # Natural Gas intentionally excluded from the default universe for now.
     symbols = {c.symbol for c in settings.default_commodity_universe}
-    assert symbols == {"GOLDM", "SILVERM", "CRUDEOILM"}
+    assert symbols == {
+        "GOLDM",
+        "SILVERM",
+        "CRUDEOILM",
+        "COPPER",
+        "ZINCMINI",
+        "NICKEL",
+        "ALUMINI",
+        "LEADMINI",
+    }
     for commodity in settings.default_commodity_universe:
         # Looked up from Dhan's instrument master 2026-09-03 -- never guessed.
         assert commodity.security_id != "TODO_LOOKUP_DHAN_SECURITY_ID"
         assert commodity.security_id.isdigit()
         assert commodity.contract_expiry is not None
         assert commodity.exchange_segment == "MCX_COMM"
+        # Real MCX contract trading unit -- looked up 2026-09-03, never guessed.
+        assert commodity.lot_size > 0
 
 
 def test_settings_overridable_polling_interval(monkeypatch):

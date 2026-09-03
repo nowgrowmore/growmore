@@ -113,7 +113,12 @@ export async function getBacktestRuns(filters: BacktestRunFilters = {}): Promise
       b.*,
       s.name as strategy_name,
       s.version as strategy_version,
-      i.symbol as instrument_symbol
+      s.params as strategy_params,
+      i.symbol as instrument_symbol,
+      (
+        select count(*) from backtest_trades t
+        where t.backtest_run_id = b.id and t.pnl is not null
+      ) as trade_count
     from backtest_runs b
     join strategies s on s.id = b.strategy_id
     join instruments i on i.id = b.instrument_id
