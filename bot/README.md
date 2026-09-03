@@ -28,8 +28,15 @@ The bot reads its configuration from environment variables (see
 
 **Real credentials live only in the repo-root `.env.local`, which already
 exists and is gitignored.** Do not print or commit its contents. `Settings()`
-loads from `.env.local` automatically when run from the `bot/` directory with
-a real `.env.local` present, or you can `export` the variables yourself.
+resolves that file from its own location, not the current working directory,
+so it loads correctly no matter where you run `python -m growmore_bot.main`
+from -- you don't need to `cd` to the repo root or `export` anything by hand.
+
+`DATABASE_URL` must be present in the repo-root `.env.local` too, not just
+`dashboard/.env.local` -- the two `.env.local` files aren't shared
+automatically. If you've only ever run `vercel env pull` inside `dashboard/`,
+copy the `DATABASE_URL` line from there into the repo-root `.env.local`
+before running the bot for the first time.
 
 `.env.test` (in this directory) is checked into git and holds only safe
 placeholder values (a fake Dhan token, a local Postgres URL) so the test
