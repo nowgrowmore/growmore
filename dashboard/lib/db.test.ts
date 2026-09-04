@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __setTestClient,
+  getAllPaperPositions,
   getAuditLog,
   getBotConfigs,
   getBotStatus,
@@ -53,6 +54,22 @@ describe("getOpenPaperPositions", () => {
 
     expect(result).toBe(fakeRows);
     expect(fakeSql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("getAllPaperPositions", () => {
+  it("joins bot_config filtered to mode='paper', so a live-mode config sharing the same " +
+     "strategy+instrument never duplicates the row via a fan-out join", async () => {
+    const fakeRows = [{ id: "p1", status: "open" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getAllPaperPositions();
+
+    expect(result).toBe(fakeRows);
+    type MockFn = { mock: { calls: unknown[][] } };
+    const queryText = ((fakeSql as unknown as MockFn).mock.calls[0][0] as string[]).join("");
+    expect(queryText).toContain("mode = 'paper'");
   });
 });
 

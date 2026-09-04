@@ -107,7 +107,8 @@ export async function getAllPaperPositions(limit = 200): Promise<PaperPosition[]
     from paper_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
-    left join bot_config c on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id
+    left join bot_config c
+      on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id and c.mode = 'paper'
     left join bot_signal_state st on st.bot_config_id = c.id
     order by coalesce(p.closed_at, p.opened_at) desc
     limit ${limit}
