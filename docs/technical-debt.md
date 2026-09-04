@@ -1,5 +1,15 @@
 # Technical Debt / Known Limitations
 
+- **(Found + worked around 2026-09-04) `${JSON.stringify(x)}::jsonb` silently double-encodes an
+  EMPTY object via the `postgres` npm package.** Creating the `vwap_session_bounce` strategies row
+  with `params: {}` using this project's usual pattern (`${JSON.stringify({})}::jsonb`) stored a
+  JSONB **string** `"{}"` instead of a JSONB **object** `{}` (confirmed via `jsonb_typeof`) — broke
+  the live scheduler with `TypeError: ... argument after ** must be a mapping, not str` for one real
+  tick before being caught and fixed (`update ... set params = '{}'::jsonb`, a literal rather than a
+  bound parameter). Every other use of this pattern in `dashboard/lib/db.ts` passes a non-empty
+  object (always includes at least `bot_config_id`) and is unaffected — this only bites a genuinely
+  empty `{}`. Not fixed at the pattern level (would touch unrelated working code); just noting the
+  trap for the next empty-object JSONB insert.
 - **(2026-09-04) Two new Gold Mini strategies added; one tested with a real negative result, one
   untested in production.** `regime_switch` (ADX-gated MACD/RSI or MACD/VWAP+EMA) was backtested
   against real 5-year Gold Mini data and **underperformed the standalone strategies it's built from

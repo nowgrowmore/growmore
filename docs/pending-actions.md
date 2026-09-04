@@ -45,6 +45,13 @@ Plain-language list of things only you can do or decide. Updated as the project 
   threshold; MACD/signal gap of ~0.2), specifically to see different strategy behaviors (a
   mean-reversion strategy vs. two different MACD parameterizations) play out for real, not just in
   backtest. All three ticking correctly as of this check.
+- [x] **4th `bot_config` added (2026-09-04)**: VWAP+CPR Session-Bounce + Gold Mini, paper mode,
+  same ₹2,50,000/1 lot/₹15,000 risk limits. Unlike the others, this one has **no backtest at all by
+  design** (see `docs/goldmini-regime-switch-results.md`) — it trades off Dhan's live intraday
+  session VWAP, which doesn't exist in historical data, so it's being validated by real paper trading
+  instead. Confirmed ticking correctly. A related idea (an ADX-gated regime-switch between MACD and
+  RSI/VWAP+EMA) WAS backtested on real 5-year Gold Mini data and came back a clear negative result —
+  not enabled anywhere.
 - [ ] Decide whether to invest in a continuous/rolled futures series (splicing consecutive expired
   contract-months together) — turned out not to be needed: real per-contract history already goes
   back the full 5 years Dhan advertises (confirmed 2026-09-03), so this is no longer a blocker.
