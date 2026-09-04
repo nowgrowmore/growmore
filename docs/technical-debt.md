@@ -17,6 +17,21 @@
   genuinely different (non-crossing, threshold-breach) design that shouldn't be changed without its
   own separate review (changing it would also retroactively alter the semantics behind the already-
   published `docs/backtest-results.md` sweep, which used the old behavior).
+- **(Investigated + throttled 2026-09-04) Repeated `max_position_size_rejected` audit_log entries
+  are a real signal, not a recurrence of the fixed repeated-signal bug above.** Noticed via the
+  dashboard's audit log showing the same rejection for ALUMINI (live) and COPPER (paper) roughly
+  every 5-minute tick for ~50 minutes around MCX's 2026-09-04 market open. Root-caused by checking
+  each strategy's own crossing state (`bot_signal_state.crossing_state`) directly against the real
+  DB: both were genuinely, repeatedly crossing their threshold (MACD/signal spread, RSI vs. 30) due
+  to real intraday price noise right at the boundary — each rejection really was a fresh BUY signal,
+  correctly rejected because a position was already open. `RsiMeanReversionStrategy`/`MacdTrendStrategy`
+  don't consult `position_state` at all (by design — signal generation is separate from position
+  sizing, per `Strategy.on_bar`'s contract), so they have no way to know not to re-signal BUY while
+  already holding; the `max_position_size` guard is exactly the intended safety net for this. Not a
+  bug, but genuinely low marginal audit-log value once already recorded once recently — throttled to
+  one audit_log write per 30 minutes per config via a new
+  `bot_signal_state.last_max_position_rejection_logged_at` column (`bot.log`'s own warning is
+  unaffected, still written every single tick).
 - **(2026-09-04) First real live-trading attempt: rejected safely, root-caused, fixed.** With the
   account owner's explicit go-ahead, Aluminium Mini's MACD (12,26,9) config was switched to
   `mode="live"` and `LIVE_TRADING_ENABLED=true` was set on the VPS. The very next tick placed a real
@@ -46,28 +61,37 @@
   `live_positions`/`live_orders` tables (never `paper_positions`/`paper_orders`, so real and
   simulated data can never mix). Full TDD coverage, all mocked (no real order was ever placed while
   building this). Known gaps, left as gaps rather than silently papered over:
-  1. **(Partially fixed 2026-09-04) Fill reconciliation now exists at the order level, not yet at the
-     position level.** A `MARKET` order's placement response only carries an order ID and an initial
-     status (e.g. `"TRANSIT"`), not a confirmed fill price. `LiveTradingEngine.reconcile_pending_orders()`
-     now polls Dhan's `get_order_by_id` once per tick for every `live_orders` row still in a
-     non-terminal status and corrects that row's `order_status`/`fill_price` to Dhan's real values.
-     **Still not done**: retroactively recomputing the associated `live_positions.avg_entry_price`/
-     `realized_pnl` when the real fill price differs from the approximate live-quote LTP used at
-     placement (harder — a position can be built from several blended fills) — the position-level
-     numbers remain an approximation even after order-level reconciliation runs. Also worth noting:
-     unlike `place_market_order`'s request schema (verified against the `dhanhq` SDK's own source),
-     the response field names this relies on (`orderStatus`, `averageTradedPrice`) are only
-     documented, not independently verified against a live response yet (no live order has ever been
-     placed) — parsing is deliberately defensive (a missing/renamed field just skips that order,
-     logged, rather than crashing or corrupting data), but treat this as unverified until a real
-     order actually gets reconciled once live trading is ever turned on.
+  1. **(Fixed 2026-09-04) Fill reconciliation now corrects position-level P&L too, not just the
+     order's own record.** A `MARKET` order's placement response only carries an order ID and an
+     initial status (e.g. `"TRANSIT"`), not a confirmed fill price.
+     `LiveTradingEngine.reconcile_pending_orders()` polls Dhan's `get_order_by_id` once per tick for
+     every `live_orders` row still in a non-terminal status and corrects that row's
+     `order_status`/`fill_price` to Dhan's real values. When the real fill price differs from the
+     approximate live-quote LTP used at placement, `_retroactively_correct_position` now ripples that
+     correction into the position too: for a SELL, the order's own `pnl`/old fill price let the
+     avg_entry_price used at that sale be back-solved exactly, so the corrected pnl (and the delta
+     applied to `realized_pnl`) doesn't need to know the position's *current* avg_entry_price, which
+     may have moved since. For a BUY, avg_entry_price is only recomputed when it's safe to do exactly
+     — the position is still open and has never had a sell against it — as the quantity-weighted
+     average of every buy order's (corrected) fill price; once any sell has happened, exactly
+     correcting cost basis needs per-lot tracking this engine doesn't have, so it's logged for manual
+     review instead of guessed at. Also worth noting: unlike `place_market_order`'s request schema
+     (verified against the `dhanhq` SDK's own source), the response field names this relies on
+     (`orderStatus`, `averageTradedPrice`) are only documented, not independently verified against a
+     live response beyond the one real order placed so far.
   2. **(Fixed 2026-09-04) Daily-loss-limit trip on a live config now attempts to auto-close the real
-     position** — `LiveTradingEngine._trip_daily_loss_guard` places a real closing SELL for whatever's
-     open before disabling the config, and audit-logs `auto_close_attempted`/`auto_close_succeeded`/
-     `auto_close_pnl` either way. If the closing order itself fails (caught, never raised), the
-     position is left open and the failure is logged clearly as needing manual review rather than
-     silently retried or hidden. Applied the same fix to `PaperTradingEngine` for consistency/realism,
-     even though a failed *simulated* close carries no real risk.
+     position, and retries with backoff if that fails.** `LiveTradingEngine._trip_daily_loss_guard`
+     places a real closing SELL for whatever's open before disabling the config, and audit-logs
+     `auto_close_attempted`/`auto_close_succeeded`/`auto_close_pnl` either way. If the closing order
+     itself fails (caught, never raised), the config is marked `pending_auto_close` with a geometric
+     backoff schedule (5, 10, 20, 40... minutes, capped at 60, never gives up on its own) —
+     `run_all_enabled_configs` retries it every tick via `LiveTradingEngine.retry_pending_auto_close`,
+     DELIBERATELY outside the `enabled=True` filter that gates everything else, since the whole point
+     is retrying a position close for a config that's already disabled. A successful retry never
+     re-enables the config for fresh trades, only flattens the position; each attempt (success or
+     failure) writes its own `live_auto_close_retry_succeeded`/`live_auto_close_retry_failed` audit
+     entry. Applied the original (non-retrying) auto-close fix to `PaperTradingEngine` too, for
+     consistency/realism, even though a failed *simulated* close carries no real risk.
   3. **Dashboard doesn't read `live_positions`/`live_orders` or expose `bot_config.mode` at all
      yet** — not urgent while `live_trading_enabled` stays False, but needed before this is ever
      actually used, so real activity is visible somewhere.

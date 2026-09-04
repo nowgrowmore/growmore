@@ -17,6 +17,7 @@ erDiagram
     STRATEGIES ||--o{ LIVE_POSITIONS : "traded by"
     INSTRUMENTS ||--o{ LIVE_POSITIONS : "held in"
     LIVE_POSITIONS ||--o{ LIVE_ORDERS : "filled by"
+    BOT_CONFIG ||--o| BOT_SIGNAL_STATE : "current signal for"
 
     INSTRUMENTS {
         uuid id PK
@@ -115,7 +116,29 @@ erDiagram
         numeric max_position_size
         numeric daily_loss_limit
         text mode "paper (default) | live -- see CLAUDE.md non-negotiables"
+        boolean pending_auto_close "set when a real auto-close order failed; retried with backoff"
+        integer auto_close_retry_count
+        timestamptz auto_close_next_retry_at
         timestamptz updated_at
+    }
+    BOT_SIGNAL_STATE {
+        uuid id PK
+        uuid bot_config_id FK "unique -- one row per config, upserted every tick"
+        text last_signal "HOLD|BUY|SELL"
+        timestamptz checked_at
+        numeric ltp
+        numeric prev_close "previous trading day's close, for today's %% change"
+        numeric daily_pnl "today's cumulative realized P&L for the daily_loss_limit guard"
+        jsonb indicators "Strategy.debug_state(), display-only"
+        jsonb crossing_state "Strategy.get_state_snapshot(), restored after warm-up each tick"
+        timestamptz last_max_position_rejection_logged_at "throttles repeat audit_log entries to 1/30min"
+    }
+    BOT_STATUS {
+        uuid id PK "singleton row"
+        boolean live_trading_enabled
+        timestamptz last_tick_at
+        numeric available_balance "Dhan real fund balance"
+        numeric utilized_margin
     }
     AUDIT_LOG {
         uuid id PK
@@ -138,5 +161,9 @@ erDiagram
 - `live_positions`/`live_orders` mirror `paper_positions`/`paper_orders` exactly (plus
   `broker_order_id`/`order_status` on `live_orders`) but are kept as fully separate tables so real
   and simulated trading data can never be confused with each other, in the database or on the
-  dashboard. The dashboard does not read these tables yet — see docs/technical-debt.md.
+  dashboard. The dashboard reads both, filterable by a paper/live mode toggle on every page.
+- `bot_signal_state` and `bot_status` are operational/display state, not user configuration — the
+  former is one row per `bot_config` (what did the strategy just see), the latter a single
+  process-wide singleton (is the bot armed, when did it last tick, current Dhan fund balance).
+  Neither is written by the dashboard; both are upserted by the scheduler every tick.
 - Money/price columns are `numeric`, never floating point.

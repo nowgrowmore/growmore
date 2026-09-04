@@ -65,10 +65,14 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 - [x] **Real order-placement code path built** (2026-09-04) — `dhan_order_client.py` +
   `live/engine.py` + `bot_config.mode`, fully tested, off end to end.
-- [x] **Order-level fill reconciliation + auto-close on a tripped daily loss limit, added 2026-09-04**
-  — see `docs/technical-debt.md` for exactly what these do and what's still not covered (position-
-  level P&L isn't retroactively corrected by reconciliation yet; a failed auto-close order leaves the
-  position open for manual review rather than retrying).
+- [x] **Order-level + position-level fill reconciliation, and auto-close-with-retry on a tripped
+  daily loss limit** (added 2026-09-04, position-level correction + retry added 2026-09-04) — see
+  `docs/technical-debt.md` for exactly what these do. A failed auto-close no longer just sits there:
+  it retries automatically with backoff until it succeeds.
+- [x] **GOLDM RSI Mean-Reversion (7, 30/70) prepped for live** (2026-09-04) — `mode` set to `'live'`
+  but left **disabled**, specifically so it doesn't start placing real orders on its own (live
+  trading is already globally armed for ALUMINI). It now shows up filtered to "Live" on the
+  Strategies page, ready to flip on with the existing enable/disable toggle whenever you decide to.
 - [ ] **How to actually turn this on, when the items below are ready:** (1) set `LIVE_TRADING_ENABLED
   =true` in the bot's `.env.local`, (2) directly update the specific `bot_config` row(s) you want live
   to `mode = 'live'` in the database (no dashboard UI for this, deliberately) — everything else (which
