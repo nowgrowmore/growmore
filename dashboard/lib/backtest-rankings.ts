@@ -54,6 +54,17 @@ export function rankByCriterion(
     .slice(0, limit);
 }
 
+export type Criterion = "composite" | RankableKey;
+
+export const RANKING_CRITERIA: { value: Criterion; label: string }[] = [
+  { value: "composite", label: "Overall pick" },
+  { value: "cagr_pct", label: "CAGR" },
+  { value: "sharpe_ratio", label: "Sharpe" },
+  { value: "profit_factor", label: "Profit factor" },
+  { value: "win_rate_pct", label: "Win rate" },
+  { value: "max_drawdown_pct", label: "Max drawdown" },
+];
+
 /** Overall pick: average percentile rank across CAGR and Sharpe, among runs
  * passing the guardrails -- a run has to be genuinely good on BOTH growth
  * and risk-adjusted quality to rank highly, not just spike one metric.
@@ -81,4 +92,50 @@ export function rankByComposite(runs: BacktestRun[], limit = 10): BacktestRun[] 
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(({ run }) => run);
+}
+
+/** The most recent backtest run for a given (strategy, instrument) pair --
+ * the same pairing a bot_config trades against. `undefined` when this
+ * config has never been backtested. */
+export function findMatchingBacktestRun(
+  config: { strategy_id: string; instrument_id: string },
+  runs: BacktestRun[]
+): BacktestRun | undefined {
+  const matches = runs.filter(
+    (r) => r.strategy_id === config.strategy_id && r.instrument_id === config.instrument_id
+  );
+  if (matches.length === 0) return undefined;
+  return matches.reduce((latest, r) =>
+    new Date(r.started_at).getTime() > new Date(latest.started_at).getTime() ? r : latest
+  );
+}
+
+export interface RankPosition {
+  criterion: Criterion;
+  label: string;
+  rank: number; // 1-based
+}
+
+/** Where a specific backtest run stands among ALL guardrail-passing runs,
+ * for each ranking criterion -- only includes a criterion where the run
+ * places in the top `limit` (default 10), i.e. it would actually be visible
+ * on the /rankings page for that criterion. */
+export function findRankPositions(
+  run: BacktestRun | undefined,
+  allRuns: BacktestRun[],
+  limit = 10
+): RankPosition[] {
+  if (!run) return [];
+  const positions: RankPosition[] = [];
+  for (const { value, label } of RANKING_CRITERIA) {
+    const ranked =
+      value === "composite"
+        ? rankByComposite(allRuns, allRuns.length)
+        : rankByCriterion(allRuns, value, allRuns.length);
+    const idx = ranked.findIndex((r) => r.id === run.id);
+    if (idx !== -1 && idx < limit) {
+      positions.push({ criterion: value, label, rank: idx + 1 });
+    }
+  }
+  return positions;
 }

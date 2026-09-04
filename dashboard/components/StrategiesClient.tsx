@@ -7,17 +7,20 @@ import {
   computePctChangeToday,
   formatCurrency,
   formatPercent,
+  formatStrategyParams,
+  formatStrategyParamsTooltip,
   timeAgo,
   toNumber,
 } from "@/lib/format";
 import { explainSignal } from "@/lib/signal-explain";
 import { buildGaugeConfig } from "@/lib/strategy-gauge";
 import { STRATEGY_INFO } from "@/lib/strategy-info";
+import { findMatchingBacktestRun, findRankPositions } from "@/lib/backtest-rankings";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
 import { ModeFilter } from "@/components/ModeFilter";
 import { LevelGauge } from "@/components/LevelGauge";
-import type { BotConfig } from "@/lib/types";
+import type { BacktestRun, BotConfig } from "@/lib/types";
 import { Fragment } from "react";
 
 type Mode = "all" | "paper" | "live";
@@ -61,11 +64,17 @@ function lossBarColor(severity: "ok" | "warning" | "critical"): string {
 
 interface StrategiesClientProps {
   configs: BotConfig[];
+  backtestRuns: BacktestRun[];
   onToggle: (id: string, enabled: boolean) => Promise<void>;
   onSaveRiskParams: (id: string, formData: FormData) => Promise<void>;
 }
 
-export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: StrategiesClientProps) {
+export function StrategiesClient({
+  configs,
+  backtestRuns,
+  onToggle,
+  onSaveRiskParams,
+}: StrategiesClientProps) {
   const [mode, setMode] = useState<Mode>("live");
   const filtered = mode === "all" ? configs : configs.filter((c) => c.mode === mode);
 
@@ -113,6 +122,13 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                       <div className="text-sm text-[color:var(--text-secondary)]">
                         {config.instrument_symbol}
                         {" · "}
+                        <span
+                          className="font-mono text-xs"
+                          title={formatStrategyParamsTooltip(config.strategy_name ?? "", config.strategy_params) || undefined}
+                        >
+                          {formatStrategyParams(config.strategy_params)}
+                        </span>
+                        {" · "}
                         <Link
                           href={`/backtests?strategy=${config.strategy_id}&instrument=${config.instrument_id}`}
                           className="text-[color:var(--series-1)] hover:underline"
@@ -120,6 +136,25 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                           View backtest
                         </Link>
                       </div>
+                      {(() => {
+                        const matchedRun = findMatchingBacktestRun(config, backtestRuns);
+                        const positions = findRankPositions(matchedRun, backtestRuns);
+                        if (positions.length === 0) return null;
+                        return (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {positions.map((pos) => (
+                              <Link
+                                key={pos.criterion}
+                                href={`/rankings`}
+                                className="rounded bg-[color:var(--series-1)]/10 px-1.5 py-0.5 text-xs font-medium text-[color:var(--series-1)] hover:underline"
+                                title={`#${pos.rank} in the top-10 ${pos.label} backtest ranking`}
+                              >
+                                #{pos.rank} {pos.label}
+                              </Link>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                   <RiskParamsForm

@@ -1,11 +1,11 @@
-import { getBotConfigs } from "@/lib/db";
+import { getBacktestRuns, getBotConfigs } from "@/lib/db";
 import { StrategiesClient } from "@/components/StrategiesClient";
 import { saveRiskParams, toggleBotConfigEnabled } from "./actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function StrategiesPage() {
-  const configs = await getBotConfigs();
+  const [configs, backtestRuns] = await Promise.all([getBotConfigs(), getBacktestRuns()]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -17,7 +17,12 @@ export default async function StrategiesPage() {
         run on the Backtests page before flipping this on. Each card below shows what the strategy is
         doing right now and why, straight from its most recent tick.
       </p>
-      <StrategiesClient configs={configs} onToggle={toggleBotConfigEnabled} onSaveRiskParams={saveRiskParams} />
+      <StrategiesClient
+        configs={configs}
+        backtestRuns={backtestRuns}
+        onToggle={toggleBotConfigEnabled}
+        onSaveRiskParams={saveRiskParams}
+      />
     </div>
   );
 }
