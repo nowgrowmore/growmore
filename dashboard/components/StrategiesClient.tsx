@@ -11,10 +11,12 @@ import {
   toNumber,
 } from "@/lib/format";
 import { explainSignal } from "@/lib/signal-explain";
+import { buildGaugeConfig } from "@/lib/strategy-gauge";
 import { STRATEGY_INFO } from "@/lib/strategy-info";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
 import { ModeFilter } from "@/components/ModeFilter";
+import { LevelGauge } from "@/components/LevelGauge";
 import type { BotConfig } from "@/lib/types";
 import { Fragment } from "react";
 
@@ -168,6 +170,15 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                       {formatIndicators(config.signal_indicators)}
                     </p>
                   )}
+                  {(() => {
+                    const gauge = buildGaugeConfig(config);
+                    if (!gauge) return null;
+                    return (
+                      <div className="mt-2">
+                        <LevelGauge {...gauge} />
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {(() => {

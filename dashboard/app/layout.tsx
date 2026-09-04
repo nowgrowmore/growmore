@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { href: "/backtests", label: "Backtests" },
   { href: "/trades", label: "Trade Log" },
   { href: "/strategies", label: "Strategies" },
+  { href: "/guide", label: "Strategy Guide" },
   { href: "/audit", label: "Audit Log" },
   { href: "/smallcap", label: "Smallcap" },
 ] as const;
