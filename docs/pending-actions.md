@@ -29,15 +29,15 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 ## Before enabling anything beyond paper trading
 - [ ] Decide per-strategy virtual capital and risk limits (defaults are placeholders in `bot/growmore_bot/config.py` — currently ₹5,00,000 per strategy, review before relying on the numbers).
-- [x] Full strategy/parameter sweep completed and **persisted to the real Neon database** 2026-09-03:
-  112 backtest runs (5 strategy families × 14 parameter variants × 8 commodities), 2,586 trades,
-  120,540 equity-curve points — see **[docs/backtest-results.md](backtest-results.md)** for the
-  ranked top 5 and full caveats before acting on any of it (multiple-comparisons risk, no
-  out-of-sample validation yet, position-sizing isn't margin-normalized across commodities). Current
-  standout: **MACD Trend (5,13,5) + Gold Mini** (CAGR 78.2%, Sharpe 1.56, 91 trades) — supersedes an
-  earlier, smaller 6-run pass that had wrongly favored Gold Mini + Donchian Breakout before the
-  lot-size bug (see `docs/technical-debt.md`) was fixed and before RSI/MACD/Bollinger strategies
-  existed to compare against.
+- [x] Full strategy/parameter sweep completed and **persisted to the real Neon database** — re-run
+  2026-09-04 after fixing the cross-instrument-contamination and frozen-live-indicator bugs (the
+  original 2026-09-03 numbers below this line were wrong; see `docs/technical-debt.md`): 144 backtest
+  runs (6 strategy families × parameter variants × 8 commodities) — see
+  **[docs/backtest-results.md](backtest-results.md)** for the corrected ranked top 5 and full caveats
+  before acting on any of it (multiple-comparisons risk, no out-of-sample validation yet,
+  position-sizing isn't margin-normalized across commodities). Current standout: **MACD Trend
+  (5,13,5) + Gold Mini** (CAGR 21.9%, Sharpe 1.38, 91 trades) — corrected down from a previously
+  reported 78.2% CAGR / Sharpe 1.56.
 - [x] **3 `bot_config` pairs enabled for paper trading** (2026-09-03), ₹2,50,000 virtual capital /
   1 lot max / ₹15,000 daily loss limit each: MACD (5,13,5) + Gold Mini (the top backtest pick),
   RSI Mean-Reversion (7, 30/70) + Copper, and MACD (12,26,9) + Aluminium Mini — the latter two
@@ -128,12 +128,12 @@ Plain-language list of things only you can do or decide. Updated as the project 
   single real 1-lot MCX order placed manually through their web/app interface and read back what
   `quantity` the API reports for it), tell the agent the answer, and it will make the code and the
   docstring agree. Do this before flipping either live-trading switch.
-- [ ] **Re-run the multi-instrument backtest sweep** (`python -m growmore_bot.backtest.run_all`)
-  before trusting any existing ranking that covered more than one commodity. A bug fixed 2026-09-04
-  meant each instrument after the first one in a sweep was scored using the *previous* commodity's
-  price history still sitting in the strategy's memory, so those rows are junk. Nothing to decide
-  here -- just ask the agent to re-run it when convenient, and treat the current
-  `docs/backtest-results.md` rankings as provisional until then.
+- [x] **Re-run the multi-instrument backtest sweep** -- done 2026-09-04. Old 112 corrupted rows
+  deleted from the real Neon database, full 144-run sweep re-run fresh. See
+  `docs/backtest-results.md` for the corrected numbers -- most notably, GOLDM `rsi_mean_reversion`
+  (the live config)'s CAGR corrected from a reported 60.8% to 14.6%. Still a solid strategy on its
+  own merits (highest win rate in the set), but worth a fresh look now that the number that
+  originally justified it has changed this much -- your call, nothing technical left to do here.
 
 ## Infrastructure setup (one-time)
 - [x] Vercel project `growmore-dashboard` created (team `beautifulforce`), GitHub-connected, Neon

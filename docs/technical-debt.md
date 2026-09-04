@@ -15,7 +15,12 @@
      decide which strategy gets real money. Fixed: the grid now returns a `functools.partial`
      FACTORY, and a fresh instance is built per (instrument, variant). **Any multi-instrument
      backtest sweep run before this fix should be re-run** -- results for the first instrument
-     processed are valid, everything after it is not.
+     processed are valid, everything after it is not. **Done 2026-09-04**: the full 144-run sweep
+     was re-run against the real Neon database (old 112 corrupted rows deleted first, not patched in
+     place) -- see `docs/backtest-results.md` for the corrected numbers. The most consequential
+     change: the previously-live-justifying GOLDM `rsi_mean_reversion` config's CAGR corrected from
+     60.8% to 14.6% (still a solid strategy, just no longer the standout it looked like); the overall
+     #1 pick corrected from 78.2% to 21.9% CAGR.
   2. **`backtest/metrics.py` -- `cagr_pct` returned a COMPLEX number for a wiped-out run.**
      `(negative) ** (1/years)` doesn't raise in Python, it returns a complex value, which flowed
      straight into `BacktestRun.cagr_pct`. Reachable in practice, not theoretically: the engine
