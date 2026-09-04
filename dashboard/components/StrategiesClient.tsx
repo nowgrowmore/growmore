@@ -19,6 +19,7 @@ import { findMatchingBacktestRun, findRankPositions } from "@/lib/backtest-ranki
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
 import { ModeFilter } from "@/components/ModeFilter";
+import { StrategyNameFilter } from "@/components/StrategyNameFilter";
 import { LevelGauge } from "@/components/LevelGauge";
 import type { BacktestRun, BotConfig } from "@/lib/types";
 import { Fragment } from "react";
@@ -76,7 +77,26 @@ export function StrategiesClient({
   onSaveRiskParams,
 }: StrategiesClientProps) {
   const [mode, setMode] = useState<Mode>("live");
-  const filtered = mode === "all" ? configs : configs.filter((c) => c.mode === mode);
+
+  const strategyNameOptions = Array.from(new Set(configs.map((c) => c.strategy_name).filter(Boolean)))
+    .filter((name): name is string => name !== undefined)
+    .sort()
+    .map((name) => ({ value: name, label: STRATEGY_INFO[name]?.label ?? name }));
+  const [selectedStrategyNames, setSelectedStrategyNames] = useState<Set<string>>(
+    () => new Set(strategyNameOptions.map((o) => o.value))
+  );
+  const toggleStrategyName = (name: string) => {
+    setSelectedStrategyNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const filtered = (mode === "all" ? configs : configs.filter((c) => c.mode === mode)).filter(
+    (c) => !c.strategy_name || selectedStrategyNames.has(c.strategy_name)
+  );
 
   const strategiesPresent = Array.from(new Set(configs.map((c) => c.strategy_name).filter(Boolean)))
     .filter((name): name is string => name !== undefined && name in STRATEGY_INFO);
@@ -84,6 +104,13 @@ export function StrategiesClient({
   return (
     <div className="flex flex-col gap-4">
       <ModeFilter value={mode} onChange={setMode} options={MODE_OPTIONS} />
+      <StrategyNameFilter
+        options={strategyNameOptions}
+        selected={selectedStrategyNames}
+        onToggle={toggleStrategyName}
+        onSelectAll={() => setSelectedStrategyNames(new Set(strategyNameOptions.map((o) => o.value)))}
+        onSelectNone={() => setSelectedStrategyNames(new Set())}
+      />
 
       {filtered.length === 0 ? (
         <p className="text-sm text-[color:var(--text-muted)]">

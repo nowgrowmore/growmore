@@ -4,7 +4,9 @@ import { useState } from "react";
 import { formatCurrency, toNumber } from "@/lib/format";
 import { toCsv } from "@/lib/csv";
 import { ModeFilter } from "@/components/ModeFilter";
+import { StrategyNameFilter } from "@/components/StrategyNameFilter";
 import { ExportCsvButton } from "@/components/ExportCsvButton";
+import { STRATEGY_INFO } from "@/lib/strategy-info";
 
 type Mode = "all" | "paper" | "live";
 
@@ -46,9 +48,26 @@ export function TradesClient({
   positionFilter?: string;
 }) {
   const [mode, setMode] = useState<Mode>("live");
-  const filtered = (mode === "all" ? rows : rows.filter((r) => r.tradeType === mode)).filter((r) =>
-    positionFilter ? r.positionId === positionFilter : true
+
+  const strategyNameOptions = Array.from(new Set(rows.map((r) => r.strategy_name).filter(Boolean)))
+    .filter((name): name is string => name !== undefined)
+    .sort()
+    .map((name) => ({ value: name, label: STRATEGY_INFO[name]?.label ?? name }));
+  const [selectedStrategyNames, setSelectedStrategyNames] = useState<Set<string>>(
+    () => new Set(strategyNameOptions.map((o) => o.value))
   );
+  const toggleStrategyName = (name: string) => {
+    setSelectedStrategyNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const filtered = (mode === "all" ? rows : rows.filter((r) => r.tradeType === mode))
+    .filter((r) => (positionFilter ? r.positionId === positionFilter : true))
+    .filter((r) => !r.strategy_name || selectedStrategyNames.has(r.strategy_name));
 
   const csv = toCsv(filtered, [
     { header: "Type", value: (r) => r.tradeType },
@@ -81,6 +100,13 @@ export function TradesClient({
         </div>
       )}
       <ModeFilter value={mode} onChange={setMode} options={MODE_OPTIONS} />
+      <StrategyNameFilter
+        options={strategyNameOptions}
+        selected={selectedStrategyNames}
+        onToggle={toggleStrategyName}
+        onSelectAll={() => setSelectedStrategyNames(new Set(strategyNameOptions.map((o) => o.value)))}
+        onSelectNone={() => setSelectedStrategyNames(new Set())}
+      />
 
       {filtered.length === 0 ? (
         <p className="text-sm text-[color:var(--text-muted)]">
