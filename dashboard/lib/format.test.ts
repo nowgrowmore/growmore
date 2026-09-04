@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestRun, PaperPosition } from "./types";
 import {
+  computePctChangeToday,
   filterBacktestRuns,
   formatCurrency,
   formatDateRange,
@@ -87,6 +88,33 @@ describe("formatPercent / formatNumber", () => {
   it("formats to the requested precision", () => {
     expect(formatPercent(12.3456, 2)).toBe("12.35%");
     expect(formatNumber(1.005, 1)).toMatch(/^1\.0/);
+  });
+});
+
+describe("computePctChangeToday", () => {
+  it("computes a positive % change", () => {
+    expect(computePctChangeToday(350.65, 350.5)).toBeCloseTo((0.15 / 350.5) * 100);
+  });
+
+  it("computes a negative % change", () => {
+    expect(computePctChangeToday(345, 350)).toBeCloseTo((-5 / 350) * 100);
+  });
+
+  it("handles string numeric inputs (as Postgres numeric columns arrive)", () => {
+    expect(computePctChangeToday("350.65", "350.5")).toBeCloseTo((0.15 / 350.5) * 100);
+  });
+
+  it("returns null when there's no prevClose yet", () => {
+    expect(computePctChangeToday(350.65, null)).toBeNull();
+    expect(computePctChangeToday(350.65, undefined)).toBeNull();
+  });
+
+  it("returns null when current is missing", () => {
+    expect(computePctChangeToday(null, 350.5)).toBeNull();
+  });
+
+  it("returns null rather than dividing by zero", () => {
+    expect(computePctChangeToday(350.65, 0)).toBeNull();
   });
 });
 

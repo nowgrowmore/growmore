@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { formatCurrency, summarizePositions, toNumber } from "@/lib/format";
+import { computePctChangeToday, formatCurrency, formatPercent, summarizePositions, toNumber } from "@/lib/format";
 import { SummaryCards } from "@/components/SummaryCards";
 import { ModeFilter } from "@/components/ModeFilter";
 import { EquityChart, type EquityChartPoint } from "@/components/EquityChart";
@@ -28,6 +28,8 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
             <th className="px-3 py-2 font-medium">Contract expiry</th>
             <th className="px-3 py-2 font-medium text-right">Qty (lots)</th>
             <th className="px-3 py-2 font-medium text-right">Avg entry</th>
+            <th className="px-3 py-2 font-medium text-right">Current price</th>
+            <th className="px-3 py-2 font-medium text-right">Today</th>
             <th className="px-3 py-2 font-medium text-right">Notional exposure</th>
             <th className="px-3 py-2 font-medium text-right">Unrealized P&amp;L</th>
           </tr>
@@ -37,6 +39,7 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
             const unrealized = toNumber(p.unrealized_pnl);
             const lotSize = toNumber(p.instrument_lot_size) || 1;
             const notional = toNumber(p.avg_entry_price) * toNumber(p.quantity) * lotSize;
+            const pctChange = computePctChangeToday(p.current_ltp, p.instrument_prev_close);
             return (
               <tr key={p.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
                 <td className="px-3 py-2">{p.strategy_name}</td>
@@ -53,6 +56,22 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
                 <td className="px-3 py-2 text-right tabular-nums">{p.quantity}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
                   {formatCurrency(toNumber(p.avg_entry_price))}
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums">
+                  {p.current_ltp ? formatCurrency(toNumber(p.current_ltp)) : "—"}
+                </td>
+                <td
+                  className={`px-3 py-2 text-right tabular-nums text-xs font-medium ${
+                    pctChange === null
+                      ? "text-[color:var(--text-muted)]"
+                      : pctChange >= 0
+                        ? "text-[color:var(--success-text)]"
+                        : "text-[color:var(--critical-text)]"
+                  }`}
+                >
+                  {pctChange === null
+                    ? "—"
+                    : `${pctChange >= 0 ? "▲" : "▼"} ${formatPercent(Math.abs(pctChange))}`}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-[color:var(--text-secondary)]">
                   {formatCurrency(notional)}

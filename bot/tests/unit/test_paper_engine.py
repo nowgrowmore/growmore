@@ -487,6 +487,10 @@ def test_process_tick_records_signal_state_on_hold():
     assert added[0].last_signal == "HOLD"
     assert float(added[0].ltp) == pytest.approx(155000)
     assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
+    # quote.close is Dhan's previous-trading-day close (confirmed against a
+    # real quote during live hours 2026-09-04) -- lets the dashboard compute
+    # today's % change without its own live Dhan connection.
+    assert float(added[0].prev_close) == pytest.approx(155000)
 
 
 def test_process_tick_updates_existing_signal_state_row_in_place():

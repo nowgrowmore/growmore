@@ -223,6 +223,11 @@ class BotSignalState(Base):
     last_signal: Mapped[str] = mapped_column(Text, nullable=False)  # HOLD|BUY|SELL
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ltp: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # Previous trading day's close (Dhan's quote "close" field -- during live
+    # hours this can only be yesterday's close, since today's hasn't happened
+    # yet, confirmed against a real quote 2026-09-04). Lets the dashboard show
+    # today's % change without needing its own live Dhan connection.
+    prev_close: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     # Strategy.debug_state()'s raw dict, e.g. {"macd": -1113.34, "signal": 363.55}.
     indicators: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
     # Strategy.get_state_snapshot()'s raw dict, e.g. {"prev_macd_above_signal":

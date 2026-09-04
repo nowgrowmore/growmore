@@ -96,10 +96,14 @@ export async function getAllPaperPositions(limit = 200): Promise<PaperPosition[]
       s.name as strategy_name,
       i.symbol as instrument_symbol,
       i.lot_size as instrument_lot_size,
-      i.contract_expiry as contract_expiry
+      i.contract_expiry as contract_expiry,
+      st.ltp as current_ltp,
+      st.prev_close as instrument_prev_close
     from paper_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
+    left join bot_config c on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id
+    left join bot_signal_state st on st.bot_config_id = c.id
     order by coalesce(p.closed_at, p.opened_at) desc
     limit ${limit}
   `;
@@ -114,10 +118,14 @@ export async function getAllLivePositions(limit = 200): Promise<LivePosition[]> 
       s.name as strategy_name,
       i.symbol as instrument_symbol,
       i.lot_size as instrument_lot_size,
-      i.contract_expiry as contract_expiry
+      i.contract_expiry as contract_expiry,
+      st.ltp as current_ltp,
+      st.prev_close as instrument_prev_close
     from live_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
+    left join bot_config c on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id
+    left join bot_signal_state st on st.bot_config_id = c.id
     order by coalesce(p.closed_at, p.opened_at) desc
     limit ${limit}
   `;
@@ -228,6 +236,7 @@ export async function getBotConfigs(): Promise<BotConfig[]> {
       st.last_signal as last_signal,
       st.checked_at as signal_checked_at,
       st.ltp as signal_ltp,
+      st.prev_close as signal_prev_close,
       st.indicators as signal_indicators
     from bot_config c
     join strategies s on s.id = c.strategy_id

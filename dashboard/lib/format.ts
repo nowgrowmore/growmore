@@ -31,6 +31,19 @@ export function formatPercent(value: number | null | undefined, digits = 2): str
   return `${value.toFixed(digits)}%`;
 }
 
+/** Today's % change: (current - prevClose) / prevClose * 100, signed. `null`
+ * when there's no prevClose yet (bot hasn't ticked this instrument today) or
+ * prevClose is 0 (would divide by zero) -- render as "—", not a false 0%. */
+export function computePctChangeToday(
+  current: string | number | null | undefined,
+  prevClose: string | number | null | undefined
+): number | null {
+  const currentNum = toNumber(current);
+  const prevCloseNum = toNumber(prevClose);
+  if (!prevCloseNum || current === null || current === undefined || current === "") return null;
+  return ((currentNum - prevCloseNum) / prevCloseNum) * 100;
+}
+
 export function formatNumber(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   return value.toFixed(digits);

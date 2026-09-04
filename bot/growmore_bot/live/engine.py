@@ -298,6 +298,7 @@ class LiveTradingEngine:
                     last_signal=signal.action.value,
                     checked_at=now,
                     ltp=quote.ltp,
+                    prev_close=getattr(quote, "close", None),
                     indicators=strategy.debug_state(),
                     crossing_state=strategy.get_state_snapshot(),
                 )
@@ -306,6 +307,7 @@ class LiveTradingEngine:
             existing.last_signal = signal.action.value
             existing.checked_at = now
             existing.ltp = quote.ltp
+            existing.prev_close = getattr(quote, "close", None)
             existing.indicators = strategy.debug_state()
             existing.crossing_state = strategy.get_state_snapshot()
             self.session.add(existing)

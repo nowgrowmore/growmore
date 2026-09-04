@@ -77,6 +77,10 @@ export interface PaperPosition {
   instrument_symbol?: string;
   instrument_lot_size?: number | string;
   contract_expiry?: string | null;
+  // From bot_signal_state, via bot_config -- null until the bot has ticked
+  // this (strategy, instrument) pair at least once.
+  current_ltp?: string | null;
+  instrument_prev_close?: string | null;
 }
 
 export interface PaperOrder {
@@ -113,6 +117,8 @@ export interface LivePosition {
   instrument_symbol?: string;
   instrument_lot_size?: number | string;
   contract_expiry?: string | null;
+  current_ltp?: string | null;
+  instrument_prev_close?: string | null;
 }
 
 export interface LiveOrder {
@@ -153,6 +159,7 @@ export interface BotConfig {
   last_signal?: "HOLD" | "BUY" | "SELL" | null;
   signal_checked_at?: string | null;
   signal_ltp?: string | null;
+  signal_prev_close?: string | null;
   signal_indicators?: Record<string, number | string> | null;
 }
 

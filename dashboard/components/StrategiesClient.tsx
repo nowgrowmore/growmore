@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { toNumber } from "@/lib/format";
+import { computePctChangeToday, formatPercent, toNumber } from "@/lib/format";
 import { explainSignal } from "@/lib/signal-explain";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
@@ -122,6 +122,21 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                       checked {timeAgo(config.signal_checked_at)}
                       {config.signal_ltp ? ` · LTP ${toNumber(config.signal_ltp).toLocaleString("en-IN")}` : ""}
                     </span>
+                    {(() => {
+                      const pctChange = computePctChangeToday(config.signal_ltp, config.signal_prev_close);
+                      if (pctChange === null) return null;
+                      return (
+                        <span
+                          className={`text-xs font-medium tabular-nums ${
+                            pctChange >= 0
+                              ? "text-[color:var(--success-text)]"
+                              : "text-[color:var(--critical-text)]"
+                          }`}
+                        >
+                          {pctChange >= 0 ? "▲" : "▼"} {formatPercent(Math.abs(pctChange))} today
+                        </span>
+                      );
+                    })()}
                   </div>
                   <p className="mt-2 text-sm text-[color:var(--text-secondary)]">
                     {config.last_signal

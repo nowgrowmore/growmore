@@ -471,6 +471,7 @@ def test_process_tick_records_signal_state_on_hold():
     assert added[0].bot_config_id == config.id
     assert added[0].last_signal == "HOLD"
     assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
+    assert float(added[0].prev_close) == pytest.approx(155000)
 
 
 def test_hold_marks_open_position_to_market():
