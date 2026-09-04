@@ -1,4 +1,6 @@
 import { getAuditLog } from "@/lib/db";
+import { toCsv } from "@/lib/csv";
+import { ExportCsvButton } from "@/components/ExportCsvButton";
 
 export const dynamic = "force-dynamic";
 
@@ -8,10 +10,18 @@ function formatEventType(eventType: string): string {
 
 export default async function AuditPage() {
   const entries = await getAuditLog(200);
+  const csv = toCsv(entries, [
+    { header: "Timestamp", value: (e) => e.ts },
+    { header: "Event type", value: (e) => e.event_type },
+    { header: "Payload", value: (e) => e.payload },
+  ]);
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-base font-semibold">Audit log</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-semibold">Audit log</h2>
+        <ExportCsvButton csv={csv} filename="growmore-audit-log.csv" />
+      </div>
       <p className="max-w-2xl text-sm text-[color:var(--text-secondary)]">
         Every action that could plausibly matter for a future compliance review — strategy
         enable/disable, risk-guard trips, and more — most recent first.

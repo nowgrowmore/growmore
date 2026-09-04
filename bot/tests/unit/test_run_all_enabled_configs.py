@@ -316,6 +316,47 @@ def test_live_mode_config_past_close_out_cutoff_places_a_real_closing_order(sess
     dhan_client.get_historical_ohlc.assert_not_called()
 
 
+def test_pending_auto_close_retried_even_though_config_is_disabled(session):
+    # A tripped daily_loss_limit guard disables its config immediately, so
+    # the enabled=True filter below would never see it again -- the retry
+    # pass runs BEFORE that filter, keyed on pending_auto_close instead.
+    from growmore_bot.broker.dhan_order_client import PlacedOrder
+    from growmore_bot.persistence.models import LiveOrder, LivePosition
+
+    strategy, instrument, config = _make_strategy_instrument_config(
+        session, "always_flip", {}, enabled=False, mode="live"
+    )
+    config.pending_auto_close = True
+    config.auto_close_retry_count = 1
+    config.auto_close_next_retry_at = None
+    position = LivePosition(
+        id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
+        status="open", quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, opened_at=datetime.now(MCX_TZ) - timedelta(days=1), closed_at=None,
+    )
+    session.add_all([config, position])
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD1", order_status="TRANSIT")
+
+    run_all_enabled_configs(
+        session, dhan_client, order_client=order_client, live_trading_enabled=True
+    )
+
+    order_client.place_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1.0
+    )
+    session.refresh(position)
+    session.refresh(config)
+    assert position.status == "closed"
+    assert config.pending_auto_close is False
+    assert config.enabled is False  # retrying a close never re-enables trading
+    assert session.query(LiveOrder).count() == 1
+
+
 def test_run_all_enabled_configs_restores_persisted_crossing_state(session, monkeypatch):
     # Regression: found live 2026-09-04 -- without restoring the crossing
     # reference from the last LIVE tick, a fresh warmed-up strategy always

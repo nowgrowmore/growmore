@@ -196,6 +196,16 @@ class BotConfig(Base):
     # independent gates, deliberately: flipping one alone never enables real
     # trading.
     mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="paper")
+    # Set by LiveTradingEngine._trip_daily_loss_guard when a real auto-close
+    # order fails -- the config stays disabled (no fresh trades) but
+    # retry_pending_auto_close keeps retrying the close itself on later
+    # ticks until it succeeds, using these to back off geometrically instead
+    # of hammering Dhan every 5 minutes. See docs/technical-debt.md.
+    pending_auto_close: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    auto_close_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    auto_close_next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
@@ -243,6 +253,16 @@ class BotSignalState(Base):
     # get_state_snapshot's docstring for why this matters -- found live
     # 2026-09-04). Distinct from `indicators`, which is display-only.
     crossing_state: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    # When a max_position_size rejection was last actually WRITTEN to
+    # audit_log for this config -- lets _handle_buy throttle repeat entries
+    # to once per 30 minutes instead of once per tick when an indicator
+    # chops back and forth across its crossing threshold while a position is
+    # already open (a real, repeated signal, but low marginal audit-log
+    # value once already recorded recently). bot.log still gets a warning
+    # every single time regardless -- only the audit_log write is throttled.
+    last_max_position_rejection_logged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     bot_config: Mapped["BotConfig"] = relationship()
 

@@ -11,7 +11,7 @@ mocked.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,7 +20,7 @@ import pytest
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.broker.dhan_order_client import PlacedOrder
 from growmore_bot.live.engine import LiveTradingEngine
-from growmore_bot.persistence.models import LiveOrder
+from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -196,6 +196,60 @@ def test_force_close_for_expiry_order_failure_is_caught_not_raised():
     assert existing_position.quantity == 1
 
 
+def test_live_max_position_size_rejection_is_throttled_within_30_minutes():
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    session = MagicMock()
+    now = datetime.now(timezone.utc)
+    signal_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+        checked_at=now, ltp=100, indicators={}, crossing_state={},
+        last_max_position_rejection_logged_at=now - timedelta(minutes=5),
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = signal_state
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [
+        o for o in added
+        if isinstance(o, AuditLog) and o.event_type == "live_risk_guard_max_position_size_rejected"
+    ]
+    assert audit_entries == []
+
+
+def test_live_max_position_size_rejection_logs_again_after_30_minutes():
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    session = MagicMock()
+    now = datetime.now(timezone.utc)
+    signal_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+        checked_at=now, ltp=100, indicators={}, crossing_state={},
+        last_max_position_rejection_logged_at=now - timedelta(minutes=31),
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = signal_state
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [
+        o for o in added
+        if isinstance(o, AuditLog) and o.event_type == "live_risk_guard_max_position_size_rejected"
+    ]
+    assert len(audit_entries) == 1
+
+
 def test_daily_loss_limit_trip_disables_config_without_attempting_an_order():
     config = _bot_config(daily_loss_limit=1_000)
     instrument = _instrument(config)
@@ -290,6 +344,115 @@ def test_daily_loss_limit_trip_auto_close_failure_is_logged_not_raised():
     assert len(trip_entries) == 1
     assert trip_entries[0].payload["auto_close_attempted"] is True
     assert trip_entries[0].payload["auto_close_succeeded"] is False
+
+    # A failed auto-close now schedules itself for retry -- the config stays
+    # disabled for fresh trades, but the still-open REAL position isn't just
+    # abandoned; retry_pending_auto_close will pick it up on a later tick.
+    assert config.pending_auto_close is True
+    assert config.auto_close_retry_count == 1
+    assert config.auto_close_next_retry_at is not None
+    now_utc = datetime.now(timezone.utc)
+    assert now_utc < config.auto_close_next_retry_at <= now_utc + timedelta(minutes=6)
+
+
+def test_retry_pending_auto_close_succeeds_and_clears_the_retry_state():
+    config = _bot_config(enabled=False, pending_auto_close=True, auto_close_retry_count=2)
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD9", order_status="TRANSIT")
+    session = MagicMock()
+    open_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = open_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.retry_pending_auto_close(config, instrument, now=datetime.now(timezone.utc))
+
+    order_client.place_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1
+    )
+    assert open_position.status == "closed"
+    assert float(open_position.realized_pnl) == pytest.approx(500_000)
+    assert config.pending_auto_close is False
+    assert config.auto_close_retry_count == 0
+    assert config.auto_close_next_retry_at is None
+    assert config.enabled is False  # never re-enabled by a successful retry
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert any(e.event_type == "live_auto_close_retry_succeeded" for e in audit_entries)
+
+
+def test_retry_pending_auto_close_failure_backs_off_and_never_raises():
+    config = _bot_config(enabled=False, pending_auto_close=True, auto_close_retry_count=1)
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    order_client.place_market_order.side_effect = DhanOrderError("Insufficient margin")
+    session = MagicMock()
+    open_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = open_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    now = datetime.now(timezone.utc)
+    engine.retry_pending_auto_close(config, instrument, now=now)  # must not raise
+
+    assert open_position.status == "open"  # still not confirmed closed
+    assert config.pending_auto_close is True
+    assert config.auto_close_retry_count == 2
+    # Backs off further on each successive failure (5 * 2**(2-1) = 10 min).
+    assert config.auto_close_next_retry_at == now + timedelta(minutes=10)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert any(e.event_type == "live_auto_close_retry_failed" for e in audit_entries)
+
+
+def test_retry_pending_auto_close_skips_when_not_yet_due():
+    now = datetime.now(timezone.utc)
+    config = _bot_config(
+        enabled=False, pending_auto_close=True, auto_close_retry_count=1,
+        auto_close_next_retry_at=now + timedelta(minutes=5),
+    )
+    instrument = _instrument(config)
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    session = MagicMock()
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.retry_pending_auto_close(config, instrument, now=now)
+
+    order_client.place_market_order.assert_not_called()
+    dhan_client.get_quote.assert_not_called()
+
+
+def test_retry_pending_auto_close_clears_flag_when_nothing_left_open():
+    # The position may have already been closed some other way (e.g. a
+    # manual intervention) -- don't keep retrying forever against nothing.
+    config = _bot_config(enabled=False, pending_auto_close=True, auto_close_retry_count=3)
+    instrument = _instrument(config)
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.retry_pending_auto_close(config, instrument, now=datetime.now(timezone.utc))
+
+    order_client.place_market_order.assert_not_called()
+    assert config.pending_auto_close is False
+    assert config.auto_close_retry_count == 0
+    assert config.auto_close_next_retry_at is None
 
 
 def test_sell_closes_position_places_a_real_order_and_records_realized_pnl():
@@ -448,6 +611,122 @@ def test_reconcile_pending_orders_swallows_a_failed_lookup_and_continues():
     engine.reconcile_pending_orders()  # must not raise
 
     assert pending_order.order_status == "TRANSIT"
+
+
+def test_reconcile_corrects_sell_pnl_when_real_fill_price_differs():
+    # Regression for docs/technical-debt.md's "reconciliation doesn't
+    # retroactively recompute position-level P&L" gap. The old (approximate)
+    # fill price and pnl are already stored on the order -- back-solve the
+    # avg_entry_price that pnl implies, then recompute pnl from the real
+    # fill price and apply the delta to the position's realized_pnl.
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": [{"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 160000.0}],
+    }
+    position_id = uuid.uuid4()
+    # avg_entry_price was 150000; approx fill was 155000, qty=1, lot_size=100
+    # -> old pnl = (155000-150000)*1*100 = 500000
+    position = SimpleNamespace(
+        id=position_id,
+        realized_pnl=500000.0,
+        instrument=SimpleNamespace(lot_size=100),
+    )
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(),
+        broker_order_id="ORD1",
+        order_status="TRANSIT",
+        fill_price=155000.0,
+        side="sell",
+        quantity=1,
+        live_position_id=position_id,
+        pnl=500000.0,
+    )
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+    session.get.return_value = position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()
+
+    # real fill 160000 instead of 155000 -> corrected pnl = (160000-150000)*100 = 1,000,000
+    assert float(pending_order.pnl) == pytest.approx(1_000_000.0)
+    # delta = 1,000,000 - 500,000 = 500,000 applied on top of the existing realized_pnl
+    assert float(position.realized_pnl) == pytest.approx(1_000_000.0)
+
+
+def test_reconcile_recomputes_buy_avg_entry_price_when_position_still_open_with_no_sells():
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": [{"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 160000.0}],
+    }
+    position_id = uuid.uuid4()
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(),
+        broker_order_id="ORD1",
+        order_status="TRANSIT",
+        fill_price=155000.0,
+        side="buy",
+        quantity=1,
+        live_position_id=position_id,
+        pnl=None,
+    )
+    position = SimpleNamespace(
+        id=position_id,
+        status="open",
+        avg_entry_price=155000.0,
+        instrument=SimpleNamespace(lot_size=100),
+        orders=[pending_order],
+    )
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+    session.get.return_value = position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()
+
+    assert float(position.avg_entry_price) == pytest.approx(160000.0)
+
+
+def test_reconcile_skips_buy_correction_when_position_already_has_a_sell():
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": [{"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 160000.0}],
+    }
+    position_id = uuid.uuid4()
+    buy_order = SimpleNamespace(
+        id=uuid.uuid4(),
+        broker_order_id="ORD1",
+        order_status="TRANSIT",
+        fill_price=155000.0,
+        side="buy",
+        quantity=1,
+        live_position_id=position_id,
+        pnl=None,
+    )
+    sell_order = SimpleNamespace(
+        id=uuid.uuid4(), side="sell", quantity=1, fill_price=158000.0, pnl=300000.0,
+    )
+    position = SimpleNamespace(
+        id=position_id,
+        status="closed",
+        avg_entry_price=155000.0,
+        instrument=SimpleNamespace(lot_size=100),
+        orders=[buy_order, sell_order],
+    )
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [buy_order]
+    session.get.return_value = position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()  # must not raise
+
+    # Left untouched -- correcting a closed/reduced position's cost basis
+    # needs lot-level tracking this engine doesn't have; flagged for manual
+    # review via a log line instead of silently guessing.
+    assert float(position.avg_entry_price) == pytest.approx(155000.0)
 
 
 def test_process_tick_records_signal_state_on_hold():

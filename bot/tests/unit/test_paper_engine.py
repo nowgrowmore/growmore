@@ -19,7 +19,7 @@ for the first time -- two real gaps that existed until now:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -27,7 +27,7 @@ import pytest
 
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.paper.engine import PaperTradingEngine
-from growmore_bot.persistence.models import PaperOrder
+from growmore_bot.persistence.models import BotSignalState, PaperOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -98,6 +98,87 @@ def test_signal_rejected_when_exceeding_max_position_size():
 
     added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
     assert added_orders == []
+
+
+def test_max_position_size_rejection_writes_audit_log_the_first_time():
+    from growmore_bot.persistence.models import AuditLog
+
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    signal_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+        checked_at=datetime.now(timezone.utc), ltp=100, indicators={}, crossing_state={},
+        last_max_position_rejection_logged_at=None,
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = signal_state
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [
+        o for o in added if isinstance(o, AuditLog) and o.event_type == "risk_guard_max_position_size_rejected"
+    ]
+    assert len(audit_entries) == 1
+    assert signal_state.last_max_position_rejection_logged_at is not None
+
+
+def test_max_position_size_rejection_is_throttled_within_30_minutes():
+    from growmore_bot.persistence.models import AuditLog
+
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    now = datetime.now(timezone.utc)
+    signal_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+        checked_at=now, ltp=100, indicators={}, crossing_state={},
+        last_max_position_rejection_logged_at=now - timedelta(minutes=5),
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = signal_state
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [
+        o for o in added if isinstance(o, AuditLog) and o.event_type == "risk_guard_max_position_size_rejected"
+    ]
+    assert audit_entries == []
+
+
+def test_max_position_size_rejection_logs_again_after_30_minutes():
+    from growmore_bot.persistence.models import AuditLog
+
+    config = _bot_config(max_position_size=1)
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=5))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    now = datetime.now(timezone.utc)
+    signal_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+        checked_at=now, ltp=100, indicators={}, crossing_state={},
+        last_max_position_rejection_logged_at=now - timedelta(minutes=31),
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = signal_state
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [
+        o for o in added if isinstance(o, AuditLog) and o.event_type == "risk_guard_max_position_size_rejected"
+    ]
+    assert len(audit_entries) == 1
 
 
 def test_daily_loss_limit_trip_disables_config_and_writes_audit_log():

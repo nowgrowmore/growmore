@@ -207,6 +207,18 @@ def run_all_enabled_configs(
         # LiveOrder regardless of which config placed it.
         live_engine.reconcile_pending_orders()
 
+        # A tripped daily_loss_limit guard disables its config immediately,
+        # which means the loop below (filtered to enabled=True) will never
+        # see it again -- so a failed auto-close is retried here instead,
+        # DELIBERATELY outside that filter, regardless of `enabled`. Never
+        # re-enables the config; only ever retries flattening the position.
+        pending_closes = session.query(BotConfig).filter_by(pending_auto_close=True).all()
+        for config in pending_closes:
+            instrument = session.get(Instrument, config.instrument_id)
+            if instrument is None:
+                continue
+            live_engine.retry_pending_auto_close(config, instrument, now=now)
+
     configs = session.query(BotConfig).filter_by(enabled=True).all()
     for config in configs:
         strategy_row = session.get(Strategy, config.strategy_id)

@@ -33,13 +33,43 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from growmore_bot.persistence.models import AuditLog, BotSignalState, PaperOrder, PaperPosition
 from growmore_bot.strategies.base import SignalAction, Strategy
 
 logger = logging.getLogger(__name__)
+
+# See bot_signal_state.last_max_position_rejection_logged_at's migration:
+# a genuinely repeated crossing while already at max position size is real,
+# but low marginal audit-log value once already recorded recently.
+_MAX_POSITION_REJECTION_THROTTLE = timedelta(minutes=30)
+
+
+def _should_log_max_position_rejection(session: Any, config_id: Any, now: datetime) -> bool:
+    """Throttle repeat `..._max_position_size_rejected` audit_log entries
+    for the same bot_config to once per 30 minutes. Updates
+    `last_max_position_rejection_logged_at` on that config's BotSignalState
+    row when it decides to log. bot.log's own warning is unaffected -- only
+    the audit_log write is throttled. Defensive against a session/state
+    that isn't a real BotSignalState (e.g. an unconfigured test mock) --
+    always logs in that case, same as before this throttle existed.
+    """
+    signal_state = session.query(BotSignalState).filter_by(bot_config_id=config_id).one_or_none()
+    if not isinstance(signal_state, BotSignalState):
+        return True
+    last_logged = signal_state.last_max_position_rejection_logged_at
+    if isinstance(last_logged, datetime):
+        # SQLite (unit tests) round-trips a tz-aware datetime as naive --
+        # normalize both sides before subtracting.
+        last_logged_naive = last_logged.replace(tzinfo=None) if last_logged.tzinfo else last_logged
+        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        if now_naive - last_logged_naive < _MAX_POSITION_REJECTION_THROTTLE:
+            return False
+    signal_state.last_max_position_rejection_logged_at = now
+    session.add(signal_state)
+    return True
 
 
 def _format_debug_state(strategy: Strategy) -> str:
@@ -361,19 +391,20 @@ class PaperTradingEngine:
                 float(config.max_position_size),
                 computed,
             )
-            self.session.add(
-                AuditLog(
-                    id=uuid.uuid4(),
-                    ts=now,
-                    event_type="risk_guard_max_position_size_rejected",
-                    payload={
-                        "strategy_id": str(config.strategy_id),
-                        "instrument_id": str(config.instrument_id),
-                        "requested_total": new_total,
-                        "max_position_size": float(config.max_position_size),
-                    },
+            if _should_log_max_position_rejection(self.session, config.id, now):
+                self.session.add(
+                    AuditLog(
+                        id=uuid.uuid4(),
+                        ts=now,
+                        event_type="risk_guard_max_position_size_rejected",
+                        payload={
+                            "strategy_id": str(config.strategy_id),
+                            "instrument_id": str(config.instrument_id),
+                            "requested_total": new_total,
+                            "max_position_size": float(config.max_position_size),
+                        },
+                    )
                 )
-            )
             return
 
         logger.info(

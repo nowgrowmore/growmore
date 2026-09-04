@@ -2,7 +2,9 @@
 
 import { useState } from "react";
 import { formatCurrency, toNumber } from "@/lib/format";
+import { toCsv } from "@/lib/csv";
 import { ModeFilter } from "@/components/ModeFilter";
+import { ExportCsvButton } from "@/components/ExportCsvButton";
 
 type Mode = "all" | "paper" | "live";
 
@@ -48,8 +50,28 @@ export function TradesClient({
     positionFilter ? r.positionId === positionFilter : true
   );
 
+  const csv = toCsv(filtered, [
+    { header: "Type", value: (r) => r.tradeType },
+    { header: "Filled at", value: (r) => r.filled_at },
+    { header: "Strategy", value: (r) => r.strategy_name },
+    { header: "Instrument", value: (r) => r.instrument_symbol },
+    { header: "Exchange segment", value: (r) => r.exchange_segment },
+    { header: "Contract expiry", value: (r) => r.contract_expiry },
+    { header: "Side", value: (r) => r.side },
+    { header: "Quantity (lots)", value: (r) => r.quantity },
+    { header: "Lot size", value: (r) => r.instrument_lot_size },
+    { header: "Fill price", value: (r) => r.fill_price },
+    { header: "Realized P&L", value: (r) => r.pnl },
+    { header: "Position status", value: (r) => r.position_status },
+    { header: "Broker order ID", value: (r) => r.broker_order_id },
+    { header: "Broker order status", value: (r) => r.order_status },
+  ]);
+
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex justify-end">
+        <ExportCsvButton csv={csv} filename={`growmore-trades-${mode}.csv`} />
+      </div>
       {positionFilter && (
         <div className="flex items-center gap-2 rounded-lg border border-[color:var(--border-hairline)] bg-[color:var(--surface-1)] px-3 py-2 text-sm">
           <span className="text-[color:var(--text-secondary)]">Showing fills for one position only.</span>

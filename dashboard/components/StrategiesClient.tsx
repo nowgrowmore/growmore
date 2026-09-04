@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   computeDailyLossProgress,
   computePctChangeToday,
@@ -104,6 +105,13 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                       </div>
                       <div className="text-sm text-[color:var(--text-secondary)]">
                         {config.instrument_symbol}
+                        {" · "}
+                        <Link
+                          href={`/backtests?strategy=${config.strategy_id}&instrument=${config.instrument_id}`}
+                          className="text-[color:var(--series-1)] hover:underline"
+                        >
+                          View backtest
+                        </Link>
                       </div>
                     </div>
                   </div>

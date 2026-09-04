@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from growmore_bot.broker.dhan_order_client import DhanOrderError
@@ -40,6 +40,52 @@ logger = logging.getLogger(__name__)
 # public order-status docs (field names not independently verified against
 # the SDK source the way place_market_order's request schema was).
 _TERMINAL_ORDER_STATUSES = frozenset({"TRADED", "REJECTED", "CANCELLED", "EXPIRED"})
+
+# Geometric backoff for retrying a failed real auto-close order (5, 10, 20,
+# 40... minutes), capped at an hour so a persistently-failing broker/network
+# issue doesn't hammer Dhan every scheduler tick -- but never gives up on its
+# own, since a real position left open needs to eventually flatten one way
+# or another (see retry_pending_auto_close).
+_AUTO_CLOSE_BASE_BACKOFF_MINUTES = 5
+_AUTO_CLOSE_MAX_BACKOFF_MINUTES = 60
+
+
+def _retry_backoff(retry_count: int) -> timedelta:
+    minutes = min(
+        _AUTO_CLOSE_BASE_BACKOFF_MINUTES * (2 ** max(0, retry_count - 1)),
+        _AUTO_CLOSE_MAX_BACKOFF_MINUTES,
+    )
+    return timedelta(minutes=minutes)
+
+
+# See bot_signal_state.last_max_position_rejection_logged_at's migration:
+# a genuinely repeated crossing while already at max position size is real,
+# but low marginal audit-log value once already recorded recently.
+_MAX_POSITION_REJECTION_THROTTLE = timedelta(minutes=30)
+
+
+def _should_log_max_position_rejection(session: Any, config_id: Any, now: datetime) -> bool:
+    """Throttle repeat `..._max_position_size_rejected` audit_log entries
+    for the same bot_config to once per 30 minutes -- mirrors
+    growmore_bot.paper.engine's identical helper. Updates
+    `last_max_position_rejection_logged_at` on that config's BotSignalState
+    row when it decides to log. bot.log's own warning is unaffected -- only
+    the audit_log write is throttled. Defensive against a session/state
+    that isn't a real BotSignalState (e.g. an unconfigured test mock) --
+    always logs in that case, same as before this throttle existed.
+    """
+    signal_state = session.query(BotSignalState).filter_by(bot_config_id=config_id).one_or_none()
+    if not isinstance(signal_state, BotSignalState):
+        return True
+    last_logged = signal_state.last_max_position_rejection_logged_at
+    if isinstance(last_logged, datetime):
+        last_logged_naive = last_logged.replace(tzinfo=None) if last_logged.tzinfo else last_logged
+        now_naive = now.replace(tzinfo=None) if now.tzinfo else now
+        if now_naive - last_logged_naive < _MAX_POSITION_REJECTION_THROTTLE:
+            return False
+    signal_state.last_max_position_rejection_logged_at = now
+    session.add(signal_state)
+    return True
 
 
 def _format_debug_state(strategy: Strategy) -> str:
@@ -266,18 +312,229 @@ class LiveTradingEngine:
 
             real_fill_price = data.get("averageTradedPrice")
             if real_fill_price and float(real_fill_price) > 0:
-                if order.fill_price is None or float(order.fill_price) != float(real_fill_price):
+                old_fill_price = order.fill_price
+                price_changed = old_fill_price is None or float(old_fill_price) != float(real_fill_price)
+                if price_changed:
                     logger.warning(
                         "Live order %s real fill price %.2f differs from the approximate %s "
-                        "used at placement -- order record corrected; the position's "
-                        "avg_entry_price/realized_pnl are NOT retroactively recomputed yet",
+                        "used at placement -- order record corrected",
                         order.broker_order_id,
                         float(real_fill_price),
-                        order.fill_price,
+                        old_fill_price,
                     )
                 order.fill_price = real_fill_price
+                if price_changed and old_fill_price is not None:
+                    self._retroactively_correct_position(
+                        order, old_fill_price=float(old_fill_price), new_fill_price=float(real_fill_price)
+                    )
 
             self.session.add(order)
+
+    def retry_pending_auto_close(self, config: Any, instrument: Any, now: datetime) -> None:
+        """Retry a real close-out that failed when the daily loss guard
+        first tripped (`_trip_daily_loss_guard`). Called every tick for
+        every `bot_config` with `pending_auto_close=True`, REGARDLESS of
+        `enabled` -- the scheduler only ticks enabled configs otherwise, so
+        without this a failed close would never get another attempt and a
+        real position could sit open indefinitely. Never re-enables the
+        config; this only ever tries to flatten the position.
+
+        Backs off geometrically per failure (see `_retry_backoff`) rather
+        than retrying every single tick, but keeps retrying forever --
+        there's no acceptable "give up" state for a real position stuck
+        open, only a slower retry cadence while flagging it for review via
+        the audit log each time.
+        """
+        next_retry_at = getattr(config, "auto_close_next_retry_at", None)
+        if next_retry_at is not None and next_retry_at > now:
+            return
+
+        open_position = (
+            self.session.query(LivePosition)
+            .filter_by(strategy_id=config.strategy_id, instrument_id=config.instrument_id, status="open")
+            .one_or_none()
+        )
+        if open_position is None:
+            # Already flat by some other path (e.g. manual intervention) --
+            # nothing left to retry.
+            config.pending_auto_close = False
+            config.auto_close_retry_count = 0
+            config.auto_close_next_retry_at = None
+            return
+
+        retry_count = (getattr(config, "auto_close_retry_count", 0) or 0) + 1
+        qty = float(open_position.quantity)
+
+        try:
+            quote = self.dhan_client.get_quote(instrument)
+            placed = self.order_client.place_market_order(
+                instrument, transaction_type="SELL", quantity=qty
+            )
+        except Exception:
+            config.auto_close_retry_count = retry_count
+            config.auto_close_next_retry_at = now + _retry_backoff(retry_count)
+            logger.exception(
+                "Retry #%d to auto-close %s (qty=%s) FAILED -- next attempt in %s",
+                retry_count,
+                config.strategy_id,
+                qty,
+                _retry_backoff(retry_count),
+            )
+            self.session.add(
+                AuditLog(
+                    id=uuid.uuid4(),
+                    ts=now,
+                    event_type="live_auto_close_retry_failed",
+                    payload={
+                        "strategy_id": str(config.strategy_id),
+                        "instrument_id": str(config.instrument_id),
+                        "retry_count": retry_count,
+                        "next_retry_at": (now + _retry_backoff(retry_count)).isoformat(),
+                    },
+                )
+            )
+            return
+
+        close_pnl = (float(quote.ltp) - float(open_position.avg_entry_price)) * qty * instrument.lot_size
+        open_position.realized_pnl = float(open_position.realized_pnl or 0) + close_pnl
+        open_position.quantity = 0
+        open_position.status = "closed"
+        open_position.closed_at = now
+        self._mark_to_market(open_position, quote.ltp, instrument.lot_size)
+        self.session.add(open_position)
+        self.session.add(
+            LiveOrder(
+                id=uuid.uuid4(),
+                live_position_id=open_position.id,
+                side="sell",
+                quantity=qty,
+                broker_order_id=placed.order_id,
+                order_status=placed.order_status,
+                fill_price=quote.ltp,
+                filled_at=now,
+                pnl=close_pnl,
+            )
+        )
+
+        config.pending_auto_close = False
+        config.auto_close_retry_count = 0
+        config.auto_close_next_retry_at = None
+
+        logger.warning(
+            "Retry #%d to auto-close %s SUCCEEDED -- qty=%s pnl=%.2f broker_order_id=%s",
+            retry_count,
+            config.strategy_id,
+            qty,
+            close_pnl,
+            placed.order_id,
+        )
+        self.session.add(
+            AuditLog(
+                id=uuid.uuid4(),
+                ts=now,
+                event_type="live_auto_close_retry_succeeded",
+                payload={
+                    "strategy_id": str(config.strategy_id),
+                    "instrument_id": str(config.instrument_id),
+                    "retry_count": retry_count,
+                    "close_pnl": close_pnl,
+                },
+            )
+        )
+
+    def _retroactively_correct_position(
+        self, order: Any, old_fill_price: float, new_fill_price: float
+    ) -> None:
+        """Ripple a corrected fill price (from `reconcile_pending_orders`)
+        into the position's realized/unrealized P&L, so a stale approximate
+        price used at placement time doesn't linger in the numbers forever.
+
+        SELL: the order's own `pnl` was computed as
+        `(old_fill_price - avg_entry_price_at_the_time) * qty * lot_size`.
+        Since `pnl`, `old_fill_price`, and `quantity` are all already on the
+        order, `avg_entry_price_at_the_time` can be back-solved exactly --
+        no need to know the position's current avg_entry_price, which may
+        have moved since. The corrected delta is applied on top of whatever
+        `position.realized_pnl` is now.
+
+        BUY: only recomputed when safe to do exactly -- the position is
+        still open AND has never had a sell (nothing's been reduced against
+        the old, approximate avg_entry_price yet). In that case
+        avg_entry_price is just the quantity-weighted average of every buy
+        order's fill price, which this recomputes directly from
+        `position.orders`. Once any sell has happened against a position,
+        exactly correcting its cost basis needs per-lot tracking this engine
+        doesn't have -- logged for manual review instead of guessed at.
+        """
+        live_position_id = getattr(order, "live_position_id", None)
+        side = getattr(order, "side", None)
+        quantity = getattr(order, "quantity", None)
+        if live_position_id is None or side is None or quantity is None:
+            return
+
+        position = self.session.get(LivePosition, live_position_id)
+        if position is None:
+            return
+        lot_size = getattr(getattr(position, "instrument", None), "lot_size", 1) or 1
+
+        if side == "sell":
+            old_pnl = getattr(order, "pnl", None)
+            if old_pnl is None:
+                return
+            denom = float(quantity) * lot_size
+            if denom == 0:
+                return
+            avg_entry_price_at_the_time = old_fill_price - float(old_pnl) / denom
+            corrected_pnl = (new_fill_price - avg_entry_price_at_the_time) * denom
+            delta = corrected_pnl - float(old_pnl)
+            order.pnl = corrected_pnl
+            position.realized_pnl = float(position.realized_pnl or 0) + delta
+            self.session.add(position)
+            logger.warning(
+                "Live order %s SELL fill corrected -- retroactively adjusted position %s "
+                "realized_pnl by %.2f (corrected_pnl=%.2f)",
+                order.broker_order_id,
+                live_position_id,
+                delta,
+                corrected_pnl,
+            )
+        elif side == "buy":
+            if getattr(position, "status", None) != "open":
+                logger.warning(
+                    "Live order %s BUY fill corrected but position %s is no longer open -- "
+                    "avg_entry_price NOT retroactively recomputed, needs manual review",
+                    order.broker_order_id,
+                    live_position_id,
+                )
+                return
+            orders = list(getattr(position, "orders", []) or [])
+            if any(getattr(o, "side", None) == "sell" for o in orders):
+                logger.warning(
+                    "Live order %s BUY fill corrected but position %s has already had a "
+                    "sell against it -- avg_entry_price NOT retroactively recomputed, needs "
+                    "manual review",
+                    order.broker_order_id,
+                    live_position_id,
+                )
+                return
+            buy_orders = [o for o in orders if getattr(o, "side", None) == "buy"]
+            total_qty = sum(float(o.quantity) for o in buy_orders)
+            if total_qty <= 0:
+                return
+            total_cost = sum(
+                (new_fill_price if o.id == order.id else float(o.fill_price)) * float(o.quantity)
+                for o in buy_orders
+            )
+            new_avg = total_cost / total_qty
+            position.avg_entry_price = new_avg
+            self.session.add(position)
+            logger.warning(
+                "Live order %s BUY fill corrected -- retroactively recomputed position %s "
+                "avg_entry_price to %.2f",
+                order.broker_order_id,
+                live_position_id,
+                new_avg,
+            )
 
     def _record_signal_state(
         self,
@@ -387,10 +644,15 @@ class LiveTradingEngine:
                     placed.order_id,
                 )
             except Exception:
+                config.pending_auto_close = True
+                config.auto_close_retry_count = 1
+                config.auto_close_next_retry_at = now + _retry_backoff(1)
                 logger.exception(
                     "%s -- DAILY LOSS LIMIT TRIPPED but the auto-close order FAILED -- the "
-                    "REAL position remains open and needs manual review",
+                    "REAL position remains open; will retry automatically (next attempt in "
+                    "%s)",
                     label or config.strategy_id,
+                    _retry_backoff(1),
                 )
         else:
             logger.warning(
@@ -439,19 +701,20 @@ class LiveTradingEngine:
                 float(config.max_position_size),
                 computed,
             )
-            self.session.add(
-                AuditLog(
-                    id=uuid.uuid4(),
-                    ts=now,
-                    event_type="live_risk_guard_max_position_size_rejected",
-                    payload={
-                        "strategy_id": str(config.strategy_id),
-                        "instrument_id": str(config.instrument_id),
-                        "requested_total": new_total,
-                        "max_position_size": float(config.max_position_size),
-                    },
+            if _should_log_max_position_rejection(self.session, config.id, now):
+                self.session.add(
+                    AuditLog(
+                        id=uuid.uuid4(),
+                        ts=now,
+                        event_type="live_risk_guard_max_position_size_rejected",
+                        payload={
+                            "strategy_id": str(config.strategy_id),
+                            "instrument_id": str(config.instrument_id),
+                            "requested_total": new_total,
+                            "max_position_size": float(config.max_position_size),
+                        },
+                    )
                 )
-            )
             return
 
         try:
