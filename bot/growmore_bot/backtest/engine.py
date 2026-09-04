@@ -49,8 +49,10 @@ class BacktestResult:
 
 class BacktestEngine:
     def __init__(self, strategy: Strategy, initial_capital: float, lot_size: int = 1):
-        """`lot_size` is the real contract trading unit (e.g. Gold Mini=100 grams,
-        Copper=2500 kg -- see growmore_bot.config.CommodityPlaceholder). Defaults
+        """`lot_size` is the number of QUOTE UNITS per lot -- not raw grams/kg
+        (e.g. Copper=2500 kg quoted per kg; Gold Mini is a 100g lot but MCX
+        quotes it per 10g, so lot_size=10, not 100 -- see
+        growmore_bot.config.CommodityPlaceholder's docstring). Defaults
         to 1 (a single raw unit of the price series) for backward compatibility;
         every existing caller/test that doesn't pass it behaves exactly as
         before. Folded into `qty` once at fill time so every downstream

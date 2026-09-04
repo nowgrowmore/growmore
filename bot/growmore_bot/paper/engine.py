@@ -21,9 +21,11 @@ wrapper only exposes Data API methods in the first place.
 Units: `size` (from Signal.size, default 1) and every `quantity`/
 `max_position_size` value are in human-friendly LOT units -- "2" means 2
 lots, matching what someone configuring bot_config would expect, not 2 raw
-grams/kg/barrels. `instrument.lot_size` (the real MCX contract unit, e.g.
-Gold Mini=100g) only scales the computed rupee P&L on a sell/close -- the
-same real-vs-raw-unit fix already applied to BacktestEngine (see
+grams/kg/barrels. `instrument.lot_size` (the number of QUOTE UNITS per lot --
+e.g. Copper=2500kg quoted per kg; Gold Mini is a 100g lot but quoted per 10g,
+so lot_size=10, not 100 -- see growmore_bot.config.CommodityPlaceholder's
+docstring) only scales the computed rupee P&L on a sell/close -- the same
+real-vs-raw-unit fix already applied to BacktestEngine (see
 docs/technical-debt.md). Found and fixed together with a second real gap:
 `_handle_sell` used to only ever write a PaperOrder row and never actually
 closed the PaperPosition or recorded realized P&L, so a position would
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -132,7 +135,19 @@ class PaperTradingEngine:
             if current_position_qty == 0
             else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
         )
-        signal = strategy.on_bar(quote, position_state)
+        # Regression: found live 2026-09-04 -- Quote.close is Dhan's
+        # ohlc.close, the PREVIOUS trading day's official close (fixed all
+        # session; see bot_signal_state.prev_close / docs/db-schema.md), NOT
+        # today's price. Every daily-bar strategy (RSI/MACD/SMA/Donchian/
+        # Bollinger/regime_switch) reads `bar.close` as "today's price so
+        # far", so handing it the raw Quote meant every live tick appended
+        # the SAME frozen yesterday's-close value regardless of how far LTP
+        # had actually moved -- these strategies never reacted to intraday
+        # price action at all. `high`/`low` are left untouched: Dhan's quote
+        # ohlc.high/low ARE today's real live session values, exactly what
+        # Donchian/Bollinger/regime_switch need for the forming bar.
+        live_bar = _dataclasses_replace(quote, close=quote.ltp)
+        signal = strategy.on_bar(live_bar, position_state)
         computed = _format_debug_state(strategy)
         self._record_signal_state(config, signal, quote, strategy, now, cumulative_daily_pnl)
 

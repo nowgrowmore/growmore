@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -140,7 +141,12 @@ class LiveTradingEngine:
             if current_position_qty == 0
             else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
         )
-        signal = strategy.on_bar(quote, position_state)
+        # See the identical fix/comment in paper/engine.py's process_tick --
+        # Quote.close is yesterday's frozen close, not today's live price;
+        # daily-bar strategies need `bar.close` to be the live LTP. high/low
+        # are left untouched (Dhan's live ohlc.high/low are real today values).
+        live_bar = _dataclasses_replace(quote, close=quote.ltp)
+        signal = strategy.on_bar(live_bar, position_state)
         computed = _format_debug_state(strategy)
         self._record_signal_state(config, signal, quote, strategy, now, cumulative_daily_pnl)
 

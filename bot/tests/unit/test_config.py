@@ -105,6 +105,14 @@ def test_settings_default_commodity_universe_has_real_security_ids(monkeypatch):
         # Real MCX contract trading unit -- looked up 2026-09-03, never guessed.
         assert commodity.lot_size > 0
 
+    # Regression: found live 2026-09-04 -- GOLDM's lot_size was entered as
+    # 100 (its lot's raw gram weight) instead of 10 (the number of
+    # QUOTE-UNITS per lot, since MCX quotes Gold Mini per 10g, not per gram).
+    # Every P&L/notional calculation multiplies price * lot_size directly, so
+    # the wrong value silently overstated every GOLDM rupee figure 10x.
+    by_symbol = {c.symbol: c for c in settings.default_commodity_universe}
+    assert by_symbol["GOLDM"].lot_size == 10
+
 
 def test_live_trading_disabled_by_default(monkeypatch):
     # CLAUDE.md non-negotiable: real order placement requires an explicit

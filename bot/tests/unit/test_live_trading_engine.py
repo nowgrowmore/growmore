@@ -32,6 +32,19 @@ class _FixedSignalStrategy(Strategy):
         return self._signal
 
 
+class _SpyStrategy(Strategy):
+    """Records the bar object it's actually called with -- see the identical
+    class/regression test in test_paper_engine.py for the full story."""
+
+    def __init__(self, signal: Signal):
+        self._signal = signal
+        self.received_bars: list = []
+
+    def on_bar(self, bar, position_state):
+        self.received_bars.append(bar)
+        return self._signal
+
+
 def _bot_config(**overrides):
     defaults = dict(
         id=uuid.uuid4(),
@@ -76,6 +89,32 @@ def test_disabled_config_is_skipped_entirely():
     dhan_client.get_quote.assert_not_called()
     order_client.place_market_order.assert_not_called()
     session.add.assert_not_called()
+
+
+def test_on_bar_receives_the_live_ltp_as_close_not_the_stale_quote_close():
+    # Regression: found live 2026-09-04 -- see the identical test/comment in
+    # test_paper_engine.py for the full story. Quote.close is Dhan's
+    # ohlc.close (yesterday's frozen close), not today's live price; every
+    # daily-bar strategy reads bar.close expecting "today's price so far".
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _SpyStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=153026, open=152000, high=153200, low=151800, close=152598
+    )
+    order_client = MagicMock()
+    session = MagicMock()
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert len(strategy.received_bars) == 1
+    bar = strategy.received_bars[0]
+    assert bar.close == 153026  # the live LTP, not the stale 152598
+    assert bar.high == 153200
+    assert bar.low == 151800
+    assert bar.ltp == 153026
 
 
 def test_buy_signal_places_a_real_order_and_persists_the_position():

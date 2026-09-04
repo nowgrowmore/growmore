@@ -1,5 +1,46 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-04) Daily-bar strategies (RSI/MACD/SMA/Donchian/Bollinger/regime_switch)
+  never reacted to intraday price movement on a live tick.** `paper/engine.py` and `live/engine.py`
+  fetched a live `Quote` and passed it straight to `strategy.on_bar(quote, ...)`. Every daily-bar
+  strategy reads `bar.close` expecting "today's price so far", but `Quote.close` is Dhan's
+  `ohlc.close` field — the **previous trading day's official close**, fixed all session (this is the
+  same field `bot_signal_state.prev_close` is deliberately sourced from, for the dashboard's "Today
+  ±X%" badge). So every live tick appended the SAME frozen yesterday's-close value to a strategy's
+  window regardless of how far the real LTP had moved — RSI/MACD/SMA/etc. only ever updated the
+  *next* calendar day once warm-up replayed a genuinely new bar, never intraday. Found live when the
+  account owner noticed GOLDM's `rsi`/`avg_gain`/`avg_loss` were bit-for-bit identical across two log
+  lines 71 minutes apart despite LTP moving 622 points. No test caught it because every `Quote(...)`
+  fixture in `test_paper_engine.py`/`test_live_trading_engine.py` happened to set `close == ltp`.
+  **Fixed**: both engines now call `strategy.on_bar(dataclasses.replace(quote, close=quote.ltp),
+  ...)` — `high`/`low` are left untouched since Dhan's live `ohlc.high/low` genuinely are today's
+  real session values (needed as-is by Donchian/Bollinger/regime_switch), only `close` was stale.
+  `_record_signal_state` still reads `prev_close` from the *original*, unwrapped `quote`, so the
+  dashboard's "Today %" badge is unaffected. Added a `_SpyStrategy` regression test in both engines'
+  test files asserting `on_bar` receives `bar.close == quote.ltp` with `ltp != close` in the fixture
+  (the previous fixtures' `ltp == close` had masked this for as long as the bug existed). Deployed to
+  the VPS and confirmed live: GOLDM's RSI immediately changed (26.94 → 9.93) on the next real tick.
+- **(Found + fixed 2026-09-04) GOLDM's `lot_size` was entered as 100 (raw grams) instead of 10 (quote-
+  units per lot), overstating every Gold Mini rupee P&L/notional figure 10x.** MCX Gold Mini is a
+  100-gram lot, but the futures price is quoted **per 10 grams** — confirmed independently via web
+  search, not just inference. Every engine (`backtest/engine.py`, `paper/engine.py`, `live/engine.py`)
+  and the dashboard's notional/P&L math do `price × lot_size` directly, treating `lot_size` as "quote-
+  units per lot" — true for every other instrument in the universe (their quote unit happens to equal
+  their lot's own unit) but not for GOLDM. Found live when the account owner spotted a GOLDM paper
+  position showing ₹1.55 **crore** notional exposure for one Mini lot. **Fixed**: `lot_size=10` in
+  `growmore_bot/config.py`'s `DEFAULT_COMMODITY_UNIVERSE`, backfilled on the real `instruments` row
+  (`update instruments set lot_size = 10 where symbol = 'GOLDM'`, logged to `audit_log` as
+  `instrument_lot_size_corrected`), and the 14 pre-existing GOLDM `backtest_runs` (computed with the
+  buggy value) were deleted and replaced with freshly re-run, corrected results — e.g.
+  `macd_trend fast5-slow13-sig5`: CAGR 78.17%→21.87%, Sharpe 1.56→1.38, max drawdown 37.35%→24.37%.
+  `profit_factor`/`win_rate_pct` were unaffected (ratios of a run's own trade outcomes, scale-
+  invariant) but CAGR/Sharpe/max-drawdown for every GOLDM strategy were previously significantly
+  inflated — this may be worth revisiting for GOLDM's live-mode `rsi_mean_reversion` config, whose
+  real backtested CAGR is materially lower than what justified enabling it. Existing GOLDM paper/live
+  positions' `unrealized_pnl` self-corrected on the very next tick (recomputed fresh each time, not
+  stored as an incremental delta); historical `realized_pnl` on already-closed GOLDM paper orders
+  remains permanently 10x-overstated in the audit trail (not rewritten, matching this project's
+  practice of not editing historical records).
 - **(Found + worked around 2026-09-04) `${JSON.stringify(x)}::jsonb` silently double-encodes an
   EMPTY object via the `postgres` npm package.** Creating the `vwap_session_bounce` strategies row
   with `params: {}` using this project's usual pattern (`${JSON.stringify({})}::jsonb`) stored a

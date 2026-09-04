@@ -39,6 +39,23 @@ class _FixedSignalStrategy(Strategy):
         return self._signal
 
 
+class _SpyStrategy(Strategy):
+    """Records the bar object it's actually called with, so a test can
+    assert what a live tick hands to a daily-bar strategy's on_bar --
+    without this, a bug where `bar.close` is stale (yesterday's close,
+    frozen all day) instead of the live LTP is invisible to every other
+    test here, since they all use Quote fixtures with ltp == close.
+    """
+
+    def __init__(self, signal: Signal):
+        self._signal = signal
+        self.received_bars: list = []
+
+    def on_bar(self, bar, position_state):
+        self.received_bars.append(bar)
+        return self._signal
+
+
 def _bot_config(**overrides):
     defaults = dict(
         id=uuid.uuid4(),
@@ -181,6 +198,67 @@ def test_max_position_size_rejection_logs_again_after_30_minutes():
     assert len(audit_entries) == 1
 
 
+def test_on_bar_receives_the_live_ltp_as_close_not_the_stale_quote_close():
+    # Regression: found live 2026-09-04 -- Quote.close is Dhan's ohlc.close,
+    # which is the PREVIOUS trading day's official close and stays fixed all
+    # session (see prev_close in bot_signal_state / docs/db-schema.md).
+    # Every daily-bar strategy (RSI/MACD/SMA/Donchian/Bollinger/regime_switch)
+    # reads `bar.close`, so passing the raw Quote straight to on_bar meant
+    # every live tick appended the SAME frozen yesterday's-close value to the
+    # strategy's window regardless of how far the real LTP had moved --
+    # RSI/MACD/SMA never reacted to intraday price action at all, only
+    # updating the next calendar day once warm-up replayed a new bar. The
+    # bot must instead hand the strategy a bar whose `close` is today's live
+    # LTP, matching every daily-bar strategy's expectation that `bar.close`
+    # is "today's price so far".
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _SpyStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=153026, open=152000, high=153200, low=151800, close=152598
+    )
+    session = MagicMock()
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert len(strategy.received_bars) == 1
+    bar = strategy.received_bars[0]
+    assert bar.close == 153026  # the live LTP, not the stale 152598
+    # high/low are today's real session values (Dhan's ohlc.high/low ARE
+    # live-reactive, unlike close) -- Donchian/Bollinger/regime_switch need
+    # these untouched, not clamped to the LTP.
+    assert bar.high == 153200
+    assert bar.low == 151800
+    assert bar.ltp == 153026
+
+
+def test_bot_signal_state_prev_close_still_reflects_the_real_previous_close():
+    # The live-bar fix above must not corrupt bot_signal_state.prev_close --
+    # that field is deliberately yesterday's close (for the dashboard's
+    # "Today +/-X%" badge), sourced from the ORIGINAL quote, not the wrapped
+    # live bar handed to the strategy.
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=153026, open=152000, high=153200, low=151800, close=152598
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    signal_states = [obj for obj in added if isinstance(obj, BotSignalState)]
+    assert len(signal_states) == 1
+    assert signal_states[0].prev_close == 152598
+    assert signal_states[0].ltp == 153026
+
+
 def test_daily_loss_limit_trip_disables_config_and_writes_audit_log():
     config = _bot_config(daily_loss_limit=1_000)
     instrument = _instrument(config)
@@ -270,7 +348,7 @@ def test_disabled_config_is_skipped_entirely():
 
 def test_sell_closes_position_and_records_lot_scaled_realized_pnl():
     config = _bot_config()
-    instrument = _instrument(config, lot_size=100)  # Gold Mini: 100g/lot
+    instrument = _instrument(config, lot_size=100)  # arbitrary lot-scaling factor for this test
     strategy = _FixedSignalStrategy(Signal(action=SignalAction.SELL, size=1))
     dhan_client = MagicMock()
     dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)

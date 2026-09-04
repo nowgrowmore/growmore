@@ -25,7 +25,7 @@ erDiagram
         text exchange_segment "e.g. MCX_COMM"
         text security_id "Dhan instrument id"
         text name
-        integer lot_size "real MCX contract unit, e.g. Gold Mini=100g"
+        integer lot_size "quote-units per lot, e.g. Copper=2500 (kg, quoted per kg); GOLDM=10 (100g lot, quoted per 10g)"
         date contract_expiry "current front-month contract's last trading day, display-only"
     }
     STRATEGIES {

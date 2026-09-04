@@ -32,9 +32,16 @@ class CommodityPlaceholder(BaseModel):
     needs to be refreshed (shortly before/at expiry) rather than silently going
     stale. Looked up 2026-09-03 for the then-current front-month contract.
 
-    `lot_size` is the real MCX contract trading unit (looked up from MCX's
+    `lot_size` is the number of QUOTE UNITS in one lot -- not raw grams/kg,
+    which matters whenever the exchange's quotation unit differs from its own
+    lot-size unit (e.g. MCX Gold Mini: a 100-gram lot, but the futures price
+    is quoted per 10 grams, so lot_size=10, not 100 -- confirmed 2026-09-04
+    after a real 10x P&L/notional overstatement was found live, see
+    docs/technical-debt.md). For every other commodity here the quote unit
+    happens to equal the lot's own unit (kg for metals, barrel for crude), so
+    lot_size is numerically the same either way -- looked up from MCX's
     official contract specs / mirrored broker spec pages 2026-09-03, never
-    guessed) -- without it, a backtest treats every instrument as "1 raw unit
+    guessed. Without this, a backtest treats every instrument as "1 raw unit
     of the price series," which makes Sharpe/Max Drawdown incomparable across
     commodities at very different price levels.
     """
@@ -53,7 +60,9 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         name="Gold Mini",
         security_id="569003",
         contract_expiry="2026-10-05",
-        lot_size=100,  # 100 grams
+        # 100g lot, but MCX quotes Gold Mini per 10g -- 10 quote-units per
+        # lot, NOT 100. See the lot_size docstring above.
+        lot_size=10,
     ),
     CommodityPlaceholder(
         symbol="SILVERM",
