@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from growmore_bot.persistence.models import AuditLog, PaperOrder, PaperPosition
+from growmore_bot.persistence.models import AuditLog, BotSignalState, PaperOrder, PaperPosition
 from growmore_bot.strategies.base import SignalAction, Strategy
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ class PaperTradingEngine:
         )
         signal = strategy.on_bar(quote, position_state)
         computed = _format_debug_state(strategy)
+        self._record_signal_state(config, signal, quote, strategy, now)
 
         if signal.action == SignalAction.HOLD:
             # Mark the open position to market against this tick's real
@@ -135,6 +136,35 @@ class PaperTradingEngine:
                 instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size,
                 now, label, computed,
             )
+
+    def _record_signal_state(
+        self, config: Any, signal: Any, quote: Any, strategy: Strategy, now: datetime
+    ) -> None:
+        """Upsert this bot_config's "what did the strategy just see" row --
+        lets the dashboard show live HOLD/BUY/SELL status and the computed
+        indicator values without grepping bot.log. One row per bot_config,
+        always overwritten with the latest tick, not a history log.
+        """
+        existing = (
+            self.session.query(BotSignalState).filter_by(bot_config_id=config.id).one_or_none()
+        )
+        if existing is None:
+            self.session.add(
+                BotSignalState(
+                    id=uuid.uuid4(),
+                    bot_config_id=config.id,
+                    last_signal=signal.action.value,
+                    checked_at=now,
+                    ltp=quote.ltp,
+                    indicators=strategy.debug_state(),
+                )
+            )
+        else:
+            existing.last_signal = signal.action.value
+            existing.checked_at = now
+            existing.ltp = quote.ltp
+            existing.indicators = strategy.debug_state()
+            self.session.add(existing)
 
     @staticmethod
     def _mark_to_market(position: Any, ltp: Any, lot_size: int) -> None:

@@ -41,10 +41,18 @@
   Still blocked on the items below (static IP) before this could ever safely be turned on for real —
   see `docs/pending-actions.md` for the activation checklist. The 2FA/OAuth session-requirements
   question is now resolved (see below, under SEBI Algo-ID) — not a blocker.
-- **Bot runs on a local machine, no static IP.** Fine for paper trading (read-only Data API calls
-  only). Blocks real order placement, which Dhan requires a static IP for. Plan: move to a small
-  VPS with an elastic/static IP when live trading is actually pursued — no code change needed, just
-  the new host.
+- **(Done 2026-09-04) Bot moved off the local machine, onto a DigitalOcean VPS** — droplet
+  `growmore-bot` (1 vCPU/1GB, Ubuntu 24.04, Bangalore `blr1`, public IP `139.59.72.81`), hardened
+  (key-only SSH as a non-root `growmore` user, root login + password auth disabled, `ufw` allowing
+  only SSH, `fail2ban` enabled), running the bot as a systemd service (`growmore-bot.service`,
+  auto-restarts on crash/reboot). The laptop's own bot process was stopped at the same time — running
+  two instances against the shared Neon database simultaneously would double up paper trades. Still
+  paper-trading only; nothing about trading behavior changed, this only solves the hosting/IP problem.
+  **Still needed before this actually satisfies Dhan's static-IP requirement**: the droplet's IP
+  (`139.59.72.81`) needs to be registered/whitelisted with Dhan directly (their side, needs the
+  account owner's login — see `docs/pending-actions.md`) — and once registered, Dhan doesn't allow
+  changing it for 7 days, so this is deliberately a separate, later step, not assumed done just
+  because the VPS exists.
 - **No SEBI Algo-ID handling.** Not needed for paper trading (we never call the Order API). Verified
   2026-09-04 that this is a much smaller lift than first assumed: SEBI's framework exempts self-built
   "White Box" strategies (logic transparent to the owner, not sold to others — this bot qualifies)

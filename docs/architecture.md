@@ -9,7 +9,7 @@ flowchart LR
         OrderAPI["Order API\n(built, gated OFF — see 'Why not live trading yet')"]
     end
 
-    subgraph BotHost["Bot host — local machine today, static-IP VPS later"]
+    subgraph BotHost["Bot host — DigitalOcean VPS (Bangalore), since 2026-09-04"]
         Scheduler["Scheduler\n(market-hours aware, ~5min tick)"]
         Strategies["Strategies\n(SMA crossover, Donchian breakout, ...)"]
         Backtest["Backtest engine"]
@@ -72,9 +72,11 @@ flowchart LR
 
 ## Deployment
 
-- **Bot**: runs as a scheduled process on the owner's local machine for now. Moving to a static-IP
-  VPS later requires no architecture change — just a new host + a static/elastic IP, since the bot
-  already only makes outbound calls (no inbound listener).
+- **Bot**: runs as a systemd service (`growmore-bot.service`) on a DigitalOcean droplet in Bangalore
+  (moved off the owner's laptop 2026-09-04) — hardened (key-only SSH, non-root user, `ufw` +
+  `fail2ban`), auto-restarts on crash/reboot. The droplet's IP still needs to be registered with Dhan
+  directly before this actually satisfies their static-IP requirement for Order APIs — see
+  `docs/pending-actions.md`.
 - **Dashboard**: Vercel project, auto-deployed Preview on every push/PR via Vercel's GitHub
   integration; production promotion is a separate, explicitly confirmed step.
 - **Database**: one Neon project for this app, isolated from other projects. Vercel Preview
@@ -89,17 +91,19 @@ off by default) and a specific `bot_config.mode="live"` (per strategy/instrument
 in the database — there's no dashboard UI for this, deliberately, so switching a config to live
 trading is never an accidental checkbox click) — and even then, real infrastructure gaps remain,
 tracked in `docs/technical-debt.md`/`docs/pending-actions.md`:
-1. Dhan requires a static IP for Order API calls; the bot's current host doesn't have one (VPS move
-   deferred by the account owner as of 2026-09-04).
-2. Dhan's specific 2FA/OAuth-based API session requirements for retail algo access haven't been
-   confirmed directly with Dhan yet (SEBI's Algo-ID *registration* itself is expected to be exempt
-   for this bot's low order rate, per `docs/technical-debt.md`).
-3. No reconciliation exists yet between `live_positions`/`live_orders` and Dhan's own real order/
-   position state — a `MARKET` order's initial response only carries an order ID and status like
-   `"TRANSIT"`, not a confirmed fill price, so `live_positions.avg_entry_price` is presently an
-   approximation (the tick's live quote LTP), not a verified fill.
-4. Tripping the daily-loss-limit guard on a live config disables the bot_config but does not
-   automatically place a closing order for whatever's still open — that needs a human to look at it.
+1. Dhan requires a static IP for Order API calls, whitelisted directly with them. The bot now runs on
+   a VPS with a real static IP (`139.59.72.81`, since 2026-09-04), but that IP hasn't been registered
+   with Dhan yet — see `docs/pending-actions.md`; once registered it can't be changed for 7 days.
+2. Dhan's 2FA/OAuth-based API session requirements are resolved — our existing PIN+TOTP headless
+   token generation is Dhan's own sanctioned mechanism, confirmed 2026-09-04 (SEBI's Algo-ID
+   *registration* itself is expected to be exempt for this bot's low order rate too).
+3. Order-level fill reconciliation exists (`LiveTradingEngine.reconcile_pending_orders`, polls Dhan's
+   real order status each tick) but position-level correction doesn't yet — `live_positions.
+   avg_entry_price`/`realized_pnl` stay an approximation (the tick's live quote LTP) even after an
+   order's own record is corrected to Dhan's real fill.
+4. Tripping the daily-loss-limit guard on a live config now attempts a real closing order before
+   disabling the bot_config; a failed closing order is logged as needing manual review rather than
+   silently retried.
 
 Paper trading sidesteps all of this by never calling the Order API — trades are simulated locally
 against real market data.

@@ -27,6 +27,7 @@ import pytest
 
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.paper.engine import PaperTradingEngine
+from growmore_bot.persistence.models import PaperOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -64,7 +65,7 @@ def _instrument(config, lot_size=1):
 
 
 def _looks_like_order(obj) -> bool:
-    return hasattr(obj, "simulated_fill_price")
+    return isinstance(obj, PaperOrder)
 
 
 def test_buy_signal_simulates_fill_at_fetched_ltp():
@@ -463,6 +464,52 @@ def test_force_close_for_expiry_is_logged_at_warning_level(caplog):
         )
 
     assert any("EXPIRY CLOSE-OUT" in r.message for r in caplog.records)
+
+
+def test_process_tick_records_signal_state_on_hold():
+    from growmore_bot.persistence.models import BotSignalState
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    strategy.debug_state = lambda: {"macd": -12.34, "signal": 5.67}
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], BotSignalState)]
+    assert len(added) == 1
+    assert added[0].bot_config_id == config.id
+    assert added[0].last_signal == "HOLD"
+    assert float(added[0].ltp) == pytest.approx(155000)
+    assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
+
+
+def test_process_tick_updates_existing_signal_state_row_in_place():
+    from growmore_bot.persistence.models import BotSignalState
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    existing_state = BotSignalState(
+        id=uuid.uuid4(), bot_config_id=config.id, last_signal="HOLD",
+        checked_at=datetime.now(timezone.utc), ltp=99, indicators={},
+    )
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = existing_state
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    assert existing_state.last_signal == "BUY"
+    assert float(existing_state.ltp) == pytest.approx(100)
+    session.add.assert_any_call(existing_state)
 
 
 def test_buy_fill_is_logged_at_info_level(caplog):

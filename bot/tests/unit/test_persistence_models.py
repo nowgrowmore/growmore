@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "live_positions",
     "live_orders",
     "bot_config",
+    "bot_signal_state",
     "audit_log",
 }
 

@@ -204,6 +204,31 @@ class BotConfig(Base):
     instrument: Mapped["Instrument"] = relationship(back_populates="bot_configs")
 
 
+class BotSignalState(Base):
+    """The most recent tick's signal + computed indicator values for one
+    bot_config -- one row per config, upserted every tick (not a history
+    log; only "what did the strategy see just now" matters here). Lets the
+    dashboard show "this strategy is currently HOLD/BUY/SELL, here's how
+    close it is" without needing to grep bot.log. Written by
+    PaperTradingEngine/LiveTradingEngine right after computing a signal,
+    regardless of what the signal was.
+    """
+
+    __tablename__ = "bot_signal_state"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    bot_config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("bot_config.id"), nullable=False, unique=True
+    )
+    last_signal: Mapped[str] = mapped_column(Text, nullable=False)  # HOLD|BUY|SELL
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ltp: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # Strategy.debug_state()'s raw dict, e.g. {"macd": -1113.34, "signal": 363.55}.
+    indicators: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+
+    bot_config: Mapped["BotConfig"] = relationship()
+
+
 class LivePosition(Base):
     """Mirrors PaperPosition exactly, but for REAL orders placed via
     growmore_bot.broker.dhan_order_client -- kept as an entirely separate

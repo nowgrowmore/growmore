@@ -76,8 +76,19 @@ Plain-language list of things only you can do or decide. Updated as the project 
   Both switches are independent; flipping only one does nothing. Ask the agent to do this when you're
   ready — don't do it via raw SQL yourself without walking through the current state of the items
   below first.
-- [ ] Static IP hosting (VPS) — Dhan mandates a static IP for Order APIs, and this turns out to be
-  part of SEBI's Algo-ID framework's requirements too, not just a Dhan-specific policy.
+- [x] **VPS provisioned and the bot moved onto it** (2026-09-04) — DigitalOcean droplet
+  `growmore-bot` (Bangalore, IP `139.59.72.81`), hardened, running as a systemd service. Verified
+  ticking correctly as the sole instance (the laptop's copy was stopped to avoid double-trading
+  against the shared database).
+- [ ] **Register the droplet's IP (`139.59.72.81`) with Dhan** — this is the piece that actually
+  satisfies the static-IP requirement; the VPS existing isn't enough on its own. This needs your own
+  login to Dhan's web console (Profile → DhanHQ Trading APIs → IP whitelisting or similar — exact
+  location not yet confirmed, ask the agent to check when you're ready). **Important**: once set,
+  Dhan doesn't allow changing it for 7 days, so only do this once you're confident in the droplet
+  setup (you are — it's been running paper trading identically to before).
+- [ ] SSH access to the droplet is at `ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81` (key-only,
+  root login disabled). Ask the agent for `growmore-bot.service` status/logs/restart commands
+  whenever needed — no need to remember `systemctl` syntax yourself.
 - [ ] **SEBI Algo-ID — smaller lift than originally thought, verified 2026-09-04.** This bot's order
   rate (polls every 5 minutes) is nowhere near the 10-orders/second-per-exchange threshold that
   triggers formal exchange strategy registration, and a self-built strategy like this one qualifies
