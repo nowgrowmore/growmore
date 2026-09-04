@@ -139,5 +139,25 @@ class DhanOrderClient:
         logger.warning("LIVE ORDER PLACED (REAL MONEY): %s", audit_payload)
         return PlacedOrder(order_id=order_id, order_status=order_status)
 
+    def get_order_status(self, order_id: str) -> dict:
+        """Read-only lookup of a real order's current status (GET
+        /orders/{order_id}) -- used for fill reconciliation (see
+        growmore_bot.live.engine.LiveTradingEngine.reconcile_pending_orders).
+        Still gated behind live_trading_enabled (nothing meaningful to query
+        when it's off) but never places, modifies, or cancels anything.
+
+        Unlike place_market_order's request schema (verified against the
+        dhanhq SDK's own source), the exact response field names here
+        (`orderStatus`, `averageTradedPrice`, `filledQty` per Dhan's public
+        docs) are NOT independently verified against a live response --
+        callers must parse defensively.
+        """
+        if not self._live_trading_enabled:
+            raise LiveTradingDisabledError(
+                "Refusing to query order status: live trading is disabled "
+                "(Settings().live_trading_enabled is False)."
+            )
+        return self._sdk.get_order_by_id(order_id)
+
 
 __all__ = ["DhanOrderClient", "DhanOrderError", "LiveTradingDisabledError", "PlacedOrder"]

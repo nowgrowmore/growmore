@@ -13,20 +13,34 @@
   `live_positions`/`live_orders` tables (never `paper_positions`/`paper_orders`, so real and
   simulated data can never mix). Full TDD coverage, all mocked (no real order was ever placed while
   building this). Known gaps, left as gaps rather than silently papered over:
-  1. **No fill reconciliation.** A `MARKET` order's response only carries an order ID and an initial
-     status (e.g. `"TRANSIT"`), not a confirmed fill price — `live_positions.avg_entry_price` uses
-     the tick's live quote LTP as an approximation, same convention as the paper engine, but for a
-     real order this could differ from the actual fill (slippage). No code polls Dhan's
-     `get_order_by_id` to confirm/correct this yet.
-  2. **Daily-loss-limit trip on a live config doesn't auto-close the real position.** It disables the
-     bot_config (stops new entries) but leaves whatever's open for a human to decide on — closing it
-     automatically would need its own careful design (e.g. what if the closing order itself fails).
+  1. **(Partially fixed 2026-09-04) Fill reconciliation now exists at the order level, not yet at the
+     position level.** A `MARKET` order's placement response only carries an order ID and an initial
+     status (e.g. `"TRANSIT"`), not a confirmed fill price. `LiveTradingEngine.reconcile_pending_orders()`
+     now polls Dhan's `get_order_by_id` once per tick for every `live_orders` row still in a
+     non-terminal status and corrects that row's `order_status`/`fill_price` to Dhan's real values.
+     **Still not done**: retroactively recomputing the associated `live_positions.avg_entry_price`/
+     `realized_pnl` when the real fill price differs from the approximate live-quote LTP used at
+     placement (harder — a position can be built from several blended fills) — the position-level
+     numbers remain an approximation even after order-level reconciliation runs. Also worth noting:
+     unlike `place_market_order`'s request schema (verified against the `dhanhq` SDK's own source),
+     the response field names this relies on (`orderStatus`, `averageTradedPrice`) are only
+     documented, not independently verified against a live response yet (no live order has ever been
+     placed) — parsing is deliberately defensive (a missing/renamed field just skips that order,
+     logged, rather than crashing or corrupting data), but treat this as unverified until a real
+     order actually gets reconciled once live trading is ever turned on.
+  2. **(Fixed 2026-09-04) Daily-loss-limit trip on a live config now attempts to auto-close the real
+     position** — `LiveTradingEngine._trip_daily_loss_guard` places a real closing SELL for whatever's
+     open before disabling the config, and audit-logs `auto_close_attempted`/`auto_close_succeeded`/
+     `auto_close_pnl` either way. If the closing order itself fails (caught, never raised), the
+     position is left open and the failure is logged clearly as needing manual review rather than
+     silently retried or hidden. Applied the same fix to `PaperTradingEngine` for consistency/realism,
+     even though a failed *simulated* close carries no real risk.
   3. **Dashboard doesn't read `live_positions`/`live_orders` or expose `bot_config.mode` at all
      yet** — not urgent while `live_trading_enabled` stays False, but needed before this is ever
      actually used, so real activity is visible somewhere.
-  Still blocked on the items below (static IP, Dhan's specific session requirements) before this
-  could ever safely be turned on for real — see `docs/pending-actions.md` for the activation
-  checklist.
+  Still blocked on the items below (static IP) before this could ever safely be turned on for real —
+  see `docs/pending-actions.md` for the activation checklist. The 2FA/OAuth session-requirements
+  question is now resolved (see below, under SEBI Algo-ID) — not a blocker.
 - **Bot runs on a local machine, no static IP.** Fine for paper trading (read-only Data API calls
   only). Blocks real order placement, which Dhan requires a static IP for. Plan: move to a small
   VPS with an elastic/static IP when live trading is actually pursued — no code change needed, just
@@ -39,16 +53,23 @@
   multi-week exchange-approval process is expected to apply before live trading. What DOES still
   apply regardless of the exemption: a static IP whitelisted with the broker (see the item above —
   same underlying requirement, now confirmed to be part of this SEBI framework too, not just a
-  Dhan-specific policy), 2FA on every API session, OAuth-based authentication (not a long-lived bare
-  API key), and broker-side order tagging/audit logging (the bot already keeps its own `audit_log`
-  table and `bot.log`, which should cover the "keep audit-ready logs" expectation, but this hasn't
-  been checked against Dhan's specific technical requirements for 2FA/OAuth on API sessions — worth
-  confirming with Dhan directly before live trading, since our current setup uses a long-lived access
-  token refreshed via TOTP, not a per-session OAuth+2FA flow). **(Fixed 2026-09-04)** the "automatic
-  session reset before each trading day" expectation specifically: `scheduler/run.py`'s `start()` now
-  forces a fresh Dhan session via `token_refresh.refresh_if_needed(force=True)` once per IST calendar
-  day (`token_refresh.is_new_trading_day`), independent of how much validity the current token has
-  left — previously it only ever refreshed reactively, within 2 hours of expiry.
+  Dhan-specific policy), 2FA on every session, and broker-side order tagging/audit logging (the bot
+  already keeps its own `audit_log` table and `bot.log`, which should cover the "keep audit-ready
+  logs" expectation). **(Resolved 2026-09-04)** the 2FA/OAuth question specifically, checked directly
+  against Dhan's own authentication docs: Dhan documents TWO sanctioned ways to get an access token —
+  a full OAuth App ID/Secret browser-consent flow (needs a public HTTPS redirect URL we don't have),
+  or **programmatic generation via client ID + PIN + a live TOTP code** — exactly what
+  `token_refresh.py` already does. This isn't a workaround around Dhan's 2FA requirement, it IS Dhan's
+  own documented headless 2FA mechanism (the PIN+TOTP pair together constitute the two factors). Dhan's
+  docs also confirm there's no additional per-API-call session requirement beyond the 24h token
+  itself, and static IP whitelisting only gates Order Placement APIs specifically (not Data APIs) —
+  matches everything already built. One new operational detail worth remembering: once static IPs are
+  registered with Dhan, **they can't be changed for 7 days** — worth confirming the VPS provider/IP
+  before registering it, not after. **(Fixed 2026-09-04)** the "automatic session reset before each
+  trading day" expectation specifically: `scheduler/run.py`'s `start()` now forces a fresh Dhan
+  session via `token_refresh.refresh_if_needed(force=True)` once per IST calendar day
+  (`token_refresh.is_new_trading_day`), independent of how much validity the current token has left —
+  previously it only ever refreshed reactively, within 2 hours of expiry.
 - **Dhan sandbox not used for market data.** Confirmed via Dhan docs that sandbox fills all orders
   at a fixed ₹100 and does not provide real quotes — unsuitable for realistic paper-trade
   simulation. We use the production Data API (read-only) for real prices instead; see

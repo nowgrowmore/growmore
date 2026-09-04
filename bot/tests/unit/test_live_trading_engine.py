@@ -136,6 +136,81 @@ def test_daily_loss_limit_trip_disables_config_without_attempting_an_order():
     assert audit_entries[0].event_type == "live_risk_guard_daily_loss_limit_tripped"
 
 
+def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
+    config = _bot_config(daily_loss_limit=1_000)
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD9", order_status="TRANSIT")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, live_position_id=existing_position.id,
+        cumulative_daily_pnl=-1_500,
+    )
+
+    assert config.enabled is False
+    order_client.place_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1
+    )
+    assert existing_position.status == "closed"
+    assert float(existing_position.realized_pnl) == pytest.approx(500_000)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    trip_entries = [e for e in audit_entries if e.event_type == "live_risk_guard_daily_loss_limit_tripped"]
+    assert len(trip_entries) == 1
+    assert trip_entries[0].payload["auto_close_attempted"] is True
+    assert trip_entries[0].payload["auto_close_succeeded"] is True
+
+
+def test_daily_loss_limit_trip_auto_close_failure_is_logged_not_raised():
+    config = _bot_config(daily_loss_limit=1_000)
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    order_client.place_market_order.side_effect = DhanOrderError("Insufficient margin")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    # Must not raise -- a failed auto-close is a "needs human attention" event,
+    # not a crash.
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, live_position_id=existing_position.id,
+        cumulative_daily_pnl=-1_500,
+    )
+
+    assert config.enabled is False
+    # Position is left open/untouched -- we could not confirm a real close.
+    assert existing_position.status == "open"
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    trip_entries = [e for e in audit_entries if e.event_type == "live_risk_guard_daily_loss_limit_tripped"]
+    assert len(trip_entries) == 1
+    assert trip_entries[0].payload["auto_close_attempted"] is True
+    assert trip_entries[0].payload["auto_close_succeeded"] is False
+
+
 def test_sell_closes_position_places_a_real_order_and_records_realized_pnl():
     config = _bot_config()
     instrument = _instrument(config, lot_size=100)
@@ -212,6 +287,62 @@ def test_force_close_for_expiry_is_noop_with_no_open_position():
     dhan_client.get_quote.assert_not_called()
     order_client.place_market_order.assert_not_called()
     session.add.assert_not_called()
+
+
+def test_reconcile_pending_orders_updates_status_and_fill_price():
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": {"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 155123.5, "filledQty": 1}
+    }
+    session = MagicMock()
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(), broker_order_id="ORD1", order_status="TRANSIT", fill_price=155000,
+    )
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()
+
+    order_client.get_order_status.assert_called_once_with("ORD1")
+    assert pending_order.order_status == "TRADED"
+    assert float(pending_order.fill_price) == pytest.approx(155123.5)
+    session.add.assert_any_call(pending_order)
+
+
+def test_reconcile_pending_orders_handles_missing_fields_without_raising():
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    # Defensive: response missing the fields we'd normally expect.
+    order_client.get_order_status.return_value = {"data": {"orderId": "ORD1"}}
+    session = MagicMock()
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(), broker_order_id="ORD1", order_status="TRANSIT", fill_price=155000,
+    )
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()  # must not raise
+
+    # Nothing to update -- left exactly as it was.
+    assert pending_order.order_status == "TRANSIT"
+    assert float(pending_order.fill_price) == pytest.approx(155000)
+
+
+def test_reconcile_pending_orders_swallows_a_failed_lookup_and_continues():
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.side_effect = RuntimeError("boom")
+    session = MagicMock()
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(), broker_order_id="ORD1", order_status="TRANSIT", fill_price=155000,
+    )
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()  # must not raise
+
+    assert pending_order.order_status == "TRANSIT"
 
 
 def test_hold_marks_open_position_to_market():

@@ -97,6 +97,36 @@ def test_rejects_invalid_transaction_type(instrument):
     session.add.assert_not_called()
 
 
+def test_get_order_status_refuses_when_live_trading_disabled():
+    from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
+
+    client = _make_client(live_trading_enabled=False)
+
+    with pytest.raises(LiveTradingDisabledError):
+        client.get_order_status("112111182198")
+
+
+@responses.activate
+def test_get_order_status_returns_the_raw_response():
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/orders/112111182198",
+        json={
+            "orderId": "112111182198",
+            "orderStatus": "TRADED",
+            "averageTradedPrice": 155123.5,
+            "filledQty": 1,
+        },
+        status=200,
+    )
+    client = _make_client()
+
+    response = client.get_order_status("112111182198")
+
+    assert response["data"]["orderStatus"] == "TRADED"
+    assert response["data"]["averageTradedPrice"] == 155123.5
+
+
 @responses.activate
 def test_order_api_failure_raises_and_writes_audit_log(instrument):
     from growmore_bot.broker.dhan_order_client import DhanOrderError

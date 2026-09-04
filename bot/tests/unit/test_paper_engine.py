@@ -122,6 +122,39 @@ def test_daily_loss_limit_trip_disables_config_and_writes_audit_log():
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
     assert len(audit_entries) == 1
     assert audit_entries[0].event_type == "risk_guard_daily_loss_limit_tripped"
+    assert audit_entries[0].payload["auto_close_attempted"] is False
+
+
+def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
+    config = _bot_config(daily_loss_limit=1_000)
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, paper_position_id=existing_position.id,
+        cumulative_daily_pnl=-1_500,
+    )
+
+    assert config.enabled is False
+    assert existing_position.status == "closed"
+    assert float(existing_position.realized_pnl) == pytest.approx(500_000)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    trip_entries = [e for e in audit_entries if e.event_type == "risk_guard_daily_loss_limit_tripped"]
+    assert len(trip_entries) == 1
+    assert trip_entries[0].payload["auto_close_attempted"] is True
+    assert trip_entries[0].payload["auto_close_succeeded"] is True
 
 
 def test_no_signal_action_hold_does_not_create_order():

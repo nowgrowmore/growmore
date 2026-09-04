@@ -64,9 +64,11 @@ Plain-language list of things only you can do or decide. Updated as the project 
 ## Before any real (live) order placement — not in scope yet
 
 - [x] **Real order-placement code path built** (2026-09-04) — `dhan_order_client.py` +
-  `live/engine.py` + `bot_config.mode`, fully tested, off end to end. See `docs/technical-debt.md`
-  for exactly what it does and its known gaps (no fill reconciliation, no auto-close on a tripped
-  daily-loss-limit).
+  `live/engine.py` + `bot_config.mode`, fully tested, off end to end.
+- [x] **Order-level fill reconciliation + auto-close on a tripped daily loss limit, added 2026-09-04**
+  — see `docs/technical-debt.md` for exactly what these do and what's still not covered (position-
+  level P&L isn't retroactively corrected by reconciliation yet; a failed auto-close order leaves the
+  position open for manual review rather than retrying).
 - [ ] **How to actually turn this on, when the items below are ready:** (1) set `LIVE_TRADING_ENABLED
   =true` in the bot's `.env.local`, (2) directly update the specific `bot_config` row(s) you want live
   to `mode = 'live'` in the database (no dashboard UI for this, deliberately) — everything else (which
@@ -80,11 +82,12 @@ Plain-language list of things only you can do or decide. Updated as the project 
   rate (polls every 5 minutes) is nowhere near the 10-orders/second-per-exchange threshold that
   triggers formal exchange strategy registration, and a self-built strategy like this one qualifies
   as "White Box" (transparent logic, not sold to others) — the lighter-touch category. So the
-  multi-week exchange-approval process most articles describe likely does NOT apply here. What's
-  still needed: (1) the static IP above, (2) confirm with Dhan directly what their specific
-  2FA/OAuth-based API session requirements are for retail algo API access — our current setup uses a
-  long-lived access token refreshed via TOTP, which may not satisfy a per-session OAuth+2FA
-  expectation, worth a direct check before going live, (3) keep the existing `audit_log`/`bot.log`
+  multi-week exchange-approval process most articles describe likely does NOT apply here. Remaining:
+  (1) the static IP above (also note: once registered with Dhan, IPs can't be changed for 7 days —
+  confirm the VPS/provider before registering), (2) [x] **2FA/OAuth requirement resolved 2026-09-04**
+  — checked directly against Dhan's own docs: our existing PIN+TOTP headless token generation IS
+  Dhan's own sanctioned 2FA mechanism for programmatic access, not a workaround, and there's no
+  additional per-API-call session requirement beyond it. (3) keep the existing `audit_log`/`bot.log`
   trail, which should already cover the "audit-ready logs" expectation.
 - [ ] Re-review risk controls (max daily loss, per-order size caps) before any real capital is at risk.
 

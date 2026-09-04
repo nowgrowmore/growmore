@@ -83,7 +83,16 @@ class PaperTradingEngine:
         now = datetime.now(timezone.utc)
 
         if cumulative_daily_pnl <= -float(config.daily_loss_limit):
-            self._trip_daily_loss_guard(config, now, cumulative_daily_pnl, label)
+            self._trip_daily_loss_guard(
+                config,
+                instrument,
+                now,
+                cumulative_daily_pnl,
+                current_position_qty=current_position_qty,
+                avg_entry_price=avg_entry_price,
+                paper_position_id=paper_position_id,
+                label=label,
+            )
             return
 
         quote = self.dhan_client.get_quote(instrument)
@@ -204,16 +213,74 @@ class PaperTradingEngine:
         )
 
     def _trip_daily_loss_guard(
-        self, config: Any, now: datetime, cumulative_daily_pnl: float, label: str = ""
+        self,
+        config: Any,
+        instrument: Any,
+        now: datetime,
+        cumulative_daily_pnl: float,
+        current_position_qty: float = 0.0,
+        avg_entry_price: Optional[float] = None,
+        paper_position_id: Optional[uuid.UUID] = None,
+        label: str = "",
     ) -> None:
         config.enabled = False
-        logger.warning(
-            "%s -- DAILY LOSS LIMIT TRIPPED, disabling (cumulative_daily_pnl=%.2f, "
-            "daily_loss_limit=%.2f)",
-            label or config.strategy_id,
-            cumulative_daily_pnl,
-            float(config.daily_loss_limit),
+
+        auto_close_attempted = False
+        auto_close_succeeded = False
+        close_pnl: Optional[float] = None
+
+        has_open_position = (
+            current_position_qty > 0 and paper_position_id is not None and avg_entry_price is not None
         )
+        if has_open_position:
+            auto_close_attempted = True
+            try:
+                quote = self.dhan_client.get_quote(instrument)
+                close_pnl = (
+                    (float(quote.ltp) - float(avg_entry_price)) * current_position_qty
+                    * instrument.lot_size
+                )
+                position = self.session.get(PaperPosition, paper_position_id)
+                position.realized_pnl = float(position.realized_pnl or 0) + close_pnl
+                position.quantity = 0
+                position.status = "closed"
+                position.closed_at = now
+                self._mark_to_market(position, quote.ltp, instrument.lot_size)
+                self.session.add(position)
+                self.session.add(
+                    PaperOrder(
+                        id=uuid.uuid4(),
+                        paper_position_id=paper_position_id,
+                        side="sell",
+                        quantity=current_position_qty,
+                        simulated_fill_price=quote.ltp,
+                        filled_at=now,
+                        pnl=close_pnl,
+                    )
+                )
+                auto_close_succeeded = True
+                logger.warning(
+                    "%s -- DAILY LOSS LIMIT TRIPPED, auto-closed the open position "
+                    "qty=%s pnl=%.2f",
+                    label or config.strategy_id,
+                    current_position_qty,
+                    close_pnl,
+                )
+            except Exception:
+                logger.exception(
+                    "%s -- DAILY LOSS LIMIT TRIPPED but auto-close failed -- position remains "
+                    "open, needs manual review",
+                    label or config.strategy_id,
+                )
+        else:
+            logger.warning(
+                "%s -- DAILY LOSS LIMIT TRIPPED, disabling (cumulative_daily_pnl=%.2f, "
+                "daily_loss_limit=%.2f)",
+                label or config.strategy_id,
+                cumulative_daily_pnl,
+                float(config.daily_loss_limit),
+            )
+
         self.session.add(
             AuditLog(
                 id=uuid.uuid4(),
@@ -224,6 +291,9 @@ class PaperTradingEngine:
                     "instrument_id": str(config.instrument_id),
                     "cumulative_daily_pnl": cumulative_daily_pnl,
                     "daily_loss_limit": float(config.daily_loss_limit),
+                    "auto_close_attempted": auto_close_attempted,
+                    "auto_close_succeeded": auto_close_succeeded,
+                    "auto_close_pnl": close_pnl,
                 },
             )
         )

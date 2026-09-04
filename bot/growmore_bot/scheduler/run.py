@@ -163,6 +163,10 @@ def run_all_enabled_configs(
         if order_client is not None
         else None
     )
+    if live_engine is not None:
+        # Once per tick, not per-config -- reconciles every still-pending
+        # LiveOrder regardless of which config placed it.
+        live_engine.reconcile_pending_orders()
 
     configs = session.query(BotConfig).filter_by(enabled=True).all()
     for config in configs:
