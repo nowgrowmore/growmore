@@ -1,5 +1,21 @@
 # Technical Debt / Known Limitations
 
+- **(2026-09-04) First real live-trading attempt: rejected safely, root-caused, fixed.** With the
+  account owner's explicit go-ahead, Aluminium Mini's MACD (12,26,9) config was switched to
+  `mode="live"` and `LIVE_TRADING_ENABLED=true` was set on the VPS. The very next tick placed a real
+  BUY order attempt — Dhan rejected it with `DH-905 Invalid IP`. **Root cause**: the droplet has real
+  IPv6 connectivity, and `api.dhan.co` resolves to both IPv4 and IPv6 — the actual outbound HTTPS
+  connection went out over IPv6, which doesn't match the IPv4 (`139.59.72.81`) registered with Dhan.
+  **Fixed** by disabling IPv6 system-wide on the droplet (`/etc/sysctl.d/99-disable-ipv6.conf`),
+  verified afterward with `curl -w 'local_ip=%{local_ip}'` against Dhan's own API host showing the
+  correct registered IP. A second, more serious bug surfaced by the same failure: the order client's
+  own `live_order_failed` audit_log entry was being silently discarded, because nothing caught the
+  exception before it reached `session_scope()`'s rollback-on-any-exception handler — the one moment
+  an audit trail matters most (a failed real order) left no trace at all. Fixed by catching
+  order-placement failures at each call site in `live/engine.py` instead of letting them propagate.
+  **No real order was ever actually placed** — Dhan rejected it before any money moved.
+  `LIVE_TRADING_ENABLED` was immediately set back to `false` once the failure was seen, pending both
+  fixes; re-arming is a deliberate separate step, not automatic.
 - **(Built 2026-09-04, still OFF) Real order placement now exists but is gated behind two
   independent switches, both required.** `growmore_bot/broker/dhan_order_client.py` is the only
   module allowed to call Dhan's Order API (schema verified against the installed `dhanhq` SDK's own
