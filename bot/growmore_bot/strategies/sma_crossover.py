@@ -52,9 +52,16 @@ class SmaCrossoverStrategy(Strategy):
         return Signal(action=SignalAction.HOLD)
 
     def debug_state(self) -> dict[str, Optional[float]]:
-        # oldest_fast/oldest_slow (the values about to roll out of each
-        # window) let a caller solve exactly how much price would need to
-        # move for the fast/slow SMAs to cross.
+        # oldest_fast/oldest_slow are the values about to roll out of each
+        # window on the next appended BAR -- pure observability, retained
+        # because they're already persisted in bot_signal_state.indicators.
+        # They are deliberately NOT what the dashboard's "% move to signal"
+        # solve needs: the scheduler rebuilds this strategy every tick and
+        # warms it up from history ending yesterday, so the next tick
+        # REPLACES the live price in the newest slot rather than appending a
+        # bar -- nothing rolls out. Solving with these values answers a
+        # question about a day that never happens (see
+        # dashboard/lib/percent-to-signal.ts, fixed 2026-09-04).
         oldest_fast: Optional[float] = None
         oldest_slow: Optional[float] = None
         if self._last_fast_sma is not None:

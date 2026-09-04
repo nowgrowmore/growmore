@@ -76,12 +76,27 @@ class DhanOrderClient:
     ) -> PlacedOrder:
         """Place a real MARKET order on MCX for `instrument`.
 
-        `quantity` is already lot-size-scaled real contract units (the
-        caller's -- LiveTradingEngine's -- responsibility, same convention
-        as PaperTradingEngine). Returns Dhan's real (orderId, orderStatus) on
-        success -- a MARKET order's initial status (e.g. "TRANSIT") is not
-        the same as a confirmed fill; see docs/technical-debt.md for the
-        reconciliation gap this leaves.
+        `quantity` is in LOT units -- `1` means one MCX contract. That is
+        what LiveTradingEngine actually passes (a Signal's `size`, which is
+        in lots by the same convention PaperTradingEngine documents), and
+        this docstring now says so; it previously claimed "lot-size-scaled
+        real contract units", which contradicted every caller. Note that
+        `instrument.lot_size` could not have provided that scaling anyway --
+        it is a PRICE multiplier (10 for Gold Mini, because MCX quotes it per
+        10g of a 100g contract), used only to convert P&L into rupees, not a
+        contract quantity.
+
+        **UNVERIFIED against a real MCX order**: whether Dhan's own
+        `quantity` field counts lots or underlying units for MCX_COMM has not
+        been confirmed with Dhan, and getting it wrong scales a real order by
+        10x-100x rather than producing a slightly wrong number. Tracked as a
+        blocking item in docs/pending-actions.md; resolve it before any live
+        config is enabled.
+
+        Returns Dhan's real (orderId, orderStatus) on success -- a MARKET
+        order's initial status (e.g. "TRANSIT") is not the same as a
+        confirmed fill; see docs/technical-debt.md for the reconciliation gap
+        this leaves.
 
         Raises LiveTradingDisabledError if the kill switch is off, ValueError
         for an invalid transaction_type, or DhanOrderError if Dhan's API

@@ -147,3 +147,56 @@ class TestSnapshot:
 
     def test_load_state_snapshot_tolerates_empty_dict(self):
         VwapSessionBounceStrategy().load_state_snapshot({})  # must not raise
+
+
+def _live_quote_shape(ltp, vwap, high, low, close):
+    """The REAL live shape (growmore_bot.broker.dhan_client.Quote): unlike the
+    minimal `_quote` helper above, it also carries high/low/close -- which is
+    exactly why `vwap`'s presence alone can't be used to tell a live quote
+    apart from a historical daily bar.
+    """
+    return SimpleNamespace(ltp=ltp, vwap=vwap, high=high, low=low, close=close, open=close)
+
+
+def test_a_live_quote_without_a_session_vwap_never_overwrites_todays_cpr():
+    """Regression (independent code review 2026-09-04): the strategy told a
+    historical Bar apart from a live Quote by whether `vwap` was present.
+    But `Quote.vwap` is legitimately None early in a session (Dhan reports
+    `average_price: 0` until real trades print -- see dhan_client.get_quote),
+    and a real Quote ALSO has high/low/close. So such a tick fell into the
+    warm-up branch and recomputed `_current_cpr` from TODAY's partial
+    session range, silently replacing today's correct CPR (derived from
+    yesterday's daily bar) with a meaningless one -- both in the recorded
+    `bot_signal_state.indicators` the dashboard shows, and as the gate any
+    later tick in that same tick's evaluation would use.
+
+    A live quote is identified by `ltp` (which no historical Bar has),
+    not by `vwap`.
+    """
+    strategy = VwapSessionBounceStrategy()
+    strategy.on_bar(PRIOR_DAY, None)
+    cpr_after_warm_up = strategy._current_cpr
+
+    signal = strategy.on_bar(
+        _live_quote_shape(ltp=106, vwap=None, high=107, low=105.5, close=106), None
+    )
+
+    assert signal.action == SignalAction.HOLD
+    assert strategy._current_cpr == cpr_after_warm_up
+
+
+def test_a_missing_session_vwap_does_not_establish_a_crossing_reference():
+    """A tick with no real VWAP must leave `prev_above_vwap` untouched --
+    otherwise the first tick that DOES carry a real VWAP would register a
+    "crossing" against a reference that never existed.
+    """
+    strategy = VwapSessionBounceStrategy()
+    strategy.on_bar(PRIOR_DAY, None)
+
+    strategy.on_bar(_live_quote_shape(ltp=106, vwap=None, high=107, low=105, close=106), None)
+    assert strategy._prev_above_vwap is None
+
+    # First real VWAP tick only establishes the reference, never signals.
+    signal = strategy.on_bar(_live_quote_shape(ltp=106, vwap=104, high=107, low=105, close=106), None)
+    assert signal.action == SignalAction.HOLD
+    assert strategy._prev_above_vwap is True

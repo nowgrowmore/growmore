@@ -17,8 +17,14 @@ docs/smallcap-momentum-research.md's sibling doc for why this is validated
 by paper trading instead of a historical backtest.
 
 `on_bar` tells a historical `Bar` (warm-up) apart from a live `Quote` by
-checking whether `vwap` is present (`getattr(bar, "vwap", None)`), rather
-than needing a new `Strategy.on_bar` parameter:
+checking whether `ltp` is present (`getattr(bar, "ltp", None)`) -- a field
+only the live quote shape has -- rather than needing a new
+`Strategy.on_bar` parameter. It deliberately does NOT discriminate on
+`vwap`: `Quote.vwap` is legitimately None early in a session (Dhan reports
+`average_price: 0` until real trades print), and a real `Quote` also
+carries high/low/close, so such a tick used to fall into the warm-up branch
+and overwrite today's CPR with one computed from today's own partial
+session range -- found via independent code review 2026-09-04.
   - **Historical bar**: recompute CPR from *this* bar's H/L/C and store it
     -- return HOLD (no `vwap` to trade against yet). Since the scheduler's
     `_warm_up_strategy` already replays daily bars ending *yesterday* fresh
@@ -52,19 +58,28 @@ class VwapSessionBounceStrategy(Strategy):
         self._last_ltp: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
-        vwap = getattr(bar, "vwap", None)
+        raw_ltp = getattr(bar, "ltp", None)
 
-        if vwap is None:
+        if raw_ltp is None:
             # A historical daily bar during warm-up -- CPR for "today" comes
             # from THIS bar's H/L/C (yesterday's range, from today's vantage
-            # point). No live vwap to trade against yet.
+            # point). No live quote to trade against yet.
             pivot = (bar.high + bar.low + bar.close) / 3
             bc = (bar.high + bar.low) / 2
             tc = 2 * pivot - bc
             self._current_cpr = (min(bc, tc), pivot, max(bc, tc))
             return Signal(action=SignalAction.HOLD)
 
-        ltp = float(bar.ltp)
+        vwap = getattr(bar, "vwap", None)
+        if vwap is None:
+            # A live quote with no real session VWAP yet (no trades printed).
+            # Nothing to trade against -- and critically, this must leave BOTH
+            # today's CPR and the crossing reference untouched, so the first
+            # tick carrying a real VWAP can't register a crossing against a
+            # reference that never existed.
+            return Signal(action=SignalAction.HOLD)
+
+        ltp = float(raw_ltp)
         self._last_vwap = vwap
         self._last_ltp = ltp
 

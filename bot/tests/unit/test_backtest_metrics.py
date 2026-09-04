@@ -80,3 +80,20 @@ def test_cagr_pct_known_case():
 
 def test_cagr_pct_zero_years_is_zero():
     assert cagr_pct(start_equity=100, end_equity=200, years=0) == 0.0
+
+
+def test_cagr_pct_wiped_out_account_is_minus_100_not_a_complex_number():
+    """Regression (independent code review 2026-09-04): a negative end
+    equity (entirely reachable here -- these are leveraged commodity lots
+    against an unleveraged `initial_capital`, so a bad variant's equity
+    curve can cross zero) hit `(negative) ** (1/years)`, which in Python
+    returns a COMPLEX number rather than raising. That complex value flowed
+    straight into BacktestRun.cagr_pct, so a blown-up run either crashed the
+    whole sweep at DB-write time or persisted garbage that ranked
+    unpredictably. A wiped-out account is -100%: there's no real compound
+    rate below "lost everything".
+    """
+    result = cagr_pct(start_equity=100_000, end_equity=-50_000, years=5)
+    assert isinstance(result, float)
+    assert result == pytest.approx(-100.0)
+    assert cagr_pct(start_equity=100_000, end_equity=0.0, years=5) == pytest.approx(-100.0)

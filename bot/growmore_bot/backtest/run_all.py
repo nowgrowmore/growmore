@@ -26,7 +26,8 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Sequence
+from functools import partial
+from typing import Any, Callable, Sequence
 
 from growmore_bot.backtest.engine import BacktestEngine
 from growmore_bot.broker.dhan_client import DhanClient
@@ -99,25 +100,46 @@ def profit_factor_for_ranking(stored_value: float | None) -> float:
     return float("inf") if stored_value is None else float(stored_value)
 
 
-def _build_strategy_grid() -> list[tuple[str, str, dict, Strategy]]:
-    """The parameter sweep grid: (strategy name, version label, params, instance).
+def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]:
+    """The parameter sweep grid: (strategy name, version label, params,
+    factory). The last element is a FACTORY, not an instance, deliberately.
 
     Kept small and reasoned (14 variants total across 5 strategy families),
     not exhaustive -- see docs/pending-actions.md for why an unbounded grid
     search would be a multiple-comparisons trap rather than useful analysis.
+
+    Regression (independent code review 2026-09-04): this used to return one
+    already-constructed instance per variant, which `main()` then reused for
+    EVERY instrument in the sweep. Every strategy here is stateful (rolling
+    close deques, seeded EMAs, previous-crossing flags, ADX's previous bar),
+    so each instrument after the first began with the previous commodity's
+    price history still loaded -- Gold Mini's ~70,000-level closes sitting in
+    the window as Copper's ~700-level bars arrived, fabricating crossings and
+    breakouts and corrupting the rankings that decide where real money goes.
+    A fresh instance per (instrument, variant) is the only safe contract.
     """
-    grid: list[tuple[str, str, dict, Strategy]] = []
+    grid: list[tuple[str, str, dict, Callable[[], Strategy]]] = []
 
     for fast, slow in [(5, 20), (10, 30), (10, 50), (20, 50)]:
         params: dict[str, Any] = {"fast_period": fast, "slow_period": slow}
         grid.append(
-            ("sma_crossover", f"fast{fast}-slow{slow}", params, SmaCrossoverStrategy(**params))
+            (
+                "sma_crossover",
+                f"fast{fast}-slow{slow}",
+                params,
+                partial(SmaCrossoverStrategy, **params),
+            )
         )
 
     for period in [10, 20, 55]:
         params = {"period": period}
         grid.append(
-            ("donchian_breakout", f"period{period}", params, DonchianBreakoutStrategy(**params))
+            (
+                "donchian_breakout",
+                f"period{period}",
+                params,
+                partial(DonchianBreakoutStrategy, **params),
+            )
         )
 
     for period, oversold, overbought in [(14, 30, 70), (14, 20, 80), (7, 30, 70)]:
@@ -127,14 +149,19 @@ def _build_strategy_grid() -> list[tuple[str, str, dict, Strategy]]:
                 "rsi_mean_reversion",
                 f"period{period}-{oversold}-{overbought}",
                 params,
-                RsiMeanReversionStrategy(**params),
+                partial(RsiMeanReversionStrategy, **params),
             )
         )
 
     for fast, slow, sig in [(12, 26, 9), (5, 13, 5)]:
         params = {"fast_period": fast, "slow_period": slow, "signal_period": sig}
         grid.append(
-            ("macd_trend", f"fast{fast}-slow{slow}-sig{sig}", params, MacdTrendStrategy(**params))
+            (
+                "macd_trend",
+                f"fast{fast}-slow{slow}-sig{sig}",
+                params,
+                partial(MacdTrendStrategy, **params),
+            )
         )
 
     for period, num_std in [(20, 2.0), (20, 2.5)]:
@@ -144,7 +171,7 @@ def _build_strategy_grid() -> list[tuple[str, str, dict, Strategy]]:
                 "bollinger_reversion",
                 f"period{period}-k{num_std}",
                 params,
-                BollingerReversionStrategy(**params),
+                partial(BollingerReversionStrategy, **params),
             )
         )
 
@@ -166,7 +193,9 @@ def _build_strategy_grid() -> list[tuple[str, str, dict, Strategy]]:
                 "ranging_params": ranging_params,
             }
             version = f"adx14-macd{fast}{slow}{sig}-{ranging_name}"
-            grid.append(("regime_switch", version, params, RegimeSwitchStrategy(**params)))
+            grid.append(
+                ("regime_switch", version, params, partial(RegimeSwitchStrategy, **params))
+            )
 
     return grid
 
@@ -193,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     client = DhanClient(client_id=settings.dhan_client_id, access_token=settings.dhan_access_token)
     client.refresh_access_token_if_needed()
 
-    grid = _build_strategy_grid()
+    grid = build_strategy_grid()
     summaries: list[RunSummary] = []
 
     with session_scope() as session:
@@ -213,7 +242,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not bars:
                 continue
 
-            for strategy_name, version, params, strategy_impl in grid:
+            for strategy_name, version, params, strategy_factory in grid:
+                # A FRESH instance per (instrument, variant) -- strategies are
+                # stateful, so sharing one across instruments would carry the
+                # previous commodity's price history into this one's window.
+                strategy_impl = strategy_factory()
                 strategy_row = (
                     session.query(StrategyRow)
                     .filter_by(name=strategy_name, version=version)
@@ -287,4 +320,10 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["RunSummary", "rank_results", "profit_factor_for_ranking", "main"]
+__all__ = [
+    "RunSummary",
+    "build_strategy_grid",
+    "rank_results",
+    "profit_factor_for_ranking",
+    "main",
+]

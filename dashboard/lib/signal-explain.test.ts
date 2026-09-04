@@ -30,6 +30,55 @@ describe("explainSignal", () => {
     expect(text).toContain("SELL");
   });
 
+  it("donchian_breakout: says the breakout already fired instead of claiming price must still rise", () => {
+    // Regression (independent code review 2026-09-04): both distances were
+    // rendered through Math.abs, so a price already ABOVE the channel high
+    // was described as still needing to "rise" that far to break above it.
+    // Only the transition into a breakout signals (see the strategy's
+    // prev_breakout_state), so there's no further BUY on that side at all.
+    const above = explainSignal(
+      "donchian_breakout",
+      { channel_high: 110, channel_low: 90 },
+      {},
+      115
+    );
+    expect(above).toContain("already broken above");
+    expect(above).not.toContain("needs to rise");
+    expect(above).not.toContain("to BUY");
+
+    const below = explainSignal(
+      "donchian_breakout",
+      { channel_high: 110, channel_low: 90 },
+      {},
+      85
+    );
+    expect(below).toContain("already broken below");
+    expect(below).not.toContain("to SELL");
+  });
+
+  it("rsi_mean_reversion: RSI exactly on a threshold is in the extreme zone, not neutral", () => {
+    // The strategy's own boundary is `prev <= oversold && rsi > oversold`,
+    // so RSI sitting exactly ON the line is still inside the extreme zone.
+    // This used to read "in neutral territory" at exactly 30/70.
+    const atOversold = explainSignal(
+      "rsi_mean_reversion",
+      { rsi: 30, avg_gain: 0, avg_loss: 2, prev_close: 100 },
+      { period: 14, oversold: 30, overbought: 70 },
+      100
+    );
+    expect(atOversold).toContain("already below the oversold line");
+    expect(atOversold).not.toContain("neutral territory");
+
+    const atOverbought = explainSignal(
+      "rsi_mean_reversion",
+      { rsi: 70, avg_gain: 2, avg_loss: 0, prev_close: 100 },
+      { period: 14, oversold: 30, overbought: 70 },
+      100
+    );
+    expect(atOverbought).toContain("already above the overbought line");
+    expect(atOverbought).not.toContain("neutral territory");
+  });
+
   it("appends the exact percent move to the next signal when it's computable", () => {
     const text = explainSignal(
       "donchian_breakout",

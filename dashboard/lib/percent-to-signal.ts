@@ -14,9 +14,18 @@
  * fixed and asking "what price would move this indicator to its threshold" --
  * see bot/growmore_bot/strategies/{macd_trend,rsi_mean_reversion,
  * sma_crossover}.py's debug_state() for the raw internals this depends on.
- * It's a same-tick approximation (the rest of the window is fixed, only the
- * live price is hypothetically moved), same spirit as the direct-price
- * strategies' "distance to the channel/band" math already in signal-explain.ts.
+ *
+ * The model, and it matters: the bot's scheduler rebuilds a fresh strategy
+ * on EVERY tick and warms it up from daily history ending YESTERDAY, then
+ * feeds it exactly one live price (see scheduler/run.py's `_warm_up_strategy`).
+ * So the next tick sees this very same window/EMA state with only the live
+ * price REPLACED -- never a bar longer. Every solver here therefore holds
+ * the whole pre-live-price state fixed and moves only the live price, which
+ * makes these exact answers for the next tick, not approximations. Solving
+ * instead for a price APPENDED as a new bar (rolling values out of the
+ * window, or taking one more EMA step from the current EMA) models a day
+ * that never happens -- the bug fixed here on 2026-09-04, which understated
+ * the real MACD distance by more than 3x.
  */
 
 type Num = number | string | null | undefined;
@@ -54,19 +63,20 @@ export function computePercentToSignal(
     case "sma_crossover": {
       const fastSma = n(ind.fast_sma);
       const slowSma = n(ind.slow_sma);
-      const oldestFast = n(ind.oldest_fast);
-      const oldestSlow = n(ind.oldest_slow);
       const fastPeriod = n(p.fast_period);
       const slowPeriod = n(p.slow_period);
       if (
-        fastSma === null || slowSma === null || oldestFast === null || oldestSlow === null ||
-        fastPeriod === null || slowPeriod === null || fastPeriod === slowPeriod
+        fastSma === null || slowSma === null ||
+        fastPeriod === null || slowPeriod === null || fastPeriod === slowPeriod ||
+        fastPeriod === 0 || slowPeriod === 0
       ) {
         return NONE;
       }
+      // Replacing the live price P in the newest slot moves each average by
+      // (P - ltp)/period, so the two are equal when
+      //   (P - ltp) * (1/fast - 1/slow) = slowSma - fastSma.
       const denom = 1 / fastPeriod - 1 / slowPeriod;
-      const target =
-        (slowSma - fastSma - oldestSlow / slowPeriod + oldestFast / fastPeriod) / denom;
+      const target = price + (slowSma - fastSma) / denom;
       const move = pctMove(target, price);
       // fast currently above slow -> next cross is a SELL (fast falling back
       // below slow); fast below slow -> next cross is a BUY.
@@ -80,17 +90,27 @@ export function computePercentToSignal(
       const signal = n(ind.signal);
       const fastPeriod = n(p.fast_period);
       const slowPeriod = n(p.slow_period);
+      const signalPeriod = n(p.signal_period);
       if (
         fastEma === null || slowEma === null || macd === null || signal === null ||
-        fastPeriod === null || slowPeriod === null
+        fastPeriod === null || slowPeriod === null || signalPeriod === null
       ) {
         return NONE;
       }
       const kFast = 2 / (fastPeriod + 1);
       const kSlow = 2 / (slowPeriod + 1);
+      const kSignal = 2 / (signalPeriod + 1);
       const denom = kFast - kSlow;
-      if (denom === 0) return NONE;
-      const target = (signal - fastEma * (1 - kFast) + slowEma * (1 - kSlow)) / denom;
+      if (denom === 0 || kSignal >= 1) return NONE;
+      // Recover the pre-live-price (yesterday's) signal line, which is the
+      // base the next tick's own single EMA step starts from:
+      //   signal = macd*kSignal + signalPrev*(1-kSignal).
+      // Substituting the one-step EMAs for a hypothetical price P and
+      // solving macd(P) == signal(P) collapses -- every EMA moves by the
+      // same k-weighted amount -- to macd(P) == signalPrev, i.e.
+      //   P = ltp + (signalPrev - macd) / (kFast - kSlow).
+      const signalPrev = (signal - macd * kSignal) / (1 - kSignal);
+      const target = price + (signalPrev - macd) / denom;
       const move = pctMove(target, price);
       // macd currently above signal -> next cross is a SELL; below -> BUY.
       return macd >= signal ? { toBuyPct: null, toSellPct: move } : { toBuyPct: move, toSellPct: null };
@@ -140,7 +160,16 @@ export function computePercentToSignal(
       const high = n(ind.channel_high);
       const low = n(ind.channel_low);
       if (high === null || low === null) return NONE;
-      return { toBuyPct: pctMove(high, price), toSellPct: pctMove(low, price) };
+      // The strategy only fires on the TRANSITION into a breakout (see
+      // donchian_breakout.py's prev_breakout_state), so a side price has
+      // ALREADY broken through has no reachable signal -- price would have
+      // to fall back inside the channel first. Reporting the (negative)
+      // distance back to that level would read as "price needs to fall to
+      // trigger a BUY": unreachable and backwards.
+      return {
+        toBuyPct: price > high ? null : pctMove(high, price),
+        toSellPct: price < low ? null : pctMove(low, price),
+      };
     }
 
     case "bollinger_reversion": {

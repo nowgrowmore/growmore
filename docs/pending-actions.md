@@ -110,6 +110,30 @@ Plain-language list of things only you can do or decide. Updated as the project 
   additional per-API-call session requirement beyond it. (3) keep the existing `audit_log`/`bot.log`
   trail, which should already cover the "audit-ready logs" expectation.
 - [ ] Re-review risk controls (max daily loss, per-order size caps) before any real capital is at risk.
+- [ ] **Confirm with Dhan what unit the order `quantity` field actually takes for MCX, before
+  live trading is ever switched on.** This is the one thing found in the 2026-09-04 strategy review
+  that only you can settle, and it matters because getting it wrong scales a real order by 10x or
+  100x rather than producing a slightly wrong number. Today the bot asks for `quantity=1` when a
+  strategy says "buy 1 lot". That is right if Dhan counts MCX quantity in *lots*, and badly wrong if
+  Dhan counts it in the underlying units (100 for a 100g Gold Mini contract, 2500 for Copper). The
+  bot's own `lot_size` field can't answer the question either way -- it's a *price* multiplier (10
+  for Gold Mini, because MCX quotes Gold Mini per 10g), not a contract quantity, and it is used only
+  to convert P&L into rupees. The order module's docstring currently claims the caller passes
+  "lot-size-scaled real contract units", which contradicts what the caller actually passes -- so the
+  code and its own documentation disagree, and neither has been checked against a real MCX order.
+  **Treat this as urgent rather than theoretical**: per the notes above, live trading is already
+  globally armed on the VPS for ALUMINI, and a GOLDM config is sitting at `mode='live'` waiting to be
+  enabled -- so the next real order placed would use whichever interpretation is currently in the
+  code, unverified. **What to do:** ask Dhan support (or check a
+  single real 1-lot MCX order placed manually through their web/app interface and read back what
+  `quantity` the API reports for it), tell the agent the answer, and it will make the code and the
+  docstring agree. Do this before flipping either live-trading switch.
+- [ ] **Re-run the multi-instrument backtest sweep** (`python -m growmore_bot.backtest.run_all`)
+  before trusting any existing ranking that covered more than one commodity. A bug fixed 2026-09-04
+  meant each instrument after the first one in a sweep was scored using the *previous* commodity's
+  price history still sitting in the strategy's memory, so those rows are junk. Nothing to decide
+  here -- just ask the agent to re-run it when convenient, and treat the current
+  `docs/backtest-results.md` rankings as provisional until then.
 
 ## Infrastructure setup (one-time)
 - [x] Vercel project `growmore-dashboard` created (team `beautifulforce`), GitHub-connected, Neon

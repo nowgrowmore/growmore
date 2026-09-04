@@ -62,9 +62,22 @@ def profit_factor(trade_pnls: Sequence[float]) -> float:
 
 
 def cagr_pct(start_equity: float, end_equity: float, years: float) -> float:
-    """Compound annual growth rate, as a percentage."""
+    """Compound annual growth rate, as a percentage.
+
+    An end equity at or below zero is reported as -100% (the account is
+    wiped out; there is no real compound rate below "lost everything").
+    This is not a theoretical case here: the backtest engine trades whole
+    leveraged commodity lots against an unleveraged `initial_capital`, so a
+    bad parameter variant's equity curve can genuinely cross zero. Before
+    this guard, `(negative) ** (1/years)` returned a COMPLEX number rather
+    than raising, which then flowed into BacktestRun.cagr_pct and either
+    crashed the sweep at DB-write time or persisted garbage that ranked
+    unpredictably (found via independent code review 2026-09-04).
+    """
     if years <= 0 or start_equity <= 0:
         return 0.0
+    if end_equity <= 0:
+        return -100.0
     return ((end_equity / start_equity) ** (1 / years) - 1) * 100
 
 

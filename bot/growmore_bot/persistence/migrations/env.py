@@ -13,8 +13,17 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` is load-bearing, not cosmetic:
+# fileConfig's DEFAULT is to disable every logger that already exists, and
+# this env runs in-process (the integration tests apply migrations before
+# their assertions). Without it, every `growmore_bot.*` logger created by an
+# earlier import went permanently silent for the rest of the process --
+# which made five paper-engine logging tests fail, but ONLY when Postgres
+# was available for the integration tests to run at all. Found via
+# independent code review 2026-09-04.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Prefer DATABASE_URL from the environment (Neon / local Postgres) over the
 # placeholder in alembic.ini -- avoids ever needing a real connection string

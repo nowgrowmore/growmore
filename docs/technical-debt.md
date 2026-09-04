@@ -1,5 +1,83 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-04) Second independent review of every strategy/backtest calculation
+  found and fixed 6 more real bugs.** A from-scratch re-review of `strategies/`, `backtest/`,
+  `research/smallcap_momentum/`, and the dashboard's own indicator solvers, re-deriving every
+  formula by hand rather than trusting the surrounding comments. Confirmed and fixed:
+  1. **`backtest/run_all.py` -- the worst of the batch: the parameter sweep shared ONE stateful
+     strategy instance across every instrument.** `_build_strategy_grid()` returned an
+     already-constructed instance per variant, and `main()`'s `for instrument in instruments:` loop
+     reused it. Every strategy here is stateful (rolling close deques, seeded EMAs,
+     previous-crossing flags, ADX's previous bar), so **every instrument after the first one in the
+     sweep began with the previous commodity's price history still loaded** -- Gold Mini's
+     ~70,000-level closes sitting in the window as Copper's ~700-level bars arrived, fabricating
+     crossings and breakouts across the whole early history and corrupting the very rankings that
+     decide which strategy gets real money. Fixed: the grid now returns a `functools.partial`
+     FACTORY, and a fresh instance is built per (instrument, variant). **Any multi-instrument
+     backtest sweep run before this fix should be re-run** -- results for the first instrument
+     processed are valid, everything after it is not.
+  2. **`backtest/metrics.py` -- `cagr_pct` returned a COMPLEX number for a wiped-out run.**
+     `(negative) ** (1/years)` doesn't raise in Python, it returns a complex value, which flowed
+     straight into `BacktestRun.cagr_pct`. Reachable in practice, not theoretically: the engine
+     trades whole leveraged commodity lots against an unleveraged `initial_capital`, so a bad
+     variant's equity curve can cross zero. Fixed: an end equity at or below zero is -100%.
+  3. **`strategies/vwap_session_bounce.py` -- a live quote with no session VWAP yet silently
+     replaced today's CPR gate.** The strategy told a historical `Bar` apart from a live `Quote` by
+     whether `vwap` was present -- but `Quote.vwap` is legitimately `None` early in a session (see
+     the `average_price: 0` fix above) and a real `Quote` *also* carries high/low/close, so such a
+     tick fell into the warm-up branch and recomputed `_current_cpr` from **today's own partial
+     session range** instead of yesterday's daily bar. Fixed: a live quote is now identified by
+     `ltp` (which no historical `Bar` has), and a VWAP-less tick leaves both the CPR and the
+     crossing reference untouched.
+  4. **`dashboard/lib/percent-to-signal.ts` -- the "% move to signal" solver for `sma_crossover`
+     and `macd_trend` answered the wrong question.** Both solved for a price *appended as a brand-new
+     bar* (rolling `oldest_fast`/`oldest_slow` out of the SMA windows; taking one more EMA step from
+     the EMAs that already include the live price). That models a day that never happens: the
+     scheduler rebuilds the strategy every tick and warms it up from history ending *yesterday*, so
+     the next tick sees this exact state with only the live price **replaced**. On a realistic GOLDM
+     series the MACD figure understated the true distance by more than 3x. Fixed to the exact
+     same-tick solve -- `target = ltp + (slowSma - fastSma) / (1/fast - 1/slow)` for SMA, and for
+     MACD `target = ltp + (signalPrev - macd) / (kFast - kSlow)` where the prior signal line is
+     recovered exactly from the current one. Both were then verified end-to-end against the real
+     Python strategies: a price a hair short of the solved target holds, a hair past it fires
+     exactly the expected BUY/SELL, across several parameter sets. (`rsi_mean_reversion`'s solver
+     already used the correct model and is unchanged.)
+  5. **`dashboard/lib/{percent-to-signal,signal-explain}.ts` -- Donchian reported an unreachable,
+     backwards signal.** Only the *transition* into a breakout fires (see the strategy's
+     `prev_breakout_state`), but with price already above the channel high the solver returned a
+     NEGATIVE "% to BUY" and the prose claimed price still "needed to rise" to break a high it had
+     already broken. Fixed: the already-broken side reports no reachable signal, matching how
+     `bollinger_reversion` was already handled. The RSI explanation's `<`/`>` threshold checks were
+     also tightened to `<=`/`>=` to match the strategy's own boundary.
+  6. **`persistence/migrations/env.py` -- Alembic silently disabled every existing logger.**
+     `fileConfig()` defaults to `disable_existing_loggers=True`, and this env runs in-process, so
+     once the integration tests applied migrations every already-imported `growmore_bot.*` logger
+     went dead for the rest of the process -- making five paper-engine logging tests fail, but only
+     for someone who actually had Postgres running for the full suite CLAUDE.md mandates. Fixed with
+     `disable_existing_loggers=False`. The full suite (325 tests, integration included) is now green.
+  Each fix got a TDD regression test (confirmed red before, green after). Reviewed and
+  hand-verified as correct with no change needed: all eight strategies' core formulas and crossing
+  semantics, the backtest engine's next-bar-open fill discipline and lot-size scaling, Sharpe /
+  max-drawdown / win-rate / profit-factor, the paper and live engines' P&L sign and scaling
+  (including the live engine's back-solved retroactive fill correction), the scheduler's
+  MCX-timezone daily-P&L window and single-day-strategy state reset, MCX seasonal session hours,
+  and the smallcap research module's momentum / quality / z-score / portfolio mark-to-market maths.
+- **Cross-sectional research backtest rebalances at the same close it ranks on.**
+  `research/smallcap_momentum/portfolio_engine.py` computes each rebalance's momentum/quality scores
+  from prices through `day`'s close and then buys at that same close. No *future* information is
+  used (the entry price is a price already observed), so this is the standard index-rebalance
+  simplification rather than lookahead -- but it is mildly optimistic and is deliberately *not* the
+  next-bar-open discipline `backtest/engine.py` enforces for the commodity sweep. Also unmodelled
+  there: transaction costs/slippage, and a delisted or halted name marked forward at its last known
+  close indefinitely (survivorship/stale-price bias). Fine for the relative comparison between
+  variants that module exists to make; would need fixing before treating its absolute CAGR as real.
+- **`scheduler/run.py` can raise `AttributeError` if a `mode="live"` config is ticked with
+  `live_trading_enabled=True` but no `order_client`.** Three call sites use `live_engine.*` where
+  `live_engine` is `LiveTradingEngine | None` (mypy flags all three today). Not reachable via
+  `start()`, which always constructs an order client when the kill switch is on -- but it is
+  reachable by any other caller of `run_all_enabled_configs`, and the failure mode is a crashed
+  tick, not a wrong trade. Left as-is deliberately: adding a fallback risks masking a real
+  misconfiguration, which CLAUDE.md's non-negotiables forbid.
 - **(Found + fixed 2026-09-04) Independent double code review of every strategy algorithm found and
   fixed 5 real bugs.** Given real money is ultimately at stake, two independent subagents each did a
   full from-scratch review of every file in `strategies/` (recomputing formulas and test docstrings

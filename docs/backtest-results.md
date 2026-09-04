@@ -1,5 +1,13 @@
 # Backtest Results — Strategy/Parameter Sweep (2026-09-03)
 
+> **⚠️ Provisional as of 2026-09-04 — re-run the sweep before acting on these rankings.** A bug fixed
+> that day meant `run_all.py` shared ONE stateful strategy instance across every instrument in a
+> sweep, so each commodity after the first one processed was scored with the *previous* commodity's
+> price history still loaded in the strategy's window (e.g. Gold Mini's ~70,000-level closes as
+> Copper's ~700-level bars arrived). The first instrument's rows are valid; everything after it is
+> not. See `docs/technical-debt.md`.
+
+
 Full sweep: 5 strategy families × 14 parameter variants × 8 MCX commodities = **112 backtest runs**,
 against 5 years of real Dhan historical daily data (2021-09 to 2026-09, per instrument's actual
 listing history). Persisted to the real Neon database — viewable in full on the dashboard's

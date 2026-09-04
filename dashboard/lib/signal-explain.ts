@@ -65,12 +65,32 @@ function explainSignalBase(
       if (high === null || low === null || price === null) {
         return "Not enough price history yet to compute the breakout channel.";
       }
-      const toHigh = high - price;
-      const toLow = price - low;
+      // Only the TRANSITION into a breakout signals (see
+      // donchian_breakout.py's prev_breakout_state), so once price is
+      // already outside the channel there's no further signal on that side
+      // until it comes back inside first. The old wording used Math.abs on
+      // both distances and so claimed price still "needs to rise" to break
+      // a high it had already broken.
+      if (price > high) {
+        return (
+          `Price (${formatCurrency(price)}) has already broken above the recent high ` +
+          `(${formatCurrency(high)}) -- that BUY has fired. No further BUY until price falls back ` +
+          `inside the channel and breaks out again; a SELL needs a fall of ` +
+          `${formatCurrency(price - low)} to below the recent low (${formatCurrency(low)}).`
+        );
+      }
+      if (price < low) {
+        return (
+          `Price (${formatCurrency(price)}) has already broken below the recent low ` +
+          `(${formatCurrency(low)}) -- that SELL has fired. No further SELL until price rises back ` +
+          `inside the channel and breaks out again; a BUY needs a rise of ` +
+          `${formatCurrency(high - price)} to above the recent high (${formatCurrency(high)}).`
+        );
+      }
       return (
-        `Price (${formatCurrency(price)}) needs to rise ${formatCurrency(Math.abs(toHigh))} to break ` +
+        `Price (${formatCurrency(price)}) needs to rise ${formatCurrency(high - price)} to break ` +
         `above the recent high (${formatCurrency(high)}) and trigger a BUY, or fall ` +
-        `${formatCurrency(Math.abs(toLow))} to break below the recent low (${formatCurrency(low)}) ` +
+        `${formatCurrency(price - low)} to break below the recent low (${formatCurrency(low)}) ` +
         `and trigger a SELL.`
       );
     }
@@ -80,14 +100,19 @@ function explainSignalBase(
       const oversold = n(p.oversold);
       const overbought = n(p.overbought);
       if (rsi === null) return "Not enough price history yet to compute RSI.";
-      if (oversold !== null && rsi < oversold) {
+      // `<=` / `>=`, matching the strategy's own boundary: a BUY fires when
+      // RSI was AT OR below oversold and then climbs past it (see
+      // rsi_mean_reversion.py's `prev <= self.oversold and rsi > ...`), so
+      // RSI sitting exactly ON the line is in the extreme zone, not neutral
+      // -- and percent-to-signal.ts already used `<=` for the same reason.
+      if (oversold !== null && rsi <= oversold) {
         return (
           `RSI is ${rsi.toFixed(1)}, already below the oversold line (${oversold}). A BUY fires the ` +
           `moment it climbs back above ${oversold} -- entering oversold isn't itself a signal, only ` +
           `recovering from it is.`
         );
       }
-      if (overbought !== null && rsi > overbought) {
+      if (overbought !== null && rsi >= overbought) {
         return (
           `RSI is ${rsi.toFixed(1)}, already above the overbought line (${overbought}). A SELL fires ` +
           `the moment it drops back below ${overbought} -- entering overbought isn't itself a signal, ` +

@@ -10,7 +10,15 @@ actionable rather than the tool hiding results.
 """
 from __future__ import annotations
 
-from growmore_bot.backtest.run_all import RunSummary, profit_factor_for_ranking, rank_results
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from growmore_bot.backtest.run_all import (
+    RunSummary,
+    build_strategy_grid,
+    profit_factor_for_ranking,
+    rank_results,
+)
 
 
 def _summary(**overrides):
@@ -77,3 +85,62 @@ def test_rank_results_flags_thin_samples_without_excluding():
     # metadata for the human reading the output, not automatic exclusion,
     # same philosophy as the drawdown guardrail.
     assert [r.strategy for r in ranked] == ["thin", "thick"]
+
+
+def _bars(closes):
+    """Daily bars with open==close==high==low, enough for a strategy to run on."""
+    return [
+        SimpleNamespace(
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
+            open=c,
+            high=c,
+            low=c,
+            close=c,
+            volume=1000.0,
+        )
+        for i, c in enumerate(closes)
+    ]
+
+
+def test_build_strategy_grid_yields_a_fresh_strategy_instance_per_call():
+    """Regression (independent code review 2026-09-04): the grid used to hold
+    ONE already-constructed strategy instance per variant, and `main()`
+    reused that same instance for every instrument in the sweep. Strategies
+    are stateful (rolling close deques, seeded EMAs, previous-crossing
+    flags), so every instrument after the FIRST one started with the
+    previous commodity's price history still loaded -- e.g. Gold Mini's
+    ~70,000-level closes sitting in the deque as Copper's ~700-level bars
+    began arriving, fabricating crossings and corrupting the very rankings
+    that decide which strategy gets real money.
+    """
+    grid = build_strategy_grid()
+    assert grid, "grid must not be empty"
+    for name, version, _params, factory in grid:
+        first = factory()
+        second = factory()
+        assert first is not second, f"{name}/{version} factory returned the same instance twice"
+
+
+def test_reusing_one_strategy_instance_across_instruments_corrupts_results():
+    """The concrete failure mode the factory guards against: the same
+    instance run over a second, differently-scaled price series produces
+    different trades than a fresh instance would.
+    """
+    from growmore_bot.backtest.engine import BacktestEngine
+
+    gold_like = _bars([70000 + 100 * i for i in range(40)])
+    copper_like = _bars([700 + (10 if i % 2 else -10) for i in range(40)])
+
+    factory = dict((f"{n}/{v}", f) for n, v, _p, f in build_strategy_grid())[
+        "sma_crossover/fast5-slow20"
+    ]
+
+    reused = factory()
+    BacktestEngine(strategy=reused, initial_capital=100000).run(gold_like)
+    leaked = BacktestEngine(strategy=reused, initial_capital=100000).run(copper_like)
+
+    clean = BacktestEngine(strategy=factory(), initial_capital=100000).run(copper_like)
+
+    assert [(t.entry_price, t.exit_price) for t in leaked.trades] != [
+        (t.entry_price, t.exit_price) for t in clean.trades
+    ]
