@@ -38,6 +38,7 @@ from growmore_bot.strategies.base import Strategy
 from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
 from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
 from growmore_bot.strategies.macd_trend import MacdTrendStrategy
+from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy
 from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
 
@@ -146,6 +147,26 @@ def _build_strategy_grid() -> list[tuple[str, str, dict, Strategy]]:
                 BollingerReversionStrategy(**params),
             )
         )
+
+    # ADX-gated regime-switch: routes to MACD when trending, a mean-reversion
+    # strategy when ranging. Crosses the two MACD pairings already proven on
+    # Gold Mini (see docs/backtest-results.md) with both ranging-mode options
+    # -- real data decides which ranging style is actually better, not a
+    # guess. See docs/goldmini-regime-switch-results.md for the results.
+    macd_variants = [(12, 26, 9), (5, 13, 5)]
+    ranging_variants = [
+        ("rsi", {"period": 14, "oversold": 30, "overbought": 70}),
+        ("vwap_ema", {"vwap_period": 20, "ema_fast": 8, "ema_slow": 21}),
+    ]
+    for fast, slow, sig in macd_variants:
+        for ranging_name, ranging_params in ranging_variants:
+            params = {
+                "ranging_strategy": ranging_name,
+                "macd_params": {"fast_period": fast, "slow_period": slow, "signal_period": sig},
+                "ranging_params": ranging_params,
+            }
+            version = f"adx14-macd{fast}{slow}{sig}-{ranging_name}"
+            grid.append(("regime_switch", version, params, RegimeSwitchStrategy(**params)))
 
     return grid
 

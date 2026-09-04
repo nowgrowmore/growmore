@@ -515,6 +515,41 @@ def test_force_close_for_expiry_places_a_real_closing_order_and_records_pnl():
     assert audit_entries[0].event_type == "live_contract_expiry_close_out"
 
 
+def test_force_close_end_of_day_places_a_real_closing_order_with_its_own_audit_label():
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD4", order_status="TRANSIT")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.force_close_end_of_day(
+        config=config, instrument=instrument, current_position_qty=1,
+        avg_entry_price=150000, live_position_id=existing_position.id,
+    )
+
+    order_client.place_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1
+    )
+    assert float(existing_position.realized_pnl) == pytest.approx(500_000)
+    assert existing_position.status == "closed"
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    # Distinct label from the expiry close-out -- an end-of-day flatten is a
+    # different event, not mislabeled as a contract-expiry one.
+    assert audit_entries[0].event_type == "live_position_force_closed_end_of_day"
+    assert audit_entries[0].payload["reason"] == "end_of_day"
+
+
 def test_force_close_for_expiry_is_noop_with_no_open_position():
     config = _bot_config()
     instrument = _instrument(config)

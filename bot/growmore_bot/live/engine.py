@@ -178,6 +178,59 @@ class LiveTradingEngine:
         square-off (see growmore_bot.scheduler.contract_rollover) by placing
         a real closing SELL order. No-op if there's nothing open.
         """
+        self._force_close(
+            config=config,
+            instrument=instrument,
+            current_position_qty=current_position_qty,
+            avg_entry_price=avg_entry_price,
+            live_position_id=live_position_id,
+            label=label,
+            reason="expiry",
+            event_type="live_contract_expiry_close_out",
+            log_reason_phrase="EXPIRY CLOSE-OUT (contract nearing MCX Tender Period)",
+        )
+
+    def force_close_end_of_day(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        live_position_id: Optional[uuid.UUID],
+        label: str = "",
+    ) -> None:
+        """Force-close a REAL open position near the daily MCX session close,
+        for a strategy whose logic is inherently single-day (see
+        `Strategy.requires_intraday_flatten`, e.g. VwapSessionBounceStrategy
+        -- both VWAP and CPR reset/reference the prior session, so a
+        position opened on today's context shouldn't carry into a new day
+        where that context has already changed). No-op if there's nothing
+        open.
+        """
+        self._force_close(
+            config=config,
+            instrument=instrument,
+            current_position_qty=current_position_qty,
+            avg_entry_price=avg_entry_price,
+            live_position_id=live_position_id,
+            label=label,
+            reason="end_of_day",
+            event_type="live_position_force_closed_end_of_day",
+            log_reason_phrase="END-OF-DAY FLATTEN (single-day strategy)",
+        )
+
+    def _force_close(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        live_position_id: Optional[uuid.UUID],
+        label: str,
+        reason: str,
+        event_type: str,
+        log_reason_phrase: str,
+    ) -> None:
         if current_position_qty <= 0 or live_position_id is None or avg_entry_price is None:
             return
 
@@ -194,12 +247,12 @@ class LiveTradingEngine:
             # DhanOrderClient.place_market_order already wrote for this exact
             # failure -- found live 2026-09-04 (a real DH-905 "Invalid IP"
             # rejection left literally no trace). The position is left open
-            # for manual review; the next tick's close-out-cutoff check will
-            # simply try again.
+            # for manual review; the next tick's trigger check simply tries
+            # again.
             logger.exception(
-                "%s -- LIVE EXPIRY CLOSE-OUT order FAILED -- position remains open, will retry "
-                "next tick",
+                "%s -- LIVE %s order FAILED -- position remains open, will retry next tick",
                 label or live_position_id,
+                log_reason_phrase,
             )
             return
         pnl = (float(quote.ltp) - float(avg_entry_price)) * current_position_qty * instrument.lot_size
@@ -213,9 +266,9 @@ class LiveTradingEngine:
         self.session.add(position)
 
         logger.warning(
-            "%s -- LIVE EXPIRY CLOSE-OUT (REAL MONEY) qty=%s ltp=%s pnl=%.2f broker_order_id=%s "
-            "status=%s (contract nearing MCX Tender Period)",
+            "%s -- LIVE %s (REAL MONEY) qty=%s ltp=%s pnl=%.2f broker_order_id=%s status=%s",
             label or live_position_id,
+            log_reason_phrase,
             current_position_qty,
             quote.ltp,
             pnl,
@@ -240,13 +293,14 @@ class LiveTradingEngine:
             AuditLog(
                 id=uuid.uuid4(),
                 ts=now,
-                event_type="live_contract_expiry_close_out",
+                event_type=event_type,
                 payload={
                     "strategy_id": str(config.strategy_id),
                     "instrument_id": str(config.instrument_id),
                     "quantity": current_position_qty,
                     "pnl": pnl,
                     "broker_order_id": placed.order_id,
+                    "reason": reason,
                 },
             )
         )

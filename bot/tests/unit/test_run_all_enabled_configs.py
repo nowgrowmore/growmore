@@ -77,6 +77,15 @@ def _make_strategy_instrument_config(session, strategy_name, params, enabled=Tru
         ("rsi_mean_reversion", {"period": 7, "oversold": 30, "overbought": 70}),
         ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}),
         ("bollinger_reversion", {"period": 20, "num_std": 2.0}),
+        (
+            "regime_switch",
+            {
+                "ranging_strategy": "rsi",
+                "macd_params": {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+                "ranging_params": {"period": 14, "oversold": 30, "overbought": 70},
+            },
+        ),
+        ("vwap_session_bounce", {}),
         ("always_flip", {}),
     ],
 )
@@ -195,6 +204,50 @@ def test_past_close_out_cutoff_force_closes_open_position_and_skips_strategy(ses
     # Strategy warm-up/evaluation must be skipped entirely for a config
     # past its close-out cutoff -- no historical fetch, no fresh entries.
     dhan_client.get_historical_ohlc.assert_not_called()
+
+
+def test_intraday_flatten_strategy_force_closes_near_session_close_and_skips_evaluation(session):
+    # VwapSessionBounceStrategy sets requires_intraday_flatten=True -- an
+    # open position must be force-closed near the daily MCX close (not just
+    # a contract-expiry cutoff), and the strategy must not also be
+    # evaluated for a fresh entry that same tick.
+    strategy, instrument, config = _make_strategy_instrument_config(session, "vwap_session_bounce", {})
+    position = PaperPosition(
+        id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
+        status="open", quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, opened_at=datetime.now(MCX_TZ) - timedelta(hours=1), closed_at=None,
+    )
+    session.add(position)
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    # 2026-09-02 is a summer-DST weekday -- close is 23:30; 23:20 is within
+    # the default 15-minute end-of-day buffer.
+    now = datetime(2026, 9, 2, 23, 20, tzinfo=MCX_TZ)
+
+    run_all_enabled_configs(session, dhan_client, now=now)
+
+    session.refresh(position)
+    assert position.status == "closed"
+    assert float(position.quantity) == pytest.approx(0)
+    # Strategy warm-up/evaluation must be skipped entirely this tick -- no
+    # historical fetch, no fresh entry considered.
+    dhan_client.get_historical_ohlc.assert_not_called()
+
+
+def test_intraday_flatten_strategy_ticks_normally_away_from_session_close(session):
+    strategy, instrument, config = _make_strategy_instrument_config(session, "vwap_session_bounce", {})
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=155000, open=155000, high=155000, low=155000, close=155000, vwap=154000, volume=100
+    )
+    dhan_client.get_historical_ohlc.return_value = []
+    now = datetime(2026, 9, 2, 12, 0, tzinfo=MCX_TZ)  # midday -- nowhere near close
+
+    run_all_enabled_configs(session, dhan_client, now=now)
+
+    dhan_client.get_quote.assert_called_once()
 
 
 def test_past_close_out_cutoff_attempts_automatic_rollover(session, monkeypatch):

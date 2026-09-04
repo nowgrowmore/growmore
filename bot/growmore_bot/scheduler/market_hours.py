@@ -88,8 +88,30 @@ def is_market_open(now: datetime) -> bool:
     return MCX_OPEN_TIME <= current_time <= _mcx_close_time(today)
 
 
+def is_near_session_close(now: datetime, buffer_minutes: int = 15) -> bool:
+    """True once `now` is within `buffer_minutes` of today's actual MCX
+    close (season-aware, via `_mcx_close_time`). Used to force-flatten a
+    position for a strategy whose logic is inherently single-day (see
+    `Strategy.requires_intraday_flatten`) -- deliberately doesn't care
+    whether the market is otherwise open (e.g. a weekend/holiday): the
+    scheduler only calls this while already ticking a live/paper config
+    during real market hours anyway.
+    """
+    if now.tzinfo is not None:
+        now_ist = now.astimezone(MCX_TIMEZONE)
+    else:
+        now_ist = MCX_TIMEZONE.localize(now)
+
+    close_time = _mcx_close_time(now_ist.date())
+    close_dt = now_ist.replace(
+        hour=close_time.hour, minute=close_time.minute, second=0, microsecond=0
+    )
+    return close_dt - timedelta(minutes=buffer_minutes) <= now_ist <= close_dt
+
+
 __all__ = [
     "is_market_open",
+    "is_near_session_close",
     "MCX_TIMEZONE",
     "MCX_OPEN_TIME",
     "MCX_CLOSE_TIME",

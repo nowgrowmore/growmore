@@ -235,6 +235,56 @@ class PaperTradingEngine:
         would, in real trading, simply be liquidated by the broker anyway.
         No-op if there's nothing open to close.
         """
+        self._force_close(
+            config=config,
+            instrument=instrument,
+            current_position_qty=current_position_qty,
+            avg_entry_price=avg_entry_price,
+            paper_position_id=paper_position_id,
+            label=label,
+            event_type="contract_expiry_close_out",
+            log_reason_phrase="EXPIRY CLOSE-OUT (contract nearing MCX Tender Period -- Dhan does "
+            "not permit physical delivery for retail clients)",
+        )
+
+    def force_close_end_of_day(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        paper_position_id: Optional[uuid.UUID],
+        label: str = "",
+    ) -> None:
+        """Force-close an open position near the daily MCX session close,
+        for a strategy whose logic is inherently single-day (see
+        `Strategy.requires_intraday_flatten`). Mirrors
+        `LiveTradingEngine.force_close_end_of_day` for paper-trading
+        realism, even though a simulated position carries no real risk if
+        left open. No-op if there's nothing open to close.
+        """
+        self._force_close(
+            config=config,
+            instrument=instrument,
+            current_position_qty=current_position_qty,
+            avg_entry_price=avg_entry_price,
+            paper_position_id=paper_position_id,
+            label=label,
+            event_type="position_force_closed_end_of_day",
+            log_reason_phrase="END-OF-DAY FLATTEN (single-day strategy)",
+        )
+
+    def _force_close(
+        self,
+        config: Any,
+        instrument: Any,
+        current_position_qty: float,
+        avg_entry_price: Optional[float],
+        paper_position_id: Optional[uuid.UUID],
+        label: str,
+        event_type: str,
+        log_reason_phrase: str,
+    ) -> None:
         if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
             return
 
@@ -251,9 +301,9 @@ class PaperTradingEngine:
         self.session.add(position)
 
         logger.warning(
-            "%s -- EXPIRY CLOSE-OUT qty=%s price=%s pnl=%.2f (contract nearing MCX Tender "
-            "Period -- Dhan does not permit physical delivery for retail clients)",
+            "%s -- %s qty=%s price=%s pnl=%.2f",
             label or paper_position_id,
+            log_reason_phrase,
             current_position_qty,
             quote.ltp,
             pnl,
@@ -274,7 +324,7 @@ class PaperTradingEngine:
             AuditLog(
                 id=uuid.uuid4(),
                 ts=now,
-                event_type="contract_expiry_close_out",
+                event_type=event_type,
                 payload={
                     "strategy_id": str(config.strategy_id),
                     "instrument_id": str(config.instrument_id),

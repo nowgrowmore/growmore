@@ -63,6 +63,14 @@ class Quote:
     high: float
     low: float
     close: float
+    # Cumulative volume traded today, and today's real session VWAP -- both
+    # confirmed present in Dhan's real quote response (`volume` and
+    # `average_price` fields respectively, 2026-09-04) but previously
+    # unparsed. `vwap` is None (not 0.0) when genuinely absent from the
+    # response -- a strategy comparing price to a VWAP of 0 would produce a
+    # nonsensical always-above signal instead of correctly holding off.
+    volume: float = 0.0
+    vwap: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -160,12 +168,15 @@ class DhanClient:
         quote_payload = body.get("data", body)
         segment_data = quote_payload[instrument.exchange_segment][instrument.security_id]
         ohlc = segment_data.get("ohlc", {})
+        raw_vwap = segment_data.get("average_price")
         return Quote(
             ltp=float(segment_data["last_price"]),
             open=float(ohlc.get("open", 0)),
             high=float(ohlc.get("high", 0)),
             low=float(ohlc.get("low", 0)),
             close=float(ohlc.get("close", 0)),
+            volume=float(segment_data.get("volume", 0) or 0),
+            vwap=float(raw_vwap) if raw_vwap is not None else None,
         )
 
     def get_historical_ohlc(

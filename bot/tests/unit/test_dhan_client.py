@@ -68,6 +68,8 @@ def test_get_quote_calls_data_api_and_parses_ltp(instrument):
                     "999999": {
                         "last_price": 71234.5,
                         "ohlc": {"open": 71000, "high": 71500, "low": 70900, "close": 71100},
+                        "volume": 19296,
+                        "average_price": 71050.5,
                     }
                 }
             }
@@ -82,6 +84,12 @@ def test_get_quote_calls_data_api_and_parses_ltp(instrument):
     assert quote.high == pytest.approx(71500)
     assert quote.low == pytest.approx(70900)
     assert quote.close == pytest.approx(71100)
+    # Regression: Dhan's real quote response already carries today's real
+    # session VWAP under "average_price" (confirmed live 2026-09-04:
+    # LTP 155,335 vs. average_price 155,303, sitting between the day's real
+    # high/low) and cumulative day volume -- neither was being parsed.
+    assert quote.volume == pytest.approx(19296)
+    assert quote.vwap == pytest.approx(71050.5)
 
     sent = json.loads(responses.calls[0].request.body)
     # Regression: Dhan's batched marketfeed endpoints (quote/ohlc/ltp) require
@@ -91,6 +99,32 @@ def test_get_quote_calls_data_api_and_parses_ltp(instrument):
     # the JSON *response*, and in our Instrument/CommodityPlaceholder models);
     # only this outbound list needs the int cast.
     assert sent["MCX_COMM"] == [999999]
+
+
+@responses.activate
+def test_get_quote_defaults_volume_and_vwap_when_missing(instrument):
+    # Defensive: don't assume every response shape includes these -- a
+    # missing volume/average_price shouldn't crash parsing.
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/marketfeed/quote",
+        json={
+            "data": {
+                "MCX_COMM": {
+                    "999999": {
+                        "last_price": 71234.5,
+                        "ohlc": {"open": 71000, "high": 71500, "low": 70900, "close": 71100},
+                    }
+                }
+            }
+        },
+        status=200,
+    )
+    client = _make_client()
+    quote = client.get_quote(instrument)
+
+    assert quote.volume == pytest.approx(0.0)
+    assert quote.vwap is None
 
 
 @responses.activate

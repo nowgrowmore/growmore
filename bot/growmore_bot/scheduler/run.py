@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
 from growmore_bot.scheduler.contract_rollover import is_past_close_out_cutoff, roll_to_next_contract
-from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open
+from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open, is_near_session_close
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +181,10 @@ def run_all_enabled_configs(
     from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
     from growmore_bot.strategies.macd_trend import MacdTrendStrategy
+    from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy
     from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
     from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
+    from growmore_bot.strategies.vwap_session_bounce import VwapSessionBounceStrategy
 
     now = now or datetime.now(MCX_TIMEZONE)
 
@@ -192,6 +194,8 @@ def run_all_enabled_configs(
         "rsi_mean_reversion": lambda params: RsiMeanReversionStrategy(**params),
         "macd_trend": lambda params: MacdTrendStrategy(**params),
         "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
+        "regime_switch": lambda params: RegimeSwitchStrategy(**params),
+        "vwap_session_bounce": lambda params: VwapSessionBounceStrategy(**params),
         # Demo-only, not a real trading strategy -- see always_flip.py.
         "always_flip": lambda params: AlwaysFlipStrategy(**params),
     }
@@ -300,6 +304,35 @@ def run_all_enabled_configs(
             logger.warning("Unknown strategy %s, skipping", strategy_row.name)
             continue
         strategy = builder(strategy_row.params or {})
+
+        if getattr(strategy, "requires_intraday_flatten", False) and is_near_session_close(now):
+            # A strategy whose logic is inherently single-day (e.g. it
+            # trades off today's live VWAP/a prior-day pivot range, both of
+            # which reset every session) must never carry a position into a
+            # new day, where that context has already changed. Mirrors the
+            # contract-expiry close-out branch above: force-close whatever's
+            # open and skip strategy evaluation entirely this tick, so no
+            # fresh entry can be opened in the closing window either.
+            if is_live:
+                live_engine.force_close_end_of_day(
+                    config=config,
+                    instrument=instrument,
+                    current_position_qty=current_qty,
+                    avg_entry_price=avg_entry_price,
+                    live_position_id=position_id,
+                    label=label,
+                )
+            else:
+                paper_engine.force_close_end_of_day(
+                    config=config,
+                    instrument=instrument,
+                    current_position_qty=current_qty,
+                    avg_entry_price=avg_entry_price,
+                    paper_position_id=position_id,
+                    label=label,
+                )
+            continue
+
         _warm_up_strategy(strategy, dhan_client, instrument, now)
 
         # Restore the crossing/threshold-recovery reference from the last

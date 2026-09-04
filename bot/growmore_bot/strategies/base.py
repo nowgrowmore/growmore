@@ -84,5 +84,15 @@ class Strategy(ABC):
         """
         return None
 
+    requires_intraday_flatten: bool = False
+    """Set True on a strategy whose logic is inherently single-day (e.g. it
+    trades off a level that resets every session, like a live VWAP or a
+    prior-day pivot range) -- a position it opens shouldn't be allowed to
+    carry into a new day, where that context has already reset to something
+    else. Checked by `growmore_bot.scheduler.run` alongside the existing
+    contract-expiry close-out cutoff to force-flatten near the daily MCX
+    session close. Default False: nearly every strategy here is a
+    multi-day swing strategy for which this would be actively wrong."""
+
 
 __all__ = ["Strategy", "Signal", "SignalAction"]

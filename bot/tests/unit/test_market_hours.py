@@ -11,7 +11,11 @@ from datetime import date, datetime, timedelta
 
 import pytz
 
-from growmore_bot.scheduler.market_hours import _nth_sunday_of_month, is_market_open
+from growmore_bot.scheduler.market_hours import (
+    _nth_sunday_of_month,
+    is_market_open,
+    is_near_session_close,
+)
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -128,3 +132,27 @@ def test_nth_sunday_of_month_second_sunday_of_march_2024():
 
 def test_nth_sunday_of_month_first_sunday_of_november_2024():
     assert _nth_sunday_of_month(2024, 11, 1) == date(2024, 11, 3)
+
+
+class TestIsNearSessionClose:
+    def test_true_within_default_buffer_of_summer_close(self):
+        # 2026-09-02 is a summer-DST date -- close is 23:30.
+        assert is_near_session_close(_ist(2026, 9, 2, 23, 20)) is True
+
+    def test_false_well_before_summer_close(self):
+        assert is_near_session_close(_ist(2026, 9, 2, 23, 0)) is False
+
+    def test_true_within_default_buffer_of_winter_close(self):
+        winter_day = _next_weekday_on_or_after(date(2026, 12, 15))
+        assert is_near_session_close(_ist(winter_day.year, winter_day.month, winter_day.day, 23, 45)) is True
+
+    def test_false_well_before_winter_close(self):
+        winter_day = _next_weekday_on_or_after(date(2026, 12, 15))
+        assert is_near_session_close(_ist(winter_day.year, winter_day.month, winter_day.day, 23, 0)) is False
+
+    def test_custom_buffer_minutes(self):
+        assert is_near_session_close(_ist(2026, 9, 2, 23, 10), buffer_minutes=30) is True
+        assert is_near_session_close(_ist(2026, 9, 2, 22, 59), buffer_minutes=30) is False
+
+    def test_true_exactly_at_close(self):
+        assert is_near_session_close(_ist(2026, 9, 2, 23, 30)) is True

@@ -1,5 +1,17 @@
 # Technical Debt / Known Limitations
 
+- **(2026-09-04) Two new Gold Mini strategies added; one tested with a real negative result, one
+  untested in production.** `regime_switch` (ADX-gated MACD/RSI or MACD/VWAP+EMA) was backtested
+  against real 5-year Gold Mini data and **underperformed the standalone strategies it's built from
+  on every metric** — see `docs/goldmini-regime-switch-results.md` for the full honest writeup.
+  **Not enabled for paper or live trading.** `vwap_session_bounce` (live CPR+VWAP intraday bounce) is
+  wired into `strategy_builders` and unit-tested, but has **no backtest at all by design** (its core
+  signal, Dhan's live session VWAP, doesn't exist in historical bars) and has not yet been added as a
+  `bot_config` row — the plan called for validating it via real paper trading, which hasn't started
+  yet. Both strategies introduced `Strategy.requires_intraday_flatten` (default `False`) and a new
+  scheduler branch (`is_near_session_close` + `force_close_end_of_day` on both engines) that force-
+  flattens a position near the daily MCX close for any strategy that sets it — exercised by unit
+  tests but not yet by a real intraday position (none has been opened under this flag yet).
 - **(Incident, fixed 2026-09-04) Generating a Dhan access token from a second machine invalidates
   the VPS's active live-trading token.** While verifying Dhan's NSE equity data support for the
   small-cap research (a one-off local script on the account owner's Mac), a fresh access token was
