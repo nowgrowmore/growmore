@@ -1,5 +1,22 @@
 # Technical Debt / Known Limitations
 
+- **(Fixed 2026-09-04) Systemic repeated-signal bug across all crossing-based strategies.** The
+  scheduler rebuilds a fresh strategy instance every tick and warms it up from history ending
+  yesterday (`_warm_up_strategy`) — so a strategy's "previous value" for crossing/threshold-recovery
+  detection was always yesterday's close, not the last time it was actually checked. A signal meant
+  to fire exactly once at a real crossing instead re-fired on every tick for the rest of the day the
+  live value stayed past the threshold. Found via the real Aluminium Mini live position's unrealized
+  P&L staying stuck at 0 — the strategy kept re-signalling BUY (correctly rejected by the
+  `max_position_size=1` guard, but that rejection path skips mark-to-market) instead of reporting
+  HOLD. This was a real risk for any config with `max_position_size > 1` — a repeated erroneous BUY
+  would have placed additional real orders each tick, not just been rejected. Fixed with
+  `Strategy.get_state_snapshot()`/`load_state_snapshot()` — `macd_trend`, `rsi_mean_reversion`,
+  `sma_crossover`, and `bollinger_reversion` now persist/restore their crossing reference via a new
+  `bot_signal_state.crossing_state` column, restored by the scheduler right after warm-up.
+  `donchian_breakout` deliberately left alone — not currently used by any config, and has a
+  genuinely different (non-crossing, threshold-breach) design that shouldn't be changed without its
+  own separate review (changing it would also retroactively alter the semantics behind the already-
+  published `docs/backtest-results.md` sweep, which used the old behavior).
 - **(2026-09-04) First real live-trading attempt: rejected safely, root-caused, fixed.** With the
   account owner's explicit go-ahead, Aluminium Mini's MACD (12,26,9) config was switched to
   `mode="live"` and `LIVE_TRADING_ENABLED=true` was set on the VPS. The very next tick placed a real
