@@ -48,11 +48,9 @@
   auto-restarts on crash/reboot). The laptop's own bot process was stopped at the same time — running
   two instances against the shared Neon database simultaneously would double up paper trades. Still
   paper-trading only; nothing about trading behavior changed, this only solves the hosting/IP problem.
-  **Still needed before this actually satisfies Dhan's static-IP requirement**: the droplet's IP
-  (`139.59.72.81`) needs to be registered/whitelisted with Dhan directly (their side, needs the
-  account owner's login — see `docs/pending-actions.md`) — and once registered, Dhan doesn't allow
-  changing it for 7 days, so this is deliberately a separate, later step, not assumed done just
-  because the VPS exists.
+  **(Done 2026-09-04) IP registered with Dhan** — the droplet's IP (`139.59.72.81`) is now whitelisted
+  on the Dhan account, so the static-IP requirement is actually satisfied, not just theoretically
+  possible. Locked for 7 days from registration (~2026-09-11) per Dhan's own policy.
 - **No SEBI Algo-ID handling.** Not needed for paper trading (we never call the Order API). Verified
   2026-09-04 that this is a much smaller lift than first assumed: SEBI's framework exempts self-built
   "White Box" strategies (logic transparent to the owner, not sold to others — this bot qualifies)

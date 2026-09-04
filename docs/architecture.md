@@ -91,9 +91,9 @@ off by default) and a specific `bot_config.mode="live"` (per strategy/instrument
 in the database — there's no dashboard UI for this, deliberately, so switching a config to live
 trading is never an accidental checkbox click) — and even then, real infrastructure gaps remain,
 tracked in `docs/technical-debt.md`/`docs/pending-actions.md`:
-1. Dhan requires a static IP for Order API calls, whitelisted directly with them. The bot now runs on
-   a VPS with a real static IP (`139.59.72.81`, since 2026-09-04), but that IP hasn't been registered
-   with Dhan yet — see `docs/pending-actions.md`; once registered it can't be changed for 7 days.
+1. **(Resolved 2026-09-04)** Dhan requires a static IP for Order API calls, whitelisted directly with
+   them. The bot runs on a VPS with a real static IP (`139.59.72.81`), now registered with Dhan —
+   locked for 7 days from registration per their policy.
 2. Dhan's 2FA/OAuth-based API session requirements are resolved — our existing PIN+TOTP headless
    token generation is Dhan's own sanctioned mechanism, confirmed 2026-09-04 (SEBI's Algo-ID
    *registration* itself is expected to be exempt for this bot's low order rate too).

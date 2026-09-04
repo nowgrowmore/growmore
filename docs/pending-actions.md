@@ -80,12 +80,10 @@ Plain-language list of things only you can do or decide. Updated as the project 
   `growmore-bot` (Bangalore, IP `139.59.72.81`), hardened, running as a systemd service. Verified
   ticking correctly as the sole instance (the laptop's copy was stopped to avoid double-trading
   against the shared database).
-- [ ] **Register the droplet's IP (`139.59.72.81`) with Dhan** — this is the piece that actually
-  satisfies the static-IP requirement; the VPS existing isn't enough on its own. This needs your own
-  login to Dhan's web console (Profile → DhanHQ Trading APIs → IP whitelisting or similar — exact
-  location not yet confirmed, ask the agent to check when you're ready). **Important**: once set,
-  Dhan doesn't allow changing it for 7 days, so only do this once you're confident in the droplet
-  setup (you are — it's been running paper trading identically to before).
+- [x] **Static IP (`139.59.72.81`) registered with Dhan** (2026-09-04, Profile → Get Trading & Data
+  APIs → Add IP on web.dhan.co). Dhan's real static-IP requirement for Order Placement APIs is now
+  actually satisfied, not just "the VPS exists." **Locked for 7 days from today** — don't try to
+  change it before ~2026-09-11 even if the VPS needs to move.
 - [ ] SSH access to the droplet is at `ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81` (key-only,
   root login disabled). Ask the agent for `growmore-bot.service` status/logs/restart commands
   whenever needed — no need to remember `systemctl` syntax yourself.

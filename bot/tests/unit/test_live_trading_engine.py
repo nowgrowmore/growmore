@@ -20,6 +20,7 @@ import pytest
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.broker.dhan_order_client import PlacedOrder
 from growmore_bot.live.engine import LiveTradingEngine
+from growmore_bot.persistence.models import LiveOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -58,7 +59,7 @@ def _instrument(config, lot_size=1):
 
 
 def _looks_like_order(obj) -> bool:
-    return hasattr(obj, "broker_order_id")
+    return isinstance(obj, LiveOrder)
 
 
 def test_disabled_config_is_skipped_entirely():
@@ -343,6 +344,29 @@ def test_reconcile_pending_orders_swallows_a_failed_lookup_and_continues():
     engine.reconcile_pending_orders()  # must not raise
 
     assert pending_order.order_status == "TRANSIT"
+
+
+def test_process_tick_records_signal_state_on_hold():
+    from growmore_bot.persistence.models import BotSignalState
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    strategy.debug_state = lambda: {"macd": -12.34, "signal": 5.67}
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], BotSignalState)]
+    assert len(added) == 1
+    assert added[0].bot_config_id == config.id
+    assert added[0].last_signal == "HOLD"
+    assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
 
 
 def test_hold_marks_open_position_to_market():

@@ -12,16 +12,16 @@ initial response only carries an order ID and an initial status (e.g.
 "TRANSIT"), not a confirmed fill price -- Dhan reports the real fill
 asynchronously. `avg_entry_price`/exit price here use the tick's live quote
 LTP at the moment the order was placed, same convention as the paper
-engine, but for a REAL order this is an approximation of the actual fill,
-not a guarantee. No reconciliation against Dhan's own order/position state
-exists yet -- see docs/technical-debt.md.
+engine. `reconcile_pending_orders()` corrects each order's own record
+against Dhan's real status/fill price once available, but does not yet
+retroactively recompute a position's avg_entry_price/realized_pnl from a
+corrected fill -- see docs/technical-debt.md.
 
-Known gap, also documented rather than silently handled: tripping the
-daily_loss_limit guard disables the bot_config (stops new entries) but does
-NOT automatically place a closing order for whatever's still open -- doing
-that safely (e.g. handling a failed closing order under duress) needs more
-design than this first version attempts. A tripped live guard needs a human
-to look at the open position and decide.
+Tripping the daily_loss_limit guard attempts to place a real closing order
+for whatever's still open before disabling the bot_config; if that closing
+order itself fails, the failure is logged and the position is left open for
+manual review rather than retried automatically (see
+`_trip_daily_loss_guard`).
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from growmore_bot.persistence.models import AuditLog, LiveOrder, LivePosition
+from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder, LivePosition
 from growmore_bot.strategies.base import SignalAction, Strategy
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,7 @@ class LiveTradingEngine:
         )
         signal = strategy.on_bar(quote, position_state)
         computed = _format_debug_state(strategy)
+        self._record_signal_state(config, signal, quote, strategy, now)
 
         if signal.action == SignalAction.HOLD:
             if current_position_qty != 0 and live_position_id is not None:
@@ -253,6 +254,35 @@ class LiveTradingEngine:
                 order.fill_price = real_fill_price
 
             self.session.add(order)
+
+    def _record_signal_state(
+        self, config: Any, signal: Any, quote: Any, strategy: Strategy, now: datetime
+    ) -> None:
+        """Upsert this bot_config's "what did the strategy just see" row --
+        same convention as PaperTradingEngine, shared by both paper and live
+        configs so the dashboard doesn't need to care which mode a config is
+        in to show its current signal.
+        """
+        existing = (
+            self.session.query(BotSignalState).filter_by(bot_config_id=config.id).one_or_none()
+        )
+        if existing is None:
+            self.session.add(
+                BotSignalState(
+                    id=uuid.uuid4(),
+                    bot_config_id=config.id,
+                    last_signal=signal.action.value,
+                    checked_at=now,
+                    ltp=quote.ltp,
+                    indicators=strategy.debug_state(),
+                )
+            )
+        else:
+            existing.last_signal = signal.action.value
+            existing.checked_at = now
+            existing.ltp = quote.ltp
+            existing.indicators = strategy.debug_state()
+            self.session.add(existing)
 
     @staticmethod
     def _mark_to_market(position: Any, ltp: Any, lot_size: int) -> None:
