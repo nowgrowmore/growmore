@@ -1,5 +1,21 @@
 # Technical Debt / Known Limitations
 
+- **(Incident, fixed 2026-09-04) Generating a Dhan access token from a second machine invalidates
+  the VPS's active live-trading token.** While verifying Dhan's NSE equity data support for the
+  small-cap research (a one-off local script on the account owner's Mac), a fresh access token was
+  generated via the headless PIN+TOTP flow. Dhan appears to allow only one active access token per
+  account — this immediately invalidated the token the VPS's `growmore-bot.service` was actively
+  using for real trading. The live bot then failed every 5-minute tick for roughly 2 hours with
+  `DH-906 Invalid Token`, visible in `bot.log`. **No incorrect trades resulted** — the failure was in
+  fetching quotes (`get_quote`/`get_historical_ohlc`), not order placement, and the daily-loss-limit
+  guard (which reads `cumulative_daily_pnl` from already-stored orders, not a live quote) remained
+  functional throughout; the real ALUMINI position simply went unmonitored/unmarked-to-market for
+  that window. Fixed by generating one more token and writing it to **both** the VPS's and the local
+  repo-root `.env.local` (`growmore_bot.broker.token_refresh.write_access_token_to_env_file`), then
+  restarting the service — confirmed recovered via real ticks in `bot.log` afterward. **Going
+  forward: never generate a fresh Dhan access token from any machine other than the one currently
+  live-trading**, even for a read-only research/verification call — reuse the existing token (it's
+  already in the repo-root `.env.local`) or coordinate the refresh with whatever is actively trading.
 - **(Fixed 2026-09-04) Systemic repeated-signal bug across all crossing-based strategies.** The
   scheduler rebuilds a fresh strategy instance every tick and warms it up from history ending
   yesterday (`_warm_up_strategy`) — so a strategy's "previous value" for crossing/threshold-recovery

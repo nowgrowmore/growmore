@@ -26,6 +26,9 @@ EXPECTED_TABLES = {
     "bot_signal_state",
     "audit_log",
     "bot_status",
+    "portfolio_backtest_runs",
+    "portfolio_equity_curve_points",
+    "portfolio_rebalance_holdings",
 }
 
 

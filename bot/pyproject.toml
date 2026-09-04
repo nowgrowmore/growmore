@@ -31,6 +31,13 @@ dev = [
     "ruff",
     "mypy",
 ]
+# Only for the one-off small-cap momentum research (bot/research/), never
+# imported by the live trading bot -- kept out of the core dependency list
+# so the production install stays lean. See bot/research/smallcap_momentum/.
+research = [
+    "yfinance",
+    "pyarrow",
+]
 
 [project.scripts]
 growmore-bot = "growmore_bot.main:main"

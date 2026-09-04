@@ -34,3 +34,8 @@ test-results/
 # Runtime logs
 bot/bot.log
 *.log
+
+# Research data caches/output -- large, regenerable from real APIs, never
+# meant to be committed (see bot/research/smallcap_momentum/).
+bot/research/.cache/
+bot/research/.output/

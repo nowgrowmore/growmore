@@ -5,6 +5,9 @@ import {
   getBotConfigs,
   getBotStatus,
   getOpenPaperPositions,
+  getPortfolioBacktestRuns,
+  getPortfolioEquityCurve,
+  getPortfolioHoldings,
   setBotConfigEnabled,
   updateBotConfigRiskParams,
 } from "./db";
@@ -137,5 +140,42 @@ describe("updateBotConfigRiskParams", () => {
 
     expect(fakeSql.transaction).toHaveBeenCalledTimes(1);
     expect(fakeSql).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("getPortfolioBacktestRuns", () => {
+  it("returns the portfolio_backtest_runs rows", async () => {
+    const fakeRows = [{ id: "run-1", universe: "smallcap250" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getPortfolioBacktestRuns();
+
+    expect(result).toBe(fakeRows);
+    expect(fakeSql).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("getPortfolioEquityCurve", () => {
+  it("returns the equity curve points for one run", async () => {
+    const fakeRows = [{ id: "point-1", equity: "1000000" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getPortfolioEquityCurve("run-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getPortfolioHoldings", () => {
+  it("returns the rebalance holdings for one run", async () => {
+    const fakeRows = [{ id: "holding-1", symbol: "TTML" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getPortfolioHoldings("run-1");
+
+    expect(result).toBe(fakeRows);
   });
 });

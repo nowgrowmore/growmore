@@ -10,6 +10,9 @@ import type {
   LivePosition,
   PaperOrder,
   PaperPosition,
+  PortfolioBacktestRun,
+  PortfolioEquityCurvePoint,
+  PortfolioRebalanceHolding,
 } from "./types";
 
 // Thin, typed query layer against the shared Postgres schema owned by
@@ -322,4 +325,41 @@ export async function getAuditLog(limit = 200): Promise<AuditLogEntry[]> {
     limit ${limit}
   `;
   return rows as unknown as AuditLogEntry[];
+}
+
+// ---------------------------------------------------------------------------
+// Small-cap momentum research (bot/research/smallcap_momentum/) -- real-data
+// backtests on an asset class this bot doesn't trade, never wired into the
+// live scheduler. See docs/smallcap-momentum-backtest-results.md.
+// ---------------------------------------------------------------------------
+
+export async function getPortfolioBacktestRuns(): Promise<PortfolioBacktestRun[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from portfolio_backtest_runs
+    order by universe asc, cagr_pct desc
+  `;
+  return rows as unknown as PortfolioBacktestRun[];
+}
+
+export async function getPortfolioEquityCurve(
+  runId: string
+): Promise<PortfolioEquityCurvePoint[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from portfolio_equity_curve_points
+    where portfolio_backtest_run_id = ${runId}
+    order by ts asc
+  `;
+  return rows as unknown as PortfolioEquityCurvePoint[];
+}
+
+export async function getPortfolioHoldings(runId: string): Promise<PortfolioRebalanceHolding[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from portfolio_rebalance_holdings
+    where portfolio_backtest_run_id = ${runId}
+    order by rebalance_date asc, weight desc
+  `;
+  return rows as unknown as PortfolioRebalanceHolding[];
 }

@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { href: "/trades", label: "Trade Log" },
   { href: "/strategies", label: "Strategies" },
   { href: "/audit", label: "Audit Log" },
+  { href: "/smallcap", label: "Smallcap" },
 ] as const;
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {

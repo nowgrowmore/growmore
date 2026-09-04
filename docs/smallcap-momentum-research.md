@@ -105,14 +105,12 @@ within the selected set** — not one indicator run blindly across all 250 names
   behavior in it — the one real call made here checked depth and shape, not fill realism under a
   circuit lock.
 
-## Next steps (not started)
+## Next steps
 
-- A follow-up, separately-scoped planning pass would design: the cross-sectional selection
-  strategy's actual implementation (new code beyond `Strategy.on_bar`), the constituent-sourcing
-  pipeline, capital-normalized position sizing in `BacktestEngine`, and the concrete backtest sweep
-  (universe × strategy variant grid, minimum-trade-count filters, reporting format matching
-  `docs/backtest-results.md`) — deliberately deferred until this research is confirmed as the right
-  direction.
+- **(Done 2026-09-04)** The cross-sectional momentum(+quality) strategy was built and backtested on
+  real 5-year Dhan data for both universes — see
+  **[docs/smallcap-momentum-backtest-results.md](smallcap-momentum-backtest-results.md)** for the
+  real numbers, methodology, and caveats. Results are also viewable on the dashboard's Smallcap tab.
 
 ## Sources
 

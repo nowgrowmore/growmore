@@ -348,6 +348,78 @@ class BotStatus(Base):
     utilized_margin: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
 
+class PortfolioBacktestRun(Base):
+    """A single run of the cross-sectional momentum(+quality) small-cap/
+    mid-cap research backtest (bot/research/smallcap_momentum/) -- distinct
+    from `BacktestRun`, which is always ONE strategy on ONE instrument.
+    Deliberately NOT linked to `strategies`/`instruments` (a portfolio run
+    holds a rotating basket of many instruments, not one) -- `universe`/
+    `variant` identify the run instead. See
+    docs/smallcap-momentum-backtest-results.md for real results and every
+    caveat (this is real-data research on an asset class the bot doesn't
+    trade, not a strategy ever eligible to go live).
+    """
+
+    __tablename__ = "portfolio_backtest_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    universe: Mapped[str] = mapped_column(Text, nullable=False)  # e.g. "smallcap250"
+    variant: Mapped[str] = mapped_column(Text, nullable=False)  # e.g. "momentum_quality_trend"
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    top_n: Mapped[int] = mapped_column(Integer, nullable=False)
+    initial_capital: Mapped[float] = mapped_column(Numeric, nullable=False)
+    final_equity: Mapped[float] = mapped_column(Numeric, nullable=False)
+    rebalance_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sharpe_ratio: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    max_drawdown_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    win_rate_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    cagr_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    quality_coverage_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    equity_curve_points: Mapped[list["PortfolioEquityCurvePoint"]] = relationship(
+        back_populates="portfolio_backtest_run", cascade="all, delete-orphan"
+    )
+    holdings: Mapped[list["PortfolioRebalanceHolding"]] = relationship(
+        back_populates="portfolio_backtest_run", cascade="all, delete-orphan"
+    )
+
+
+class PortfolioEquityCurvePoint(Base):
+    __tablename__ = "portfolio_equity_curve_points"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    portfolio_backtest_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("portfolio_backtest_runs.id"), nullable=False
+    )
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    equity: Mapped[float] = mapped_column(Numeric, nullable=False)
+
+    portfolio_backtest_run: Mapped["PortfolioBacktestRun"] = relationship(
+        back_populates="equity_curve_points"
+    )
+
+
+class PortfolioRebalanceHolding(Base):
+    """One row per (rebalance date, held symbol) -- what the strategy
+    actually held, for drill-down/spot-checking on the dashboard.
+    """
+
+    __tablename__ = "portfolio_rebalance_holdings"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    portfolio_backtest_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("portfolio_backtest_runs.id"), nullable=False
+    )
+    rebalance_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    weight: Mapped[float] = mapped_column(Numeric, nullable=False)
+    composite_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    portfolio_backtest_run: Mapped["PortfolioBacktestRun"] = relationship(back_populates="holdings")
+
+
 __all__ = [
     "Base",
     "Instrument",
@@ -363,4 +435,7 @@ __all__ = [
     "BotSignalState",
     "AuditLog",
     "BotStatus",
+    "PortfolioBacktestRun",
+    "PortfolioEquityCurvePoint",
+    "PortfolioRebalanceHolding",
 ]

@@ -172,6 +172,40 @@ export interface BotStatus {
   utilized_margin: string | null;
 }
 
+export interface PortfolioBacktestRun {
+  id: string;
+  universe: string; // e.g. "smallcap250"
+  variant: string; // e.g. "momentum_quality_trend"
+  started_at: string;
+  period_start: string;
+  period_end: string;
+  top_n: number;
+  initial_capital: string;
+  final_equity: string;
+  rebalance_count: number;
+  sharpe_ratio: string | null;
+  max_drawdown_pct: string | null;
+  win_rate_pct: string | null;
+  cagr_pct: string | null;
+  quality_coverage_pct: string | null;
+}
+
+export interface PortfolioEquityCurvePoint {
+  id: string;
+  portfolio_backtest_run_id: string;
+  ts: string;
+  equity: string;
+}
+
+export interface PortfolioRebalanceHolding {
+  id: string;
+  portfolio_backtest_run_id: string;
+  rebalance_date: string;
+  symbol: string;
+  weight: string;
+  composite_score: string | null;
+}
+
 export interface AuditLogEntry {
   id: string;
   ts: string;
