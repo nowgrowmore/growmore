@@ -129,6 +129,42 @@ export function explainSignal(
       );
     }
 
+    case "vwap_session_bounce": {
+      const vwap = n(ind.vwap);
+      const cprBottom = n(ind.cpr_bottom);
+      const cprTop = n(ind.cpr_top);
+      if (price === null || vwap === null || cprBottom === null || cprTop === null) {
+        return "Not enough data yet to compute today's VWAP and CPR levels.";
+      }
+      const aboveVwap = price > vwap;
+      const vwapGap = Math.abs(price - vwap);
+      if (price > cprTop) {
+        const nextStep = aboveVwap
+          ? "already above VWAP -- a fresh BUY needs price to first dip back below VWAP, then cross back above it"
+          : `a BUY fires the moment price rises back above VWAP (${formatCurrency(vwapGap)} away)`;
+        return (
+          `Price (${formatCurrency(price)}) is above today's CPR top (${formatCurrency(cprTop)}) -- ` +
+          `a bullish bias day. It's currently ${aboveVwap ? "above" : "below"} the live session VWAP ` +
+          `(${formatCurrency(vwap)}); ${nextStep}.`
+        );
+      }
+      if (price < cprBottom) {
+        const nextStep = !aboveVwap
+          ? "already below VWAP -- a fresh SELL needs price to first rise back above VWAP, then cross back below it"
+          : `a SELL fires the moment price falls back below VWAP (${formatCurrency(vwapGap)} away)`;
+        return (
+          `Price (${formatCurrency(price)}) is below today's CPR bottom (${formatCurrency(cprBottom)}) -- ` +
+          `a bearish bias day. It's currently ${aboveVwap ? "above" : "below"} the live session VWAP ` +
+          `(${formatCurrency(vwap)}); ${nextStep}.`
+        );
+      }
+      return (
+        `Price (${formatCurrency(price)}) is inside today's CPR band (${formatCurrency(cprBottom)} to ` +
+        `${formatCurrency(cprTop)}) -- no trading bias either way today, so no signal regardless of ` +
+        `where price sits versus VWAP (${formatCurrency(vwap)}) until it moves outside the CPR band.`
+      );
+    }
+
     case "always_flip":
       return "Demo/test strategy, not a real trading signal -- it deliberately alternates BUY and SELL every single tick to prove the pipeline works end to end.";
 

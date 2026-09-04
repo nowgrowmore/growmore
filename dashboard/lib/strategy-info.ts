@@ -61,6 +61,23 @@ export const STRATEGY_INFO: Record<string, StrategyInfo> = {
       num_std: { label: "Band width (std devs)", explain: "How many standard deviations the bands sit from the average. Higher = wider bands, fewer but higher-conviction signals." },
     },
   },
+  regime_switch: {
+    label: "ADX Regime-Switch",
+    summary:
+      "Routes between two other strategies based on trend strength (ADX): MACD Trend when the market is trending, a mean-reversion strategy (RSI or rolling-VWAP+EMA) when it's ranging. Backtested on real Gold Mini data and found to underperform the standalone strategies it's built from -- not enabled anywhere (see docs/goldmini-regime-switch-results.md).",
+    params: {
+      adx_period: { label: "ADX period", explain: "Bars used to compute trend-strength (ADX). 14 is the standard/original setting." },
+      adx_trend_enter: { label: "Trend-enter threshold", explain: "ADX level above which the regime switches to \"trending\" (MACD takes over). 25 is the standard convention." },
+      adx_trend_exit: { label: "Trend-exit threshold", explain: "ADX level below which the regime reverts to \"ranging\". Kept below the enter threshold (20 vs 25) deliberately, so ADX oscillating in between doesn't flip the regime back and forth." },
+      ranging_strategy: { label: "Ranging-mode strategy", explain: "Which mean-reversion strategy runs during a ranging regime -- \"rsi\" or \"vwap_ema\"." },
+    },
+  },
+  vwap_session_bounce: {
+    label: "VWAP + CPR Session-Bounce",
+    summary:
+      "Intraday only, live data only -- can't be backtested (today's live session VWAP doesn't exist in historical bars). CPR (Central Pivot Range, from yesterday's high/low/close) sets the day's bullish/bearish bias; a live VWAP crossing in that direction is the entry trigger. A position is always flattened near the daily MCX close, since both CPR and VWAP reset every session. Validated by real paper trading instead of a backtest.",
+    params: {},
+  },
 };
 
 /** Params for an unrecognized/future strategy name fall back to a plain

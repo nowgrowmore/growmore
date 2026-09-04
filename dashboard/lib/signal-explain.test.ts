@@ -101,6 +101,53 @@ describe("explainSignal", () => {
     expect(text).toMatch(/inside the bands/i);
   });
 
+  it("vwap_session_bounce: bullish bias, below vwap -- next BUY distance", () => {
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 107 },
+      {},
+      106
+    );
+    expect(text).toMatch(/bullish bias/i);
+    expect(text).toMatch(/BUY fires the moment/i);
+  });
+
+  it("vwap_session_bounce: bullish bias, already above vwap -- needs a fresh dip first", () => {
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 107 },
+      {},
+      108
+    );
+    expect(text).toMatch(/already above VWAP/i);
+  });
+
+  it("vwap_session_bounce: bearish bias, above vwap -- next SELL distance", () => {
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 98 },
+      {},
+      99
+    );
+    expect(text).toMatch(/bearish bias/i);
+    expect(text).toMatch(/SELL fires the moment/i);
+  });
+
+  it("vwap_session_bounce: price inside the CPR band -- no bias either way", () => {
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 104 },
+      {},
+      103
+    );
+    expect(text).toMatch(/inside today's CPR band/i);
+  });
+
+  it("vwap_session_bounce: not enough data yet", () => {
+    const text = explainSignal("vwap_session_bounce", {}, {}, 100);
+    expect(text).toMatch(/not enough data/i);
+  });
+
   it("always_flip: explains it's a demo strategy", () => {
     const text = explainSignal("always_flip", { last_close: 100 }, {}, 100);
     expect(text).toMatch(/demo|test/i);

@@ -113,6 +113,16 @@ def test_cpr_updates_across_multiple_warm_up_bars_to_the_latest_one():
     assert strategy._current_cpr == pytest.approx((101.66667, 103.33333, 105.0), abs=1e-3)
 
 
+def test_debug_state_reports_cpr_and_the_latest_live_vwap():
+    strategy = VwapSessionBounceStrategy()
+    strategy.on_bar(PRIOR_DAY, None)
+    strategy.on_bar(_quote(ltp=106, vwap=107), None)
+    state = strategy.debug_state()
+    assert state["vwap"] == pytest.approx(107)
+    assert state["cpr_bottom"] == pytest.approx(101.66667, abs=1e-3)
+    assert state["cpr_top"] == pytest.approx(105.0, abs=1e-3)
+
+
 def test_requires_intraday_flatten_is_true():
     assert VwapSessionBounceStrategy().requires_intraday_flatten is True
 

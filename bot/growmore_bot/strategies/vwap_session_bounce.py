@@ -48,6 +48,8 @@ class VwapSessionBounceStrategy(Strategy):
     def __init__(self) -> None:
         self._current_cpr: Optional[tuple[float, float, float]] = None  # (bottom, pivot, top)
         self._prev_above_vwap: Optional[bool] = None
+        self._last_vwap: Optional[float] = None
+        self._last_ltp: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         vwap = getattr(bar, "vwap", None)
@@ -62,11 +64,14 @@ class VwapSessionBounceStrategy(Strategy):
             self._current_cpr = (min(bc, tc), pivot, max(bc, tc))
             return Signal(action=SignalAction.HOLD)
 
+        ltp = float(bar.ltp)
+        self._last_vwap = vwap
+        self._last_ltp = ltp
+
         if self._current_cpr is None:
             return Signal(action=SignalAction.HOLD)
 
         cpr_bottom, _, cpr_top = self._current_cpr
-        ltp = float(bar.ltp)
         above_vwap = ltp > vwap
         prev = self._prev_above_vwap
         self._prev_above_vwap = above_vwap
@@ -85,7 +90,12 @@ class VwapSessionBounceStrategy(Strategy):
 
     def debug_state(self) -> dict[str, Optional[float]]:
         cpr_bottom, cpr_pivot, cpr_top = self._current_cpr or (None, None, None)
-        return {"cpr_bottom": cpr_bottom, "cpr_pivot": cpr_pivot, "cpr_top": cpr_top}
+        return {
+            "cpr_bottom": cpr_bottom,
+            "cpr_pivot": cpr_pivot,
+            "cpr_top": cpr_top,
+            "vwap": self._last_vwap,
+        }
 
     def get_state_snapshot(self) -> dict[str, Any]:
         if self._prev_above_vwap is None:

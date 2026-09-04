@@ -11,10 +11,12 @@ import {
   toNumber,
 } from "@/lib/format";
 import { explainSignal } from "@/lib/signal-explain";
+import { STRATEGY_INFO } from "@/lib/strategy-info";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
 import { ModeFilter } from "@/components/ModeFilter";
 import type { BotConfig } from "@/lib/types";
+import { Fragment } from "react";
 
 type Mode = "all" | "paper" | "live";
 
@@ -64,6 +66,9 @@ interface StrategiesClientProps {
 export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: StrategiesClientProps) {
   const [mode, setMode] = useState<Mode>("live");
   const filtered = mode === "all" ? configs : configs.filter((c) => c.mode === mode);
+
+  const strategiesPresent = Array.from(new Set(configs.map((c) => c.strategy_name).filter(Boolean)))
+    .filter((name): name is string => name !== undefined && name in STRATEGY_INFO);
 
   return (
     <div className="flex flex-col gap-4">
@@ -193,6 +198,45 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
               </div>
             );
           })}
+        </div>
+      )}
+
+      {strategiesPresent.length > 0 && (
+        <div className="rounded-lg border border-[color:var(--border-hairline)] bg-[color:var(--surface-1)] p-4">
+          <h3 className="mb-3 text-sm font-semibold">Strategy reference</h3>
+          <p className="mb-3 text-xs text-[color:var(--text-secondary)]">
+            What each strategy above actually does -- see the{" "}
+            <Link href="/backtests" className="text-[color:var(--series-1)] hover:underline">
+              Backtests page
+            </Link>{" "}
+            for historical performance where one exists (some strategies, like the live VWAP+CPR
+            one, are intentionally never backtested -- see their summary below for why).
+          </p>
+          <div className="flex flex-col gap-4">
+            {strategiesPresent.map((name) => {
+              const info = STRATEGY_INFO[name];
+              return (
+                <div key={name}>
+                  <p className="text-sm font-medium">{info.label}</p>
+                  <p className="text-sm text-[color:var(--text-secondary)]">{info.summary}</p>
+                  {Object.keys(info.params).length > 0 && (
+                    <dl className="mt-1 grid grid-cols-1 gap-x-4 gap-y-1 pl-3 text-xs sm:grid-cols-[max-content_1fr]">
+                      {Object.entries(info.params).map(([key, param]) => (
+                        <Fragment key={key}>
+                          <dt className="text-[color:var(--text-muted)]">
+                            {key} <span className="italic">({param.label})</span>
+                          </dt>
+                          <dd className="text-[color:var(--text-secondary)] sm:col-start-2">
+                            {param.explain}
+                          </dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
