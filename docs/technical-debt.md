@@ -1,5 +1,20 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed one instance 2026-09-04) Neither disabling NOR deleting a `bot_config` closes its
+  open position.** `scheduler/run.py`'s main tick loop only queries `enabled=True` configs -- flip a
+  config to disabled (the dashboard's normal toggle) and it's simply never fetched or evaluated
+  again, with no quote pulled and no close attempted. The only tick that runs regardless of `enabled`
+  is the `pending_auto_close` retry loop, which covers exactly one case (a daily-loss-limit guard that
+  already tried and failed to auto-close) -- a plain manual disable never sets that flag, so it isn't
+  covered either. Net effect either way (disable OR delete the row): any open position just sits
+  there, unrealized P&L frozen at its last tick, until the config is re-enabled (so the strategy can
+  eventually produce a natural SELL) or the position is closed out by hand. Found live: deleting
+  COPPER `rsi_mean_reversion` and CRUDEOILM `always_flip` from paper trading earlier this session left
+  exactly this -- both showed up on the Trade Log permanently "open." Fixed by hand this time (marked
+  `closed`, `realized_pnl` set to the last frozen `unrealized_pnl`, an `audit_log` entry explaining
+  why) -- **not yet fixed at the process level**. Before disabling or deleting a `bot_config` in the
+  future, check for an open position on that (strategy_id, instrument_id) pair first and close it out
+  (or build a proper "disable and flatten" action instead of a bare toggle/delete).
 - **(Found + fixed 2026-09-04) Second independent review of every strategy/backtest calculation
   found and fixed 6 more real bugs.** A from-scratch re-review of `strategies/`, `backtest/`,
   `research/smallcap_momentum/`, and the dashboard's own indicator solvers, re-deriving every
