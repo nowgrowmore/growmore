@@ -59,16 +59,32 @@ export function formatProfitFactor(value: string | number | null | undefined): s
   return formatNumber(toNumber(value));
 }
 
+/** Renders a single param value -- recurses into nested objects (e.g.
+ * regime_switch's `macd_params`/`ranging_params`) as `{k=v, k=v}` instead of
+ * the default `String(value)` for an object, which is the useless
+ * "[object Object]" that used to hide exactly the values that distinguish
+ * one regime_switch variant from another. */
+function formatParamValue(value: unknown): string {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const inner = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((k) => `${k}=${formatParamValue((value as Record<string, unknown>)[k])}`)
+      .join(", ");
+    return `{${inner}}`;
+  }
+  return String(value);
+}
+
 /** Compact, comparable label for a strategy's parameters, e.g.
  * "fast_period=5, slow_period=20". Sorted by key so the same strategy's
  * variants always list params in the same order. */
 export function formatStrategyParams(
-  params: Record<string, number | string> | null | undefined
+  params: Record<string, unknown> | null | undefined
 ): string {
   if (!params || Object.keys(params).length === 0) return "—";
   return Object.keys(params)
     .sort()
-    .map((key) => `${key}=${params[key]}`)
+    .map((key) => `${key}=${formatParamValue(params[key])}`)
     .join(", ");
 }
 
@@ -78,7 +94,7 @@ export function formatStrategyParams(
  * explanation available) for a strategy name not in STRATEGY_INFO. */
 export function formatStrategyParamsTooltip(
   strategyName: string,
-  params: Record<string, number | string> | null | undefined
+  params: Record<string, unknown> | null | undefined
 ): string {
   if (!params || Object.keys(params).length === 0) return "";
   const info = getStrategyInfo(strategyName);
@@ -86,7 +102,8 @@ export function formatStrategyParamsTooltip(
     .sort()
     .map((key) => {
       const paramInfo = info?.params[key];
-      return paramInfo ? `${key}=${params[key]} -- ${paramInfo.explain}` : `${key}=${params[key]}`;
+      const value = formatParamValue(params[key]);
+      return paramInfo ? `${key}=${value} -- ${paramInfo.explain}` : `${key}=${value}`;
     })
     .join("\n");
 }

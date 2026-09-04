@@ -324,6 +324,19 @@ describe("formatStrategyParams", () => {
     expect(formatStrategyParams(undefined)).toBe("—");
     expect(formatStrategyParams({})).toBe("—");
   });
+
+  it("flattens nested object params instead of printing [object Object] (regime_switch)", () => {
+    const params: Record<string, unknown> = {
+      ranging_strategy: "vwap_ema",
+      macd_params: { fast_period: 12, slow_period: 26, signal_period: 9 },
+      ranging_params: { vwap_period: 20, ema_fast: 8, ema_slow: 21 },
+    };
+    const result = formatStrategyParams(params);
+    expect(result).not.toContain("[object Object]");
+    expect(result).toContain("macd_params={fast_period=12, signal_period=9, slow_period=26}");
+    expect(result).toContain("ranging_params={ema_fast=8, ema_slow=21, vwap_period=20}");
+    expect(result).toContain("ranging_strategy=vwap_ema");
+  });
 });
 
 describe("formatDateRange", () => {

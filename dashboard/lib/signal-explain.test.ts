@@ -241,6 +241,48 @@ describe("explainSignal", () => {
     expect(text).toMatch(/not enough data/i);
   });
 
+  it("regime_switch: trending regime explains MACD (the active sub-strategy)", () => {
+    const text = explainSignal(
+      "regime_switch",
+      { adx: 32, regime: "trending", macd: 5, signal: 2, rsi: 40 },
+      { ranging_strategy: "rsi", ranging_params: { oversold: 30, overbought: 70 } },
+      100
+    );
+    expect(text).toMatch(/trending/i);
+    expect(text).toContain("MACD Trend is in control");
+    expect(text).toContain("SELL");
+    expect(text).toContain("ignored while trending");
+  });
+
+  it("regime_switch: ranging regime with an rsi ranging sub-strategy", () => {
+    const text = explainSignal(
+      "regime_switch",
+      { adx: 12, regime: "ranging", macd: 5, signal: 2, rsi: 25 },
+      { ranging_strategy: "rsi", ranging_params: { oversold: 30, overbought: 70 } },
+      100
+    );
+    expect(text).toMatch(/ranging/i);
+    expect(text).toContain("RSI Mean-Reversion is in control");
+    expect(text).toContain("BUY");
+  });
+
+  it("regime_switch: ranging regime with a vwap_ema ranging sub-strategy", () => {
+    const text = explainSignal(
+      "regime_switch",
+      { adx: 12, regime: "ranging", macd: 5, signal: 2, vwap: 98, ema_fast: 101, ema_slow: 99 },
+      { ranging_strategy: "vwap_ema", ranging_params: { vwap_period: 20, ema_fast: 8, ema_slow: 21 } },
+      100
+    );
+    expect(text).toMatch(/ranging/i);
+    expect(text).toContain("VWAP+EMA sub-strategy is in control");
+    expect(text).not.toContain("[object Object]");
+  });
+
+  it("regime_switch: not enough data yet", () => {
+    const text = explainSignal("regime_switch", {}, {}, 100);
+    expect(text).toMatch(/not enough/i);
+  });
+
   it("always_flip: explains it's a demo strategy", () => {
     const text = explainSignal("always_flip", { last_close: 100 }, {}, 100);
     expect(text).toMatch(/demo|test/i);

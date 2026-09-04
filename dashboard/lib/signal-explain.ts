@@ -12,16 +12,16 @@ import { computePercentToSignal } from "./percent-to-signal";
 
 type Num = number | string | null | undefined;
 
-function n(value: Num): number | null {
+function n(value: unknown): number | null {
   if (value === null || value === undefined) return null;
-  const parsed = Number(value);
+  const parsed = Number(value as number | string);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
 export function explainSignal(
   strategyName: string,
   indicators: Record<string, Num> | null | undefined,
-  params: Record<string, number | string> | null | undefined,
+  params: Record<string, unknown> | null | undefined,
   ltp: Num
 ): string {
   const base = explainSignalBase(strategyName, indicators, params, ltp);
@@ -36,7 +36,7 @@ export function explainSignal(
 function explainSignalBase(
   strategyName: string,
   indicators: Record<string, Num> | null | undefined,
-  params: Record<string, number | string> | null | undefined,
+  params: Record<string, unknown> | null | undefined,
   ltp: Num
 ): string {
   const ind = indicators ?? {};
@@ -216,6 +216,87 @@ function explainSignalBase(
         `Price (${formatCurrency(price)}) is inside today's CPR band (${formatCurrency(cprBottom)} to ` +
         `${formatCurrency(cprTop)}) -- no trading bias either way today, so no signal regardless of ` +
         `where price sits versus VWAP (${formatCurrency(vwap)}) until it moves outside the CPR band. ${exitNote}`
+      );
+    }
+
+    case "regime_switch": {
+      const adx = n(ind.adx);
+      const macd = n(ind.macd);
+      const signal = n(ind.signal);
+      const regime = ind.regime !== undefined && ind.regime !== null ? String(ind.regime) : null;
+      const rangingParams = (p.ranging_params ?? {}) as Record<string, unknown>;
+      const rangingStrategy = typeof p.ranging_strategy === "string" ? p.ranging_strategy : null;
+      const adxEnter = n(p.adx_trend_enter) ?? 25;
+      const adxExit = n(p.adx_trend_exit) ?? 20;
+      if (adx === null || regime === null) {
+        return "Not enough price history yet to compute ADX for the regime switch.";
+      }
+      const trendNote =
+        `ADX is ${adx.toFixed(1)} (enters TRENDING above ${adxEnter}, reverts to RANGING below ` +
+        `${adxExit} -- a dead zone in between stops it flip-flopping on every small wobble).`;
+
+      if (regime === "trending") {
+        if (macd === null || signal === null) {
+          return `${trendNote} Currently TRENDING, but not enough history yet to compute MACD.`;
+        }
+        const gap = macd - signal;
+        const direction = gap >= 0 ? "above" : "below";
+        const nextSignal = gap >= 0 ? "SELL" : "BUY";
+        const opposite = gap >= 0 ? "drops below" : "rises above";
+        return (
+          `${trendNote} Currently TRENDING, so MACD Trend is in control: its line (${macd.toFixed(2)}) is ` +
+          `${direction} the signal line (${signal.toFixed(2)}) by ${Math.abs(gap).toFixed(2)}. A ${nextSignal} ` +
+          `fires the moment MACD ${opposite} the signal line. The ranging-mode sub-strategy keeps computing in ` +
+          `the background so it stays warm, but its signal is ignored while trending.`
+        );
+      }
+
+      // Ranging: the active sub-strategy is whichever this config's
+      // ranging_strategy param names -- "rsi" or "vwap_ema".
+      if (rangingStrategy === "rsi") {
+        const rsi = n(ind.rsi);
+        const oversold = n(rangingParams.oversold) ?? 30;
+        const overbought = n(rangingParams.overbought) ?? 70;
+        if (rsi === null) {
+          return `${trendNote} Currently RANGING, but not enough history yet to compute the RSI sub-strategy.`;
+        }
+        if (rsi <= oversold) {
+          return (
+            `${trendNote} Currently RANGING, so RSI Mean-Reversion is in control: RSI is ${rsi.toFixed(1)}, ` +
+            `already at/below the oversold line (${oversold}). A BUY fires the moment it climbs back above ` +
+            `${oversold}. MACD Trend keeps computing in the background so it stays warm, but is ignored while ranging.`
+          );
+        }
+        if (rsi >= overbought) {
+          return (
+            `${trendNote} Currently RANGING, so RSI Mean-Reversion is in control: RSI is ${rsi.toFixed(1)}, ` +
+            `already at/above the overbought line (${overbought}). A SELL fires the moment it drops back below ` +
+            `${overbought}. MACD Trend keeps computing in the background so it stays warm, but is ignored while ranging.`
+          );
+        }
+        return (
+          `${trendNote} Currently RANGING, so RSI Mean-Reversion is in control: RSI is ${rsi.toFixed(1)}, in ` +
+          `neutral territory (between ${oversold} and ${overbought}). No signal until it first crosses one of ` +
+          `those lines and then recovers back across it.`
+        );
+      }
+
+      // vwap_ema ranging mode.
+      const vwap = n(ind.vwap);
+      const emaFast = n(ind.ema_fast);
+      const emaSlow = n(ind.ema_slow);
+      if (vwap === null || emaFast === null || emaSlow === null || price === null) {
+        return `${trendNote} Currently RANGING, but not enough history yet to compute the VWAP+EMA sub-strategy.`;
+      }
+      const aboveVwap = price > vwap;
+      const emaBullish = emaFast >= emaSlow;
+      return (
+        `${trendNote} Currently RANGING, so the VWAP+EMA sub-strategy is in control: price (${formatCurrency(price)}) ` +
+        `is ${aboveVwap ? "above" : "below"} its rolling VWAP (${formatCurrency(vwap)}), and the fast EMA ` +
+        `(${emaFast.toFixed(2)}) is ${emaBullish ? "above" : "below"} the slow EMA (${emaSlow.toFixed(2)}). A BUY ` +
+        `needs price to cross from below to above VWAP while the fast EMA is at/above the slow one; a SELL needs ` +
+        `the mirror image below. MACD Trend keeps computing in the background so it stays warm, but is ignored ` +
+        `while ranging.`
       );
     }
 

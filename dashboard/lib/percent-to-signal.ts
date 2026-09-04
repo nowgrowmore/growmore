@@ -30,9 +30,9 @@
 
 type Num = number | string | null | undefined;
 
-function n(value: Num): number | null {
+function n(value: unknown): number | null {
   if (value === null || value === undefined) return null;
-  const parsed = Number(value);
+  const parsed = Number(value as Num);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -51,7 +51,7 @@ const NONE: PercentToSignal = { toBuyPct: null, toSellPct: null };
 export function computePercentToSignal(
   strategyName: string,
   indicators: Record<string, Num> | null | undefined,
-  params: Record<string, number | string> | null | undefined,
+  params: Record<string, unknown> | null | undefined,
   ltp: Num
 ): PercentToSignal {
   const ind = indicators ?? {};
