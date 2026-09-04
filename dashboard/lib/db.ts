@@ -4,6 +4,8 @@ import type {
   BacktestTrade,
   BotConfig,
   EquityCurvePoint,
+  LiveOrder,
+  LivePosition,
   PaperOrder,
   PaperPosition,
 } from "./types";
@@ -104,6 +106,45 @@ export async function getAllPaperPositions(limit = 200): Promise<PaperPosition[]
   return rows as unknown as PaperPosition[];
 }
 
+export async function getAllLivePositions(limit = 200): Promise<LivePosition[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select
+      p.*,
+      s.name as strategy_name,
+      i.symbol as instrument_symbol,
+      i.lot_size as instrument_lot_size,
+      i.contract_expiry as contract_expiry
+    from live_positions p
+    join strategies s on s.id = p.strategy_id
+    join instruments i on i.id = p.instrument_id
+    order by coalesce(p.closed_at, p.opened_at) desc
+    limit ${limit}
+  `;
+  return rows as unknown as LivePosition[];
+}
+
+export async function getLiveTradeLog(limit = 100): Promise<LiveOrder[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select
+      o.*,
+      s.name as strategy_name,
+      i.symbol as instrument_symbol,
+      i.lot_size as instrument_lot_size,
+      i.contract_expiry as contract_expiry,
+      i.exchange_segment as exchange_segment,
+      p.status as position_status
+    from live_orders o
+    join live_positions p on p.id = o.live_position_id
+    join strategies s on s.id = p.strategy_id
+    join instruments i on i.id = p.instrument_id
+    order by o.filled_at desc
+    limit ${limit}
+  `;
+  return rows as unknown as LiveOrder[];
+}
+
 export interface BacktestRunFilters {
   instrumentId?: string;
   strategyId?: string;
@@ -182,10 +223,16 @@ export async function getBotConfigs(): Promise<BotConfig[]> {
     select
       c.*,
       s.name as strategy_name,
-      i.symbol as instrument_symbol
+      s.params as strategy_params,
+      i.symbol as instrument_symbol,
+      st.last_signal as last_signal,
+      st.checked_at as signal_checked_at,
+      st.ltp as signal_ltp,
+      st.indicators as signal_indicators
     from bot_config c
     join strategies s on s.id = c.strategy_id
     join instruments i on i.id = c.instrument_id
+    left join bot_signal_state st on st.bot_config_id = c.id
     order by s.name asc, i.symbol asc
   `;
   return rows as unknown as BotConfig[];

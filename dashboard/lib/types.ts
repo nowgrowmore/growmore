@@ -97,6 +97,43 @@ export interface PaperOrder {
   exchange_segment?: string;
 }
 
+export interface LivePosition {
+  id: string;
+  strategy_id: string;
+  instrument_id: string;
+  status: "open" | "closed";
+  quantity: string;
+  avg_entry_price: string;
+  realized_pnl: string;
+  unrealized_pnl: string;
+  opened_at: string;
+  closed_at: string | null;
+  // Joined convenience fields.
+  strategy_name?: string;
+  instrument_symbol?: string;
+  instrument_lot_size?: number | string;
+  contract_expiry?: string | null;
+}
+
+export interface LiveOrder {
+  id: string;
+  live_position_id: string;
+  side: "buy" | "sell";
+  quantity: string;
+  broker_order_id: string;
+  order_status: string;
+  fill_price: string | null;
+  filled_at: string;
+  pnl: string | null;
+  // Joined convenience fields (populated by getLiveTradeLog()).
+  strategy_name?: string;
+  instrument_symbol?: string;
+  position_status?: "open" | "closed";
+  instrument_lot_size?: number | string;
+  contract_expiry?: string | null;
+  exchange_segment?: string;
+}
+
 export interface BotConfig {
   id: string;
   strategy_id: string;
@@ -105,10 +142,18 @@ export interface BotConfig {
   virtual_capital: string;
   max_position_size: string;
   daily_loss_limit: string;
+  mode: "paper" | "live";
   updated_at: string;
   // Joined convenience fields.
   strategy_name?: string;
   instrument_symbol?: string;
+  strategy_params?: Record<string, number | string> | null;
+  // From bot_signal_state, left-joined -- null until the bot has ticked
+  // this config at least once.
+  last_signal?: "HOLD" | "BUY" | "SELL" | null;
+  signal_checked_at?: string | null;
+  signal_ltp?: string | null;
+  signal_indicators?: Record<string, number | string> | null;
 }
 
 export interface AuditLogEntry {
