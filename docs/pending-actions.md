@@ -94,12 +94,12 @@ Plain-language list of things only you can do or decide. Updated as the project 
 ## Infrastructure setup (one-time)
 - [x] Vercel project `growmore-dashboard` created (team `beautifulforce`), GitHub-connected, Neon
   Postgres provisioned and migrated.
-- [ ] **Upgrade the `beautifulforce` Vercel team to Pro**, then enable Vercel Authentication (SSO)
-  on Production deployments (Project Settings → Deployment Protection → set to cover Production).
-  You said you'll do this "in a few days" (as of 2026-09-02). **Do not merge to `main`/promote to
-  production before this is done** — right now the dashboard has a real write path (enable/disable
-  strategies, edit risk limits) and no access control on production, only on Preview. See
-  `docs/technical-debt.md`.
-- [ ] Once on Pro and Vercel Authentication is enabled for Production, confirm only your account
-  (and anyone else you intend) is a member of the `beautifulforce` Vercel team, since team
-  membership is what gates access.
+- [x] ~~Upgrade the `beautifulforce` Vercel team to Pro, enable Vercel Authentication on
+  Production~~ — **no longer planned** (decided 2026-09-04): the dashboard stays permanently on the
+  `live` branch's Preview URL instead of ever being promoted to `main`/production. Preview deployments
+  already get Vercel Authentication (SSO) on the Hobby plan (confirmed via your own incognito test),
+  and a branch's Preview URL is stable across pushes — so this gets real access control today, without
+  a Pro upgrade or a production promotion decision at all. See `docs/technical-debt.md`.
+- [ ] **Confirm only your account (and anyone else you intend) is a member of the `beautifulforce`
+  Vercel team** — this is what actually gates access to the Preview URL via Vercel Authentication,
+  today, not something waiting on a future Pro upgrade. Worth checking now.

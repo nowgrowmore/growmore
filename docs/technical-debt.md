@@ -180,12 +180,16 @@
   quote on every HOLD (the common case, previously not touched at all), and
   by recomputing it after any partial buy/sell that changes quantity or
   average entry price (`PaperTradingEngine._mark_to_market`).
-- **Production dashboard has no access control yet — do not promote to production until this is
-  resolved.** The dashboard shows trading data and has a real write path (enable/disable strategies,
-  edit risk limits via `bot_config`). Vercel Authentication (SSO) already protects Preview
-  deployments, but extending it to Production requires a paid Vercel plan — attempted via API and
-  confirmed blocked: `"Vercel Authentication is not available on your plan for production
-  deployments"` (the `beautifulforce` team is on Hobby). Owner plans to upgrade to Vercel Pro
-  "in a few days" (as of 2026-09-02) and enable Vercel Authentication on Production at that point —
-  see `docs/pending-actions.md`. Until then, the `main` branch should not be promoted to production,
-  since the live URL would be publicly reachable with no auth.
+- **(Resolved 2026-09-04 by decision, not by fixing production) Production dashboard has no access
+  control, and that's no longer being worked around — `main` is just never promoted.** The dashboard
+  shows trading data and has a real write path (enable/disable strategies, edit risk limits via
+  `bot_config`). Vercel Authentication (SSO) protects Preview deployments on the Hobby plan (confirmed
+  via a real incognito-mode test — an unauthenticated request gets challenged); extending that same
+  protection to Production requires a paid Vercel plan — attempted via API and confirmed blocked:
+  `"Vercel Authentication is not available on your plan for production deployments"` (the
+  `beautifulforce` team is on Hobby). Rather than upgrade to Pro for this, the decision (2026-09-04) is
+  to keep the dashboard permanently on the `live` branch's Preview URL — stable across pushes, already
+  protected by the same Vercel Authentication — and never promote to `main`/production at all. Access
+  is gated by `beautifulforce` Vercel team membership; see `docs/pending-actions.md` to confirm who's
+  on it. `CLAUDE.md`'s "production promotion requires explicit confirmation every time" rule stays in
+  force as a backstop regardless.
