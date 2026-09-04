@@ -83,12 +83,18 @@ def test_macd_trend_requires_positive_signal_period():
 
 def test_macd_trend_debug_state_exposes_macd_and_signal():
     strategy = MacdTrendStrategy(fast_period=2, slow_period=3, signal_period=2)
-    assert strategy.debug_state() == {"macd": None, "signal": None}
+    assert strategy.debug_state() == {"macd": None, "signal": None, "fast_ema": None, "slow_ema": None}
     for close in CLOSES[:4]:  # enough for both macd and signal to be computable
         strategy.on_bar(SimpleNamespace(close=close), position_state=None)
     state = strategy.debug_state()
     assert state["macd"] is not None
     assert state["signal"] is not None
+    # Regression: exposing the raw EMAs (not just the derived macd/signal
+    # gap) lets a caller solve "how much would price need to move for MACD
+    # to cross its signal line" exactly -- the gap alone isn't enough,
+    # since the two EMAs' sensitivity to a new price differs.
+    assert state["fast_ema"] == pytest.approx(strategy._fast_ema)
+    assert state["slow_ema"] == pytest.approx(strategy._slow_ema)
 
 
 def test_macd_trend_state_snapshot_round_trips_the_crossing_reference():

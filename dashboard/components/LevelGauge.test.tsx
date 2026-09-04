@@ -52,4 +52,41 @@ describe("LevelGauge", () => {
       render(<LevelGauge min={5} max={5} markers={[{ value: 5, label: "Only" }]} />)
     ).not.toThrow();
   });
+
+  it("stacks two markers onto separate rows when their values are close enough to collide", () => {
+    // min=-3000, max=3000: MACD=2515.93, Signal=2748.72 differ by ~3.9% of
+    // the domain -- close enough to overlap if placed on the same row.
+    const { container } = render(
+      <LevelGauge
+        min={-3000}
+        max={3000}
+        markers={[
+          { value: 2515.93, label: "MACD" },
+          { value: 2748.72, label: "Signal" },
+        ]}
+      />
+    );
+    const macd = screen.getByText(/MACD: 2515.93/);
+    const signal = screen.getByText(/Signal: 2748.72/);
+    expect(macd.style.top).not.toEqual(signal.style.top);
+    // The taller callout area only kicks in when a collision was detected.
+    expect(container.querySelector(".h-10")).toBeTruthy();
+  });
+
+  it("keeps two far-apart markers on the same row", () => {
+    const { container } = render(
+      <LevelGauge
+        min={-10}
+        max={10}
+        markers={[
+          { value: -8, label: "MACD" },
+          { value: 8, label: "Signal" },
+        ]}
+      />
+    );
+    const macd = screen.getByText(/MACD: -8/);
+    const signal = screen.getByText(/Signal: 8/);
+    expect(macd.style.top).toEqual(signal.style.top);
+    expect(container.querySelector(".h-10")).toBeFalsy();
+  });
 });

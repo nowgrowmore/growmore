@@ -88,7 +88,17 @@ class MacdTrendStrategy(Strategy):
             if self._fast_ema is not None and self._slow_ema is not None
             else None
         )
-        return {"macd": macd, "signal": self._signal}
+        # fast_ema/slow_ema (not just the derived macd/signal gap) let a
+        # caller solve exactly how much price would need to move for MACD
+        # to cross its signal line -- the two EMAs have different
+        # sensitivity to a new price (different k), so the gap alone
+        # doesn't determine that.
+        return {
+            "macd": macd,
+            "signal": self._signal,
+            "fast_ema": self._fast_ema,
+            "slow_ema": self._slow_ema,
+        }
 
     def get_state_snapshot(self) -> dict[str, Any]:
         if self._prev_macd_above_signal is None:

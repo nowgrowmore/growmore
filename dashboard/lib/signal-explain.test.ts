@@ -30,6 +30,23 @@ describe("explainSignal", () => {
     expect(text).toContain("SELL");
   });
 
+  it("appends the exact percent move to the next signal when it's computable", () => {
+    const text = explainSignal(
+      "donchian_breakout",
+      { channel_high: 110, channel_low: 90 },
+      {},
+      100
+    );
+    expect(text).toContain("+10.00% to BUY");
+    expect(text).toContain("-10.00% to SELL");
+  });
+
+  it("omits the percent-move sentence entirely when it isn't computable", () => {
+    const text = explainSignal("sma_crossover", {}, {}, 100);
+    expect(text).not.toContain("to BUY");
+    expect(text).not.toContain("to SELL");
+  });
+
   it("rsi_mean_reversion: already oversold, waiting to recover above the line", () => {
     const text = explainSignal(
       "rsi_mean_reversion",

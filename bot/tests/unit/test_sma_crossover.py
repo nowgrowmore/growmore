@@ -62,12 +62,21 @@ def test_sma_crossover_requires_fast_less_than_slow():
 
 def test_sma_crossover_debug_state_exposes_computed_smas():
     strategy = SmaCrossoverStrategy(fast_period=2, slow_period=3)
-    assert strategy.debug_state() == {"fast_sma": None, "slow_sma": None}
+    assert strategy.debug_state() == {
+        "fast_sma": None, "slow_sma": None, "oldest_fast": None, "oldest_slow": None,
+    }
     for close in CLOSES[:3]:  # enough to compute both SMAs
         strategy.on_bar(SimpleNamespace(close=close), position_state=None)
     state = strategy.debug_state()
     assert state["fast_sma"] == pytest.approx(11.5)  # SMA2(11,12)
     assert state["slow_sma"] == pytest.approx(11.0)  # SMA3(10,11,12)
+    # Regression: oldest_fast/oldest_slow (the values about to roll out of
+    # each window) let a caller solve exactly how much price would need to
+    # move for the fast/slow SMAs to cross. closes=[10,11,12]: oldest_fast
+    # is 11 (about to roll out of the 2-wide fast window), oldest_slow is 10
+    # (the oldest value in the whole 3-wide deque).
+    assert state["oldest_fast"] == pytest.approx(11.0)
+    assert state["oldest_slow"] == pytest.approx(10.0)
 
 
 def test_sma_crossover_state_snapshot_round_trips_the_crossing_reference():

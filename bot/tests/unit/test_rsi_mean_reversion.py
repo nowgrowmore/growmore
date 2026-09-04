@@ -101,7 +101,18 @@ def test_rsi_mean_reversion_requires_positive_period():
 
 def test_rsi_mean_reversion_debug_state_exposes_rsi():
     strategy = RsiMeanReversionStrategy(period=3)
-    assert strategy.debug_state() == {"rsi": None}
+    assert strategy.debug_state() == {
+        "rsi": None, "avg_gain": None, "avg_loss": None, "prev_close": None,
+    }
     for close in [50, 48, 45, 44]:  # enough for the first computable RSI value
         strategy.on_bar(SimpleNamespace(close=close), position_state=None)
-    assert strategy.debug_state()["rsi"] == pytest.approx(0.0)
+    state = strategy.debug_state()
+    assert state["rsi"] == pytest.approx(0.0)
+    # Regression: avg_gain/avg_loss/prev_close (not just the derived rsi
+    # value) let a caller solve exactly how much price would need to move
+    # for RSI to cross the oversold/overbought threshold -- diffs = [-2,-3,-1]
+    # -> avg_gain = 0/3 = 0, avg_loss = (2+3+1)/3 = 2; prev_close is the
+    # close just before the current one (45, not the current 44).
+    assert state["avg_gain"] == pytest.approx(0.0)
+    assert state["avg_loss"] == pytest.approx(2.0)
+    assert state["prev_close"] == pytest.approx(45.0)

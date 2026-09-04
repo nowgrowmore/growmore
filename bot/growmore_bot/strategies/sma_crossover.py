@@ -52,7 +52,21 @@ class SmaCrossoverStrategy(Strategy):
         return Signal(action=SignalAction.HOLD)
 
     def debug_state(self) -> dict[str, Optional[float]]:
-        return {"fast_sma": self._last_fast_sma, "slow_sma": self._last_slow_sma}
+        # oldest_fast/oldest_slow (the values about to roll out of each
+        # window) let a caller solve exactly how much price would need to
+        # move for the fast/slow SMAs to cross.
+        oldest_fast: Optional[float] = None
+        oldest_slow: Optional[float] = None
+        if self._last_fast_sma is not None:
+            closes = list(self._closes)
+            oldest_fast = closes[-self.fast_period]
+            oldest_slow = closes[0]
+        return {
+            "fast_sma": self._last_fast_sma,
+            "slow_sma": self._last_slow_sma,
+            "oldest_fast": oldest_fast,
+            "oldest_slow": oldest_slow,
+        }
 
     def get_state_snapshot(self) -> dict[str, Any]:
         if self._prev_fast_above_slow is None:

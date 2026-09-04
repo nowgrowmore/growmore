@@ -42,6 +42,24 @@ function pct(value: number, min: number, max: number): number {
 
 const defaultFormat = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2));
 
+// Two markers whose callouts sit within this many percentage points of each
+// other visually collide (each label is ~40-90px wide, centered on its
+// point) -- stack the closer one onto a second row instead of overlapping.
+const MARKER_COLLISION_THRESHOLD_PCT = 14;
+
+function assignMarkerRows(positions: number[]): number[] {
+  const order = positions.map((p, i) => i).sort((a, b) => positions[a] - positions[b]);
+  const rows = new Array(positions.length).fill(0);
+  for (let k = 1; k < order.length; k++) {
+    const i = order[k];
+    const prev = order[k - 1];
+    if (positions[i] - positions[prev] < MARKER_COLLISION_THRESHOLD_PCT) {
+      rows[i] = rows[prev] === 0 ? 1 : 0;
+    }
+  }
+  return rows;
+}
+
 export function LevelGauge({
   min,
   max,
@@ -50,15 +68,26 @@ export function LevelGauge({
   markers,
   formatValue = defaultFormat,
 }: LevelGaugeProps) {
+  const markerPositions = markers.map((m) => pct(m.value, min, max));
+  const markerRows = assignMarkerRows(markerPositions);
+  const hasStackedRow = markerRows.some((r) => r === 1);
+
   return (
     <div className="w-full py-4">
-      {/* Marker callouts sit above the track, positioned by value */}
-      <div className="relative h-6">
+      {/* Marker callouts sit above the track, positioned by value. When two
+          markers land close together (e.g. MACD and its signal line nearly
+          crossing) they're stacked onto separate rows instead of the labels
+          overlapping illegibly. */}
+      <div className={`relative ${hasStackedRow ? "h-10" : "h-6"}`}>
         {markers.map((m, i) => (
           <div
             key={i}
             className="absolute -translate-x-1/2 whitespace-nowrap text-xs font-medium tabular-nums"
-            style={{ left: `${pct(m.value, min, max)}%`, color: m.color ?? "var(--text-primary)" }}
+            style={{
+              left: `${markerPositions[i]}%`,
+              top: markerRows[i] === 1 ? "1rem" : 0,
+              color: m.color ?? "var(--text-primary)",
+            }}
           >
             {m.label}: {formatValue(m.value)}
           </div>

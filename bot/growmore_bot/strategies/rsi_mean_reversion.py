@@ -32,6 +32,8 @@ class RsiMeanReversionStrategy(Strategy):
         self.overbought = overbought
         self._closes: deque[float] = deque(maxlen=period + 1)
         self._prev_rsi: Optional[float] = None
+        self._avg_gain: Optional[float] = None
+        self._avg_loss: Optional[float] = None
 
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         self._closes.append(float(bar.close))
@@ -43,6 +45,8 @@ class RsiMeanReversionStrategy(Strategy):
         diffs = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
         avg_gain = sum(d for d in diffs if d > 0) / self.period
         avg_loss = sum(-d for d in diffs if d < 0) / self.period
+        self._avg_gain = avg_gain
+        self._avg_loss = avg_loss
 
         if avg_gain == 0:
             rsi = 0.0
@@ -65,7 +69,16 @@ class RsiMeanReversionStrategy(Strategy):
         return Signal(action=SignalAction.HOLD)
 
     def debug_state(self) -> dict[str, Optional[float]]:
-        return {"rsi": self._prev_rsi}
+        # avg_gain/avg_loss/prev_close (not just the derived rsi value) let a
+        # caller solve exactly how much price would need to move for RSI to
+        # cross the oversold/overbought threshold.
+        prev_close = self._closes[-2] if len(self._closes) >= 2 else None
+        return {
+            "rsi": self._prev_rsi,
+            "avg_gain": self._avg_gain,
+            "avg_loss": self._avg_loss,
+            "prev_close": prev_close,
+        }
 
     def get_state_snapshot(self) -> dict[str, Any]:
         if self._prev_rsi is None:

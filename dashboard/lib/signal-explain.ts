@@ -1,4 +1,5 @@
 import { formatCurrency } from "./format";
+import { computePercentToSignal } from "./percent-to-signal";
 
 /** Plain-language "why is it doing that" explanation for a strategy's
  * current HOLD/BUY/SELL status, built from its live indicator values
@@ -18,6 +19,21 @@ function n(value: Num): number | null {
 }
 
 export function explainSignal(
+  strategyName: string,
+  indicators: Record<string, Num> | null | undefined,
+  params: Record<string, number | string> | null | undefined,
+  ltp: Num
+): string {
+  const base = explainSignalBase(strategyName, indicators, params, ltp);
+  const { toBuyPct, toSellPct } = computePercentToSignal(strategyName, indicators, params, ltp);
+  const moveNotes: string[] = [];
+  if (toBuyPct !== null) moveNotes.push(`${toBuyPct >= 0 ? "+" : ""}${toBuyPct.toFixed(2)}% to BUY`);
+  if (toSellPct !== null) moveNotes.push(`${toSellPct >= 0 ? "+" : ""}${toSellPct.toFixed(2)}% to SELL`);
+  if (moveNotes.length === 0) return base;
+  return `${base} That's ${moveNotes.join(" / ")} from here.`;
+}
+
+function explainSignalBase(
   strategyName: string,
   indicators: Record<string, Num> | null | undefined,
   params: Record<string, number | string> | null | undefined,
