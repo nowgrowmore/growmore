@@ -1,8 +1,10 @@
 import postgres from "postgres";
 import type {
+  AuditLogEntry,
   BacktestRun,
   BacktestTrade,
   BotConfig,
+  BotStatus,
   EquityCurvePoint,
   LiveOrder,
   LivePosition,
@@ -237,7 +239,8 @@ export async function getBotConfigs(): Promise<BotConfig[]> {
       st.checked_at as signal_checked_at,
       st.ltp as signal_ltp,
       st.prev_close as signal_prev_close,
-      st.indicators as signal_indicators
+      st.indicators as signal_indicators,
+      st.daily_pnl as signal_daily_pnl
     from bot_config c
     join strategies s on s.id = c.strategy_id
     join instruments i on i.id = c.instrument_id
@@ -303,4 +306,20 @@ export async function updateBotConfigRiskParams(id: string, params: RiskParams):
       )
     `,
   ]);
+}
+
+export async function getBotStatus(): Promise<BotStatus | null> {
+  const sql = getClient();
+  const rows = await sql`select * from bot_status limit 1`;
+  return (rows[0] as unknown as BotStatus) ?? null;
+}
+
+export async function getAuditLog(limit = 200): Promise<AuditLogEntry[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from audit_log
+    order by ts desc
+    limit ${limit}
+  `;
+  return rows as unknown as AuditLogEntry[];
 }

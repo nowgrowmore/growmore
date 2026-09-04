@@ -479,7 +479,9 @@ def test_process_tick_records_signal_state_on_hold():
     session.query.return_value.filter_by.return_value.one_or_none.return_value = None
 
     engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
-    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy, cumulative_daily_pnl=-2500.0
+    )
 
     added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], BotSignalState)]
     assert len(added) == 1
@@ -487,6 +489,7 @@ def test_process_tick_records_signal_state_on_hold():
     assert added[0].last_signal == "HOLD"
     assert float(added[0].ltp) == pytest.approx(155000)
     assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
+    assert float(added[0].daily_pnl) == pytest.approx(-2500.0)
     # quote.close is Dhan's previous-trading-day close (confirmed against a
     # real quote during live hours 2026-09-04) -- lets the dashboard compute
     # today's % change without its own live Dhan connection.

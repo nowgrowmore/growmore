@@ -228,6 +228,11 @@ class BotSignalState(Base):
     # yet, confirmed against a real quote 2026-09-04). Lets the dashboard show
     # today's % change without needing its own live Dhan connection.
     prev_close: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Today's cumulative realized P&L for this (strategy, instrument) pair --
+    # the same value the daily_loss_limit risk guard checks against every
+    # tick (see scheduler.run._cumulative_daily_pnl). Lets the dashboard show
+    # progress toward the limit before it trips, not just after.
+    daily_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     # Strategy.debug_state()'s raw dict, e.g. {"macd": -1113.34, "signal": 363.55}.
     indicators: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
     # Strategy.get_state_snapshot()'s raw dict, e.g. {"prev_macd_above_signal":
@@ -305,6 +310,24 @@ class AuditLog(Base):
     payload: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
 
 
+class BotStatus(Base):
+    """Singleton row (always exactly one) -- the scheduler upserts this
+    every tick regardless of market hours, so the dashboard can show
+    whether the process is actually alive ("last tick N minutes ago") and
+    whether the real-money kill switch is armed, without SSHing into the
+    host. Also carries the real account balance (read-only, GET
+    /fundlimit) so the dashboard doesn't need its own Dhan connection.
+    """
+
+    __tablename__ = "bot_status"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    live_trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_tick_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_balance: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    utilized_margin: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+
 __all__ = [
     "Base",
     "Instrument",
@@ -314,6 +337,10 @@ __all__ = [
     "EquityCurvePoint",
     "PaperPosition",
     "PaperOrder",
+    "LivePosition",
+    "LiveOrder",
     "BotConfig",
+    "BotSignalState",
     "AuditLog",
+    "BotStatus",
 ]

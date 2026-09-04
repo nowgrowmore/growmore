@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import { getBotStatus } from "@/lib/db";
+import { BotStatusBanner } from "@/components/BotStatusBanner";
+import { AutoRefresh } from "@/components/AutoRefresh";
 
 export const metadata: Metadata = {
   title: "Growmore Dashboard",
@@ -12,21 +15,23 @@ const NAV_ITEMS = [
   { href: "/backtests", label: "Backtests" },
   { href: "/trades", label: "Trade Log" },
   { href: "/strategies", label: "Strategies" },
+  { href: "/audit", label: "Audit Log" },
 ] as const;
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const status = await getBotStatus().catch(() => null);
   return (
     <html lang="en">
       <body className="min-h-screen font-sans text-[15px]">
+        <AutoRefresh />
         <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
-          <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <header className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h1 className="text-lg font-semibold text-[color:var(--text-primary)]">
                 Growmore
               </h1>
               <p className="text-sm text-[color:var(--text-secondary)]">
-                MCX paper-trading analytics — read-only against the bot&apos;s Neon Postgres
-                schema.
+                MCX trading analytics — read-only against the bot&apos;s Neon Postgres schema.
               </p>
             </div>
             <nav
@@ -44,6 +49,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               ))}
             </nav>
           </header>
+          <div className="mb-6">
+            <BotStatusBanner status={status} />
+          </div>
           <main>{children}</main>
         </div>
       </body>

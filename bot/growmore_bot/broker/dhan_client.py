@@ -35,6 +35,10 @@ _ALLOWED_SDK_METHODS = frozenset(
         "ticker_data",
         "historical_daily_data",
         "intraday_minute_data",
+        # Account-info read (GET /fundlimit) -- balance/margin only, never
+        # mutates anything. Added 2026-09-04 for the dashboard's fund
+        # balance display; still no order-placement capability whatsoever.
+        "get_fund_limits",
     }
 )
 
@@ -59,6 +63,16 @@ class Quote:
     high: float
     low: float
     close: float
+
+
+@dataclass(frozen=True)
+class FundLimits:
+    # Field names match Dhan's own real response verbatim (including their
+    # "availabelBalance" typo) at the API boundary; this dataclass exposes
+    # correctly-spelled attribute names instead.
+    available_balance: float
+    utilized_amount: float
+    withdrawable_balance: float
 
 
 @dataclass(frozen=True)
@@ -194,6 +208,21 @@ class DhanClient:
             for i, ts in enumerate(timestamps)
         ]
 
+    def get_fund_limits(self) -> FundLimits:
+        """Real account balance/margin (GET /fundlimit) -- read-only, no
+        order-placement capability whatsoever. Field names confirmed against
+        a real response 2026-09-04 (including Dhan's own "availabelBalance"
+        typo at the wire boundary).
+        """
+        response = self._sdk.get_fund_limits()
+        self._raise_if_failed(response)
+        data = response["data"] if "data" in response else response
+        return FundLimits(
+            available_balance=float(data["availabelBalance"]),
+            utilized_amount=float(data["utilizedAmount"]),
+            withdrawable_balance=float(data["withdrawableBalance"]),
+        )
+
     @staticmethod
     def _raise_if_failed(response: dict) -> None:
         # Real dhanhq responses use {"status": "success"/"failure", "data":...,
@@ -209,4 +238,4 @@ class DhanClient:
             )
 
 
-__all__ = ["DhanClient", "DhanApiError", "DhanTokenExpiredError", "Quote", "Bar"]
+__all__ = ["DhanClient", "DhanApiError", "DhanTokenExpiredError", "Quote", "Bar", "FundLimits"]

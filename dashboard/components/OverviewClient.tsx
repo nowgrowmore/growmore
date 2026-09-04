@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { computePctChangeToday, formatCurrency, formatPercent, summarizePositions, toNumber } from "@/lib/format";
 import { SummaryCards } from "@/components/SummaryCards";
 import { ModeFilter } from "@/components/ModeFilter";
@@ -32,6 +33,7 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
             <th className="px-3 py-2 font-medium text-right">Today</th>
             <th className="px-3 py-2 font-medium text-right">Notional exposure</th>
             <th className="px-3 py-2 font-medium text-right">Unrealized P&amp;L</th>
+            <th className="px-3 py-2 font-medium"></th>
           </tr>
         </thead>
         <tbody>
@@ -82,6 +84,14 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
                   }`}
                 >
                   {formatCurrency(unrealized, { signDisplay: true })}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <Link
+                    href={`/trades?position=${p.id}`}
+                    className="text-xs font-medium text-[color:var(--series-1)] hover:underline"
+                  >
+                    Fills
+                  </Link>
                 </td>
               </tr>
             );

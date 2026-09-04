@@ -185,6 +185,47 @@ export function sortBacktestRuns(
   });
 }
 
+/** "3 min ago" / "2h ago" style relative label, falling back to a full
+ * timestamp past 24h. `null`/`undefined` reads as "never" (bot hasn't
+ * ticked yet). */
+export function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(iso).toLocaleString();
+}
+
+export interface DailyLossProgress {
+  /** 0-100+, how much of the daily loss limit has been used (loss only --
+   * a positive daily_pnl reads as 0% used, not negative). */
+  usedPct: number;
+  /** Today's realized P&L, as a plain number. */
+  dailyPnl: number;
+  limit: number;
+  severity: "ok" | "warning" | "critical";
+}
+
+/** How much of a config's daily_loss_limit has been eaten into by today's
+ * realized P&L. `null` when there's no signal state yet (bot hasn't ticked
+ * today) or the limit is 0/unset (nothing meaningful to show). */
+export function computeDailyLossProgress(
+  dailyPnl: string | number | null | undefined,
+  dailyLossLimit: string | number | null | undefined
+): DailyLossProgress | null {
+  const limit = toNumber(dailyLossLimit);
+  if (!limit || dailyPnl === null || dailyPnl === undefined || dailyPnl === "") return null;
+  const pnl = toNumber(dailyPnl);
+  const loss = Math.max(0, -pnl);
+  const usedPct = (loss / limit) * 100;
+  const severity: DailyLossProgress["severity"] =
+    usedPct >= 100 ? "critical" : usedPct >= 70 ? "warning" : "ok";
+  return { usedPct, dailyPnl: pnl, limit, severity };
+}
+
 export function filterBacktestRuns(
   runs: BacktestRun[],
   filters: { instrumentId?: string; strategyId?: string }

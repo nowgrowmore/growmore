@@ -109,6 +109,48 @@ def test_get_quote_raises_on_api_failure_status(instrument):
 
 
 @responses.activate
+def test_get_fund_limits_parses_real_response_shape():
+    # Schema confirmed against a real GET /fundlimit call 2026-09-04 --
+    # note Dhan's own typo, "availabelBalance", used verbatim since that's
+    # the real field name, not ours to "fix".
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/fundlimit",
+        json={
+            "dhanClientId": "1113562866",
+            "availabelBalance": 217009.94,
+            "sodLimit": 249411.19,
+            "collateralAmount": 0.0,
+            "receiveableAmount": 0.0,
+            "utilizedAmount": 32401.0,
+            "blockedPayoutAmount": 0.0,
+            "withdrawableBalance": 217008.94,
+        },
+        status=200,
+    )
+    client = _make_client()
+    funds = client.get_fund_limits()
+
+    assert funds.available_balance == pytest.approx(217009.94)
+    assert funds.utilized_amount == pytest.approx(32401.0)
+
+
+@responses.activate
+def test_get_fund_limits_raises_on_api_failure_status():
+    from growmore_bot.broker.dhan_client import DhanApiError
+
+    responses.add(
+        responses.GET,
+        f"{API_BASE}/fundlimit",
+        json={"errorCode": "DH-905", "errorMessage": "Invalid token"},
+        status=401,
+    )
+    client = _make_client()
+    with pytest.raises(DhanApiError):
+        client.get_fund_limits()
+
+
+@responses.activate
 def test_get_historical_ohlc_calls_historical_daily_endpoint(instrument):
     responses.add(
         responses.POST,

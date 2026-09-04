@@ -161,6 +161,15 @@ export interface BotConfig {
   signal_ltp?: string | null;
   signal_prev_close?: string | null;
   signal_indicators?: Record<string, number | string> | null;
+  signal_daily_pnl?: string | null;
+}
+
+export interface BotStatus {
+  id: string;
+  live_trading_enabled: boolean;
+  last_tick_at: string;
+  available_balance: string | null;
+  utilized_margin: string | null;
 }
 
 export interface AuditLogEntry {

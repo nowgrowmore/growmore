@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "bot_config",
     "bot_signal_state",
     "audit_log",
+    "bot_status",
 }
 
 

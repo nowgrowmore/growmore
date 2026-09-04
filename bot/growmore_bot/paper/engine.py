@@ -104,7 +104,7 @@ class PaperTradingEngine:
         )
         signal = strategy.on_bar(quote, position_state)
         computed = _format_debug_state(strategy)
-        self._record_signal_state(config, signal, quote, strategy, now)
+        self._record_signal_state(config, signal, quote, strategy, now, cumulative_daily_pnl)
 
         if signal.action == SignalAction.HOLD:
             # Mark the open position to market against this tick's real
@@ -138,7 +138,13 @@ class PaperTradingEngine:
             )
 
     def _record_signal_state(
-        self, config: Any, signal: Any, quote: Any, strategy: Strategy, now: datetime
+        self,
+        config: Any,
+        signal: Any,
+        quote: Any,
+        strategy: Strategy,
+        now: datetime,
+        cumulative_daily_pnl: float = 0.0,
     ) -> None:
         """Upsert this bot_config's "what did the strategy just see" row --
         lets the dashboard show live HOLD/BUY/SELL status and the computed
@@ -157,6 +163,7 @@ class PaperTradingEngine:
                     checked_at=now,
                     ltp=quote.ltp,
                     prev_close=getattr(quote, "close", None),
+                    daily_pnl=cumulative_daily_pnl,
                     indicators=strategy.debug_state(),
                     crossing_state=strategy.get_state_snapshot(),
                 )
@@ -166,6 +173,7 @@ class PaperTradingEngine:
             existing.checked_at = now
             existing.ltp = quote.ltp
             existing.prev_close = getattr(quote, "close", None)
+            existing.daily_pnl = cumulative_daily_pnl
             existing.indicators = strategy.debug_state()
             existing.crossing_state = strategy.get_state_snapshot()
             self.session.add(existing)

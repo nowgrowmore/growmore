@@ -8,6 +8,7 @@ function toUnifiedRow(order: PaperOrder | LiveOrder, tradeType: "paper" | "live"
   const isLive = tradeType === "live";
   return {
     id: order.id,
+    positionId: isLive ? (order as LiveOrder).live_position_id : (order as PaperOrder).paper_position_id,
     tradeType,
     filled_at: order.filled_at,
     strategy_name: order.strategy_name,
@@ -25,8 +26,16 @@ function toUnifiedRow(order: PaperOrder | LiveOrder, tradeType: "paper" | "live"
   };
 }
 
-export default async function TradesPage() {
-  const [paperOrders, liveOrders] = await Promise.all([getTradeLog(200), getLiveTradeLog(200)]);
+export default async function TradesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ position?: string }>;
+}) {
+  const [paperOrders, liveOrders, { position }] = await Promise.all([
+    getTradeLog(200),
+    getLiveTradeLog(200),
+    searchParams,
+  ]);
   const rows = [
     ...paperOrders.map((o) => toUnifiedRow(o, "paper")),
     ...liveOrders.map((o) => toUnifiedRow(o, "live")),
@@ -40,7 +49,7 @@ export default async function TradesPage() {
         Contract details (lot size, expiry) are shown inline so there&rsquo;s no need to cross-check
         Dhan&rsquo;s own UI for them.
       </p>
-      <TradesClient rows={rows} />
+      <TradesClient rows={rows} positionFilter={position} />
     </div>
   );
 }

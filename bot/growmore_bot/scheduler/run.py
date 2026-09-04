@@ -7,7 +7,8 @@ does anything when `is_market_open()` says MCX is trading.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
@@ -28,6 +29,43 @@ def tick(run_all_configs: Callable[[], None], now: Optional[datetime] = None) ->
         logger.debug("Market closed at %s, skipping tick", now.isoformat())
         return
     run_all_configs()
+
+
+def _update_bot_status(session: Any, live_trading_enabled: bool, dhan_client: Any, now: datetime) -> None:
+    """Upsert the singleton bot_status row -- called every tick regardless
+    of market hours, so "last tick N minutes ago" reflects real process
+    health, not just "did we trade." A failed fund-limits fetch (network
+    hiccup, etc.) is logged and swallowed, keeping the last known balance --
+    it must never crash the tick or hide that the process is alive.
+    """
+    from growmore_bot.persistence.models import BotStatus
+
+    status = session.query(BotStatus).first()
+    available_balance = status.available_balance if status is not None else None
+    utilized_margin = status.utilized_margin if status is not None else None
+    try:
+        funds = dhan_client.get_fund_limits()
+        available_balance = funds.available_balance
+        utilized_margin = funds.utilized_amount
+    except Exception:
+        logger.exception("Failed to fetch fund limits -- bot_status keeps its last known balance")
+
+    if status is None:
+        session.add(
+            BotStatus(
+                id=uuid.uuid4(),
+                live_trading_enabled=live_trading_enabled,
+                last_tick_at=now,
+                available_balance=available_balance,
+                utilized_margin=utilized_margin,
+            )
+        )
+    else:
+        status.live_trading_enabled = live_trading_enabled
+        status.last_tick_at = now
+        status.available_balance = available_balance
+        status.utilized_margin = utilized_margin
+        session.add(status)
 
 
 def _cumulative_daily_pnl(
@@ -368,6 +406,19 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
         dhan_client.refresh_access_token_if_needed()
 
         with session_scope() as session:
+            # Always runs, regardless of market hours -- staleness/health
+            # must reflect the process being alive, not just "did we trade."
+            # Committed immediately (not just at the end of this session's
+            # transaction) so it stays accurate even if something later in
+            # this same tick fails and rolls the rest back.
+            _update_bot_status(
+                session,
+                live_trading_enabled=settings.live_trading_enabled,
+                dhan_client=dhan_client,
+                now=datetime.now(timezone.utc),
+            )
+            session.commit()
+
             order_client = None
             if settings.live_trading_enabled:
                 # Only ever constructed when the global kill switch is on --

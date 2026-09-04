@@ -14,6 +14,7 @@ const MODE_OPTIONS: { value: Mode; label: string }[] = [
 
 export interface UnifiedTradeRow {
   id: string;
+  positionId: string;
   tradeType: "paper" | "live";
   filled_at: string;
   strategy_name?: string;
@@ -35,12 +36,28 @@ function formatExpiry(expiry: string | null | undefined): string {
   return new Date(expiry).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 }
 
-export function TradesClient({ rows }: { rows: UnifiedTradeRow[] }) {
+export function TradesClient({
+  rows,
+  positionFilter,
+}: {
+  rows: UnifiedTradeRow[];
+  positionFilter?: string;
+}) {
   const [mode, setMode] = useState<Mode>("live");
-  const filtered = mode === "all" ? rows : rows.filter((r) => r.tradeType === mode);
+  const filtered = (mode === "all" ? rows : rows.filter((r) => r.tradeType === mode)).filter((r) =>
+    positionFilter ? r.positionId === positionFilter : true
+  );
 
   return (
     <div className="flex flex-col gap-4">
+      {positionFilter && (
+        <div className="flex items-center gap-2 rounded-lg border border-[color:var(--border-hairline)] bg-[color:var(--surface-1)] px-3 py-2 text-sm">
+          <span className="text-[color:var(--text-secondary)]">Showing fills for one position only.</span>
+          <a href="/trades" className="font-medium text-[color:var(--series-1)] hover:underline">
+            Clear filter
+          </a>
+        </div>
+      )}
       <ModeFilter value={mode} onChange={setMode} options={MODE_OPTIONS} />
 
       {filtered.length === 0 ? (

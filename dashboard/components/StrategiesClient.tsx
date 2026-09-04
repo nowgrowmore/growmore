@@ -1,7 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { computePctChangeToday, formatPercent, toNumber } from "@/lib/format";
+import {
+  computeDailyLossProgress,
+  computePctChangeToday,
+  formatCurrency,
+  formatPercent,
+  timeAgo,
+  toNumber,
+} from "@/lib/format";
 import { explainSignal } from "@/lib/signal-explain";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
@@ -36,15 +43,15 @@ function formatIndicators(indicators: Record<string, number | string> | null | u
     .join("  ·  ");
 }
 
-function timeAgo(iso: string | null | undefined): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  const minutes = Math.round(ms / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return new Date(iso).toLocaleString();
+function lossBarColor(severity: "ok" | "warning" | "critical"): string {
+  switch (severity) {
+    case "critical":
+      return "bg-[color:var(--critical-text)]";
+    case "warning":
+      return "bg-[color:var(--series-4)]";
+    default:
+      return "bg-[color:var(--success-text)]";
+  }
 }
 
 interface StrategiesClientProps {
@@ -149,6 +156,32 @@ export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: Strate
                     </p>
                   )}
                 </div>
+
+                {(() => {
+                  const progress = computeDailyLossProgress(
+                    config.signal_daily_pnl,
+                    config.daily_loss_limit
+                  );
+                  if (!progress) return null;
+                  return (
+                    <div>
+                      <div className="mb-1 flex items-center justify-between text-xs text-[color:var(--text-secondary)]">
+                        <span>Daily loss limit</span>
+                        <span className="tabular-nums">
+                          {formatCurrency(Math.max(0, -progress.dailyPnl))} / {formatCurrency(progress.limit)}
+                          {" · "}
+                          {progress.usedPct.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-[color:var(--gridline)]">
+                        <div
+                          className={`h-full rounded-full ${lossBarColor(progress.severity)}`}
+                          style={{ width: `${Math.min(100, progress.usedPct)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}

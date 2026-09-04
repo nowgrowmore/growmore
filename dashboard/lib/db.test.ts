@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __setTestClient,
+  getAuditLog,
   getBotConfigs,
+  getBotStatus,
   getOpenPaperPositions,
   setBotConfigEnabled,
   updateBotConfigRiskParams,
@@ -85,6 +87,40 @@ describe("setBotConfigEnabled", () => {
 
     const auditCallParams = fakeSql.calls[1];
     expect(JSON.stringify(auditCallParams)).toContain("strategy_disabled");
+  });
+});
+
+describe("getBotStatus", () => {
+  it("returns the singleton row when one exists", async () => {
+    const fakeRows = [{ id: "status-1", live_trading_enabled: true }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getBotStatus();
+
+    expect(result).toBe(fakeRows[0]);
+  });
+
+  it("returns null when no row exists yet", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getBotStatus();
+
+    expect(result).toBeNull();
+  });
+});
+
+describe("getAuditLog", () => {
+  it("returns the audit_log rows", async () => {
+    const fakeRows = [{ id: "log-1", event_type: "strategy_enabled" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getAuditLog();
+
+    expect(result).toBe(fakeRows);
+    expect(fakeSql).toHaveBeenCalledTimes(1);
   });
 });
 

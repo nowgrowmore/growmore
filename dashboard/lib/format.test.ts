@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BacktestRun, PaperPosition } from "./types";
 import {
+  computeDailyLossProgress,
   computePctChangeToday,
   filterBacktestRuns,
   formatCurrency,
@@ -12,6 +13,7 @@ import {
   formatStrategyParamsTooltip,
   sortBacktestRuns,
   summarizePositions,
+  timeAgo,
   toNumber,
 } from "./format";
 
@@ -75,6 +77,61 @@ describe("formatCurrency", () => {
 
   it("adds an explicit + sign when signDisplay is requested", () => {
     expect(formatCurrency(500, { signDisplay: true }).startsWith("+")).toBe(true);
+  });
+});
+
+describe("timeAgo", () => {
+  it("reads 'never' for null/undefined", () => {
+    expect(timeAgo(null)).toBe("never");
+    expect(timeAgo(undefined)).toBe("never");
+  });
+
+  it("reads 'just now' for a timestamp seconds ago", () => {
+    expect(timeAgo(new Date(Date.now() - 5_000).toISOString())).toBe("just now");
+  });
+
+  it("reads minutes ago for a timestamp under an hour old", () => {
+    expect(timeAgo(new Date(Date.now() - 5 * 60_000).toISOString())).toBe("5 min ago");
+  });
+
+  it("reads hours ago for a timestamp under a day old", () => {
+    expect(timeAgo(new Date(Date.now() - 3 * 3_600_000).toISOString())).toBe("3h ago");
+  });
+});
+
+describe("computeDailyLossProgress", () => {
+  it("returns null when there's no signal state yet", () => {
+    expect(computeDailyLossProgress(null, 15000)).toBeNull();
+    expect(computeDailyLossProgress(undefined, 15000)).toBeNull();
+  });
+
+  it("returns null when the limit is 0/unset", () => {
+    expect(computeDailyLossProgress(-1000, 0)).toBeNull();
+    expect(computeDailyLossProgress(-1000, null)).toBeNull();
+  });
+
+  it("computes used% from a negative (losing) daily_pnl", () => {
+    const result = computeDailyLossProgress(-7500, 15000);
+    expect(result).not.toBeNull();
+    expect(result!.usedPct).toBe(50);
+    expect(result!.severity).toBe("ok");
+  });
+
+  it("treats a positive (winning) daily_pnl as 0% used, not negative", () => {
+    const result = computeDailyLossProgress(2000, 15000);
+    expect(result!.usedPct).toBe(0);
+    expect(result!.severity).toBe("ok");
+  });
+
+  it("flags warning severity at 70%+ used", () => {
+    const result = computeDailyLossProgress(-11000, 15000);
+    expect(result!.severity).toBe("warning");
+  });
+
+  it("flags critical severity at/over the limit", () => {
+    const result = computeDailyLossProgress(-15000, 15000);
+    expect(result!.usedPct).toBe(100);
+    expect(result!.severity).toBe("critical");
   });
 });
 
