@@ -447,6 +447,86 @@ def test_run_all_enabled_configs_restores_persisted_crossing_state(session, monk
     assert received == [{"some_reference": True}]
 
 
+def test_intraday_flatten_strategy_does_not_restore_crossing_state_from_a_prior_day(session, monkeypatch):
+    # Regression: found via independent code review 2026-09-04.
+    # vwap_session_bounce's crossing state (prev_above_vwap) is only
+    # meaningful WITHIN one session -- VWAP and CPR both reset every trading
+    # day. Restoring yesterday's crossing reference on the first live tick
+    # of a NEW day could register a "crossing" that never actually happened
+    # intraday today. This verifies the wiring: a persisted crossing_state
+    # from a PRIOR calendar day is NOT passed to load_state_snapshot.
+    from growmore_bot.persistence.models import BotSignalState
+    from growmore_bot.strategies.vwap_session_bounce import VwapSessionBounceStrategy
+
+    strategy, instrument, config = _make_strategy_instrument_config(session, "vwap_session_bounce", {})
+    now = datetime(2026, 9, 2, 12, 0, tzinfo=MCX_TZ)  # midday -- nowhere near close
+    yesterday = now - timedelta(days=1)
+    session.add(
+        BotSignalState(
+            id=uuid.uuid4(), bot_config_id=config.id, last_signal="HOLD",
+            checked_at=yesterday, ltp=100, indicators={},
+            crossing_state={"prev_above_vwap": True},
+        )
+    )
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=108, open=100, high=108, low=99, close=100, vwap=107
+    )
+    dhan_client.get_historical_ohlc.return_value = []
+
+    received: list[dict] = []
+    original_load = VwapSessionBounceStrategy.load_state_snapshot
+
+    def _spy_load(self, snapshot):
+        received.append(snapshot)
+        return original_load(self, snapshot)
+
+    monkeypatch.setattr(VwapSessionBounceStrategy, "load_state_snapshot", _spy_load)
+
+    run_all_enabled_configs(session, dhan_client, now=now)
+
+    assert received == []
+
+
+def test_intraday_flatten_strategy_restores_crossing_state_from_the_same_day(session, monkeypatch):
+    # The same-day case must still restore -- multiple ticks within one
+    # session need the crossing reference to detect a real intraday cross.
+    from growmore_bot.persistence.models import BotSignalState
+    from growmore_bot.strategies.vwap_session_bounce import VwapSessionBounceStrategy
+
+    strategy, instrument, config = _make_strategy_instrument_config(session, "vwap_session_bounce", {})
+    now = datetime(2026, 9, 2, 12, 0, tzinfo=MCX_TZ)  # midday -- nowhere near close
+    session.add(
+        BotSignalState(
+            id=uuid.uuid4(), bot_config_id=config.id, last_signal="HOLD",
+            checked_at=now - timedelta(minutes=5), ltp=100, indicators={},
+            crossing_state={"prev_above_vwap": True},
+        )
+    )
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(
+        ltp=108, open=100, high=108, low=99, close=100, vwap=107
+    )
+    dhan_client.get_historical_ohlc.return_value = []
+
+    received: list[dict] = []
+    original_load = VwapSessionBounceStrategy.load_state_snapshot
+
+    def _spy_load(self, snapshot):
+        received.append(snapshot)
+        return original_load(self, snapshot)
+
+    monkeypatch.setattr(VwapSessionBounceStrategy, "load_state_snapshot", _spy_load)
+
+    run_all_enabled_configs(session, dhan_client, now=now)
+
+    assert received == [{"prev_above_vwap": True}]
+
+
 def test_warm_up_strategy_replays_historical_bars_in_order():
     seen_closes = []
 

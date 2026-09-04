@@ -344,7 +344,25 @@ def run_all_enabled_configs(
             session.query(BotSignalState).filter_by(bot_config_id=config.id).one_or_none()
         )
         if signal_state is not None and signal_state.crossing_state:
-            strategy.load_state_snapshot(signal_state.crossing_state)
+            # A strategy whose own logic is single-day (requires_intraday_
+            # flatten=True, e.g. vwap_session_bounce -- its VWAP/CPR both
+            # reset every session) must NOT carry yesterday's crossing
+            # reference into today: warm-up derives today's fresh CPR from
+            # yesterday's bar, but the restored `prev_above_vwap` would still
+            # be yesterday's, so the very first live quote of a new day could
+            # register a "crossing" that never actually happened intraday.
+            # Found via independent code review 2026-09-04. Multi-day
+            # strategies (SMA/MACD/RSI/etc.) are unaffected -- their crossing
+            # reference is deliberately meant to persist across the day
+            # boundary (see the comment above this block).
+            stale_intraday_state = (
+                getattr(strategy, "requires_intraday_flatten", False)
+                and signal_state.checked_at is not None
+                and signal_state.checked_at.astimezone(MCX_TIMEZONE).date()
+                != now.astimezone(MCX_TIMEZONE).date()
+            )
+            if not stale_intraday_state:
+                strategy.load_state_snapshot(signal_state.crossing_state)
 
         if is_live:
             from growmore_bot.persistence.models import LiveOrder

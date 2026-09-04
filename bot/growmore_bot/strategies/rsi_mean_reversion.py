@@ -48,7 +48,15 @@ class RsiMeanReversionStrategy(Strategy):
         self._avg_gain = avg_gain
         self._avg_loss = avg_loss
 
-        if avg_gain == 0:
+        if avg_gain == 0 and avg_loss == 0:
+            # A perfectly flat window (every diff exactly 0) makes RS = 0/0,
+            # undefined -- not "maximally oversold". Convention is neutral
+            # (50), matching an unmoving market having no directional bias.
+            # Found via independent code review 2026-09-04: checking
+            # avg_gain == 0 alone (before avg_loss) reported this case as
+            # rsi = 0.0, fabricating a BUY on the very next up-tick.
+            rsi = 50.0
+        elif avg_gain == 0:
             rsi = 0.0
         elif avg_loss == 0:
             rsi = 100.0

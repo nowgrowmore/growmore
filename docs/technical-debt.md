@@ -1,5 +1,46 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-04) Independent double code review of every strategy algorithm found and
+  fixed 5 real bugs.** Given real money is ultimately at stake, two independent subagents each did a
+  full from-scratch review of every file in `strategies/` (recomputing formulas and test docstrings
+  by hand, not trusting existing comments), cross-checked against each other. Confirmed and fixed:
+  1. **`vwap_session_bounce.py` / `dhan_client.py`**: a real `average_price: 0` from Dhan (no trades
+     printed yet this session) was parsed as `Quote.vwap = 0.0`, not `None` -- `ltp > 0.0` is always
+     true, fabricating a VWAP "crossing" (and a BUY/SELL) the instant real trades start printing.
+     Fixed: a falsy/zero `average_price` is now treated the same as genuinely absent.
+  2. **`donchian_breakout.py`**: had no crossing-state snapshot at all -- the only real signalling
+     strategy without one. Re-signalled BUY/SELL on every single live tick the price stayed outside
+     the channel (a fresh strategy instance is rebuilt every 5-minute tick), either freezing
+     `unrealized_pnl` (the repeat signal gets rejected by `max_position_size`, which skips
+     mark-to-market) or silently pyramiding a position. Fixed with the same
+     capture-previous-state-before-crossing pattern every other strategy already uses. Not currently
+     used by any `bot_config`, so no live/paper harm occurred -- backtest results are unaffected
+     (the backtest engine already no-ops a repeat BUY-while-long/SELL-while-flat).
+  3. **`rsi_mean_reversion.py`**: a perfectly flat price window (every diff exactly 0, both
+     `avg_gain`/`avg_loss` zero) reported RSI as 0.0 (maximally oversold) instead of the conventional
+     neutral 50 -- fabricating a BUY on the very next up-tick. Realistic on MCX: an illiquid
+     far-month contract can print an identical settlement close for several sessions.
+  4. **`regime_switch.py` + both engines' `_format_debug_state`**: `debug_state()` returns
+     `"regime": "trending"|"ranging"` (a string), but the log-formatting helper unconditionally did
+     `f"{v:.2f}"` on every non-None value -- `ValueError` the moment ADX became computable, crashing
+     the ENTIRE scheduler tick (no try/except around `process_tick`) and silently skipping every
+     `bot_config` processed after it in that loop. Not currently reachable (`regime_switch` has no
+     `bot_config` row), but a real landmine the moment one is added. Fixed the formatter to render
+     any non-numeric value via plain `str()` instead of crashing.
+  5. **`vwap_session_bounce.py` / `scheduler/run.py`**: its crossing state (`prev_above_vwap`) was
+     persisted and restored across the calendar-day boundary with no reset, even though VWAP and CPR
+     are both explicitly single-day concepts. Could fabricate a "crossing" (and a signal) on the very
+     first live tick of a new trading day, using yesterday's crossing reference against today's fresh
+     VWAP. Fixed: the scheduler now only restores `crossing_state` for a `requires_intraday_flatten`
+     strategy when the persisted state's `checked_at` is from the SAME MCX trading day as `now`;
+     otherwise it's discarded (correctly reverting to "nothing to cross from yet" on a new day).
+     Multi-day strategies (SMA/MACD/RSI/etc.) are unaffected -- their crossing reference is
+     deliberately meant to persist across days.
+  All five got a TDD regression test (confirmed red before the fix, green after) and were deployed
+  to the VPS with a clean verified tick. Everything else reviewed (SMA/MACD/RSI core formulas,
+  Bollinger population-stddev, Donchian's no-lookahead window, the Wilder DMI/ADX recurrence and
+  hysteresis, the rolling VWAP, engine-level P&L sign/scaling in all three engines, snapshot
+  round-trips, state-mutation ordering) was independently hand-verified as correct by both reviewers.
 - **(Found + fixed 2026-09-04) Daily-bar strategies (RSI/MACD/SMA/Donchian/Bollinger/regime_switch)
   never reacted to intraday price movement on a live tick.** `paper/engine.py` and `live/engine.py`
   fetched a live `Quote` and passed it straight to `strategy.on_bar(quote, ...)`. Every daily-bar

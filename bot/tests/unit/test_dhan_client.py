@@ -128,6 +128,42 @@ def test_get_quote_defaults_volume_and_vwap_when_missing(instrument):
 
 
 @responses.activate
+def test_get_quote_treats_a_real_zero_average_price_as_no_vwap_yet(instrument):
+    # Regression: found via independent code review 2026-09-04. Dhan returns
+    # a REAL "average_price": 0 (not a missing key) for a contract with no
+    # trades printed yet this session (pre-first-trade in a near month, or
+    # any thin far-month contract) -- distinct from the "key genuinely
+    # absent" case covered above. The old code only special-cased `None`
+    # (`if raw_vwap is not None else None`), so this real zero became
+    # `Quote.vwap == 0.0` -- exactly the "nonsensical always-above signal"
+    # the Quote dataclass's own docstring warns against: VwapSessionBounce
+    # Strategy's `above_vwap = ltp > vwap` is then unconditionally True,
+    # fabricating a crossing (and a BUY/SELL) the moment real trades start
+    # printing and vwap jumps to a genuine, non-zero value.
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/marketfeed/quote",
+        json={
+            "data": {
+                "MCX_COMM": {
+                    "999999": {
+                        "last_price": 71234.5,
+                        "volume": 0,
+                        "average_price": 0,
+                        "ohlc": {"open": 71000, "high": 71500, "low": 70900, "close": 71100},
+                    }
+                }
+            }
+        },
+        status=200,
+    )
+    client = _make_client()
+    quote = client.get_quote(instrument)
+
+    assert quote.vwap is None
+
+
+@responses.activate
 def test_get_quote_raises_on_api_failure_status(instrument):
     from growmore_bot.broker.dhan_client import DhanApiError
 

@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from growmore_bot.broker.dhan_client import Quote
-from growmore_bot.paper.engine import PaperTradingEngine
+from growmore_bot.paper.engine import PaperTradingEngine, _format_debug_state
 from growmore_bot.persistence.models import BotSignalState, PaperOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
@@ -196,6 +196,24 @@ def test_max_position_size_rejection_logs_again_after_30_minutes():
         o for o in added if isinstance(o, AuditLog) and o.event_type == "risk_guard_max_position_size_rejected"
     ]
     assert len(audit_entries) == 1
+
+
+def test_format_debug_state_handles_a_non_numeric_value_without_crashing():
+    # Regression: found via independent code review 2026-09-04 -- RegimeSwitch
+    # Strategy.debug_state() returns {"regime": "trending", ...}, a string,
+    # not a float. The old formatter unconditionally did f"{v:.2f}" for any
+    # non-None value, which raises ValueError for a string -- crashing the
+    # WHOLE scheduler tick and silently skipping every config after it in
+    # the loop (session.commit() never reached). Reproduced live once
+    # regime_switch became warmed-up enough for ADX to be computable.
+    class _FakeStrategy:
+        def debug_state(self):
+            return {"regime": "trending", "adx": 27.5, "macd": None}
+
+    formatted = _format_debug_state(_FakeStrategy())
+    assert "regime=trending" in formatted
+    assert "adx=27.50" in formatted
+    assert "macd=n/a" in formatted
 
 
 def test_on_bar_receives_the_live_ltp_as_close_not_the_stale_quote_close():

@@ -84,7 +84,18 @@ def _format_debug_state(strategy: Strategy) -> str:
     state = strategy.debug_state()
     if not state:
         return ""
-    parts = [f"{k}={v:.2f}" if v is not None else f"{k}=n/a" for k, v in state.items()]
+    # Regression: found via independent code review 2026-09-04 --
+    # RegimeSwitchStrategy.debug_state() returns a non-numeric value
+    # ("regime": "trending"), and unconditionally formatting every non-None
+    # value as a float crashed the whole tick (ValueError), silently
+    # skipping every config after it in the scheduler loop. Any non-numeric
+    # value now renders as its plain str(), matching the type-agnostic
+    # `dict[str, Any]`-ish reality of debug_state() even though its
+    # declared type hint is narrower.
+    parts = [
+        f"{k}={v:.2f}" if isinstance(v, (int, float)) else f"{k}=n/a" if v is None else f"{k}={v}"
+        for k, v in state.items()
+    ]
     return "(" + " ".join(parts) + ")"
 
 

@@ -19,7 +19,7 @@ import pytest
 
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.broker.dhan_order_client import PlacedOrder
-from growmore_bot.live.engine import LiveTradingEngine
+from growmore_bot.live.engine import LiveTradingEngine, _format_debug_state
 from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
@@ -89,6 +89,18 @@ def test_disabled_config_is_skipped_entirely():
     dhan_client.get_quote.assert_not_called()
     order_client.place_market_order.assert_not_called()
     session.add.assert_not_called()
+
+
+def test_format_debug_state_handles_a_non_numeric_value_without_crashing():
+    # See the identical test/comment in test_paper_engine.py for the full story.
+    class _FakeStrategy:
+        def debug_state(self):
+            return {"regime": "trending", "adx": 27.5, "macd": None}
+
+    formatted = _format_debug_state(_FakeStrategy())
+    assert "regime=trending" in formatted
+    assert "adx=27.50" in formatted
+    assert "macd=n/a" in formatted
 
 
 def test_on_bar_receives_the_live_ltp_as_close_not_the_stale_quote_close():

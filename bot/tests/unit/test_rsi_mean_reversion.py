@@ -99,6 +99,29 @@ def test_rsi_mean_reversion_requires_positive_period():
         RsiMeanReversionStrategy(period=0)
 
 
+def test_rsi_is_neutral_fifty_not_zero_on_a_perfectly_flat_price_window():
+    # Regression: found via independent code review 2026-09-04. avg_gain==0
+    # was checked before avg_loss==0, so a perfectly flat window (every diff
+    # exactly 0, both averages 0) fell into the "avg_gain == 0 -> rsi = 0.0"
+    # branch -- reporting a flat, unmoving market as MAXIMALLY OVERSOLD. The
+    # conventional value for an undefined RS (0/0) is neutral (50), not an
+    # extreme. This matters on real MCX daily bars: an illiquid far-month
+    # contract can print the identical settlement close for several sessions
+    # in a row. With the old bug, the very next up-tick after a flat stretch
+    # would fabricate a BUY (prev=0.0 <= oversold, new rsi=100.0 > oversold)
+    # even though the market was never actually oversold to begin with.
+    strategy = RsiMeanReversionStrategy(period=3, oversold=30, overbought=70)
+    for close in [100, 100, 100, 100]:  # 3 diffs, all exactly 0
+        signal = strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    assert strategy.debug_state()["rsi"] == pytest.approx(50.0)
+    assert signal.action == SignalAction.HOLD
+
+    # The tick right after the flat stretch must NOT fire a spurious BUY --
+    # rising from a neutral 50, not from a fabricated oversold 0.
+    signal = strategy.on_bar(SimpleNamespace(close=101), position_state=None)
+    assert signal.action == SignalAction.HOLD
+
+
 def test_rsi_mean_reversion_debug_state_exposes_rsi():
     strategy = RsiMeanReversionStrategy(period=3)
     assert strategy.debug_state() == {

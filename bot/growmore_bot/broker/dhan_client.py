@@ -176,7 +176,14 @@ class DhanClient:
             low=float(ohlc.get("low", 0)),
             close=float(ohlc.get("close", 0)),
             volume=float(segment_data.get("volume", 0) or 0),
-            vwap=float(raw_vwap) if raw_vwap is not None else None,
+            # A real `average_price: 0` (not a missing key) means "no trades
+            # printed yet this session" -- treated the same as genuinely
+            # absent, not a real VWAP of zero. Found via independent code
+            # review 2026-09-04: without this, VwapSessionBounceStrategy's
+            # `ltp > vwap` was unconditionally True against a VWAP of 0.0,
+            # fabricating a crossing (and a BUY/SELL) the instant real
+            # trades start printing and vwap jumps to its first real value.
+            vwap=float(raw_vwap) if raw_vwap else None,
         )
 
     def get_historical_ohlc(

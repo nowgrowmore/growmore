@@ -93,7 +93,11 @@ def _format_debug_state(strategy: Strategy) -> str:
     state = strategy.debug_state()
     if not state:
         return ""
-    parts = [f"{k}={v:.2f}" if v is not None else f"{k}=n/a" for k, v in state.items()]
+    # See the identical fix/comment in paper/engine.py's _format_debug_state.
+    parts = [
+        f"{k}={v:.2f}" if isinstance(v, (int, float)) else f"{k}=n/a" if v is None else f"{k}={v}"
+        for k, v in state.items()
+    ]
     return "(" + " ".join(parts) + ")"
 
 
