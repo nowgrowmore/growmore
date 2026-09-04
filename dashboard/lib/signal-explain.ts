@@ -138,6 +138,17 @@ export function explainSignal(
       }
       const aboveVwap = price > vwap;
       const vwapGap = Math.abs(price - vwap);
+      // This strategy's SELL condition (price below CPR bottom, crossing
+      // down through VWAP) can only ever fire on a bearish-bias day -- so
+      // once a BUY opens a position on a bullish-bias day, there's no SELL
+      // signal available to close it unless the bias flips entirely later
+      // in the session. The real exit for the common case is automatic:
+      // every position from this strategy is force-closed near the daily
+      // MCX session close, since both CPR and VWAP reset every trading day.
+      const exitNote =
+        "Regardless of what happens above, any open position from this strategy is automatically " +
+        "closed near the end of the trading day -- CPR and VWAP both reset every session, so a " +
+        "position based on today's levels is never carried into tomorrow.";
       if (price > cprTop) {
         const nextStep = aboveVwap
           ? "already above VWAP -- a fresh BUY needs price to first dip back below VWAP, then cross back above it"
@@ -145,7 +156,8 @@ export function explainSignal(
         return (
           `Price (${formatCurrency(price)}) is above today's CPR top (${formatCurrency(cprTop)}) -- ` +
           `a bullish bias day. It's currently ${aboveVwap ? "above" : "below"} the live session VWAP ` +
-          `(${formatCurrency(vwap)}); ${nextStep}.`
+          `(${formatCurrency(vwap)}); ${nextStep}. A SELL isn't possible while the bias stays bullish -- ` +
+          `it would need price to fall all the way below CPR bottom first. ${exitNote}`
         );
       }
       if (price < cprBottom) {
@@ -155,13 +167,14 @@ export function explainSignal(
         return (
           `Price (${formatCurrency(price)}) is below today's CPR bottom (${formatCurrency(cprBottom)}) -- ` +
           `a bearish bias day. It's currently ${aboveVwap ? "above" : "below"} the live session VWAP ` +
-          `(${formatCurrency(vwap)}); ${nextStep}.`
+          `(${formatCurrency(vwap)}); ${nextStep}. A BUY isn't possible while the bias stays bearish -- ` +
+          `it would need price to rise all the way above CPR top first. ${exitNote}`
         );
       }
       return (
         `Price (${formatCurrency(price)}) is inside today's CPR band (${formatCurrency(cprBottom)} to ` +
         `${formatCurrency(cprTop)}) -- no trading bias either way today, so no signal regardless of ` +
-        `where price sits versus VWAP (${formatCurrency(vwap)}) until it moves outside the CPR band.`
+        `where price sits versus VWAP (${formatCurrency(vwap)}) until it moves outside the CPR band. ${exitNote}`
       );
     }
 

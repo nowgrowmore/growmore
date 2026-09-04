@@ -112,6 +112,33 @@ describe("explainSignal", () => {
     expect(text).toMatch(/BUY fires the moment/i);
   });
 
+  it("vwap_session_bounce: bullish bias explicitly states SELL isn't possible and explains the real exit", () => {
+    // Regression: a user asked "when does sell happen" after reading a
+    // bullish-bias explanation that only described the BUY condition --
+    // this strategy's SELL requires a bearish bias, so a position opened
+    // on a bullish day has no signal-based exit; the real exit is the
+    // automatic end-of-day flatten, which the text must say explicitly.
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 155301 },
+      {},
+      155228
+    );
+    expect(text).toMatch(/SELL isn't possible while the bias stays bullish/i);
+    expect(text).toMatch(/automatically.*closed near the end of the trading day/i);
+  });
+
+  it("vwap_session_bounce: bearish bias explicitly states BUY isn't possible and explains the real exit", () => {
+    const text = explainSignal(
+      "vwap_session_bounce",
+      { cpr_bottom: 101.667, cpr_top: 105, vwap: 98 },
+      {},
+      99
+    );
+    expect(text).toMatch(/BUY isn't possible while the bias stays bearish/i);
+    expect(text).toMatch(/automatically.*closed near the end of the trading day/i);
+  });
+
   it("vwap_session_bounce: bullish bias, already above vwap -- needs a fresh dip first", () => {
     const text = explainSignal(
       "vwap_session_bounce",
