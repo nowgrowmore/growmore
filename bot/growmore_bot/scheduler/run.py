@@ -133,6 +133,7 @@ def run_all_enabled_configs(
     from growmore_bot.paper.engine import PaperTradingEngine
     from growmore_bot.persistence.models import (
         BotConfig,
+        BotSignalState,
         Instrument,
         LivePosition,
         PaperPosition,
@@ -250,6 +251,17 @@ def run_all_enabled_configs(
             continue
         strategy = builder(strategy_row.params or {})
         _warm_up_strategy(strategy, dhan_client, instrument, now)
+
+        # Restore the crossing/threshold-recovery reference from the last
+        # LIVE tick (see Strategy.get_state_snapshot's docstring) -- without
+        # this, warm-up alone always leaves that reference at whatever it
+        # was at yesterday's close, so a signal meant to fire once would
+        # re-fire every tick for the rest of the day. Found live 2026-09-04.
+        signal_state = (
+            session.query(BotSignalState).filter_by(bot_config_id=config.id).one_or_none()
+        )
+        if signal_state is not None and signal_state.crossing_state:
+            strategy.load_state_snapshot(signal_state.crossing_state)
 
         if is_live:
             from growmore_bot.persistence.models import LiveOrder

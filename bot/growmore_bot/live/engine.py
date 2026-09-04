@@ -239,7 +239,14 @@ class LiveTradingEngine:
                 )
                 continue
 
-            data = response.get("data") if isinstance(response, dict) else None
+            raw_data = response.get("data") if isinstance(response, dict) else None
+            # Confirmed live 2026-09-04: Dhan's real GET /orders/{id} wraps
+            # the order in a one-element list, not a bare dict as the
+            # (unverified) public docs suggested -- support both shapes.
+            if isinstance(raw_data, list):
+                data = raw_data[0] if raw_data else None
+            else:
+                data = raw_data
             if not isinstance(data, dict):
                 logger.warning(
                     "Unexpected order-status response shape for %s -- skipping",
@@ -292,6 +299,7 @@ class LiveTradingEngine:
                     checked_at=now,
                     ltp=quote.ltp,
                     indicators=strategy.debug_state(),
+                    crossing_state=strategy.get_state_snapshot(),
                 )
             )
         else:
@@ -299,6 +307,7 @@ class LiveTradingEngine:
             existing.checked_at = now
             existing.ltp = quote.ltp
             existing.indicators = strategy.debug_state()
+            existing.crossing_state = strategy.get_state_snapshot()
             self.session.add(existing)
 
     @staticmethod

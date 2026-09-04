@@ -371,10 +371,14 @@ def test_force_close_for_expiry_is_noop_with_no_open_position():
 
 
 def test_reconcile_pending_orders_updates_status_and_fill_price():
+    # Regression: found live 2026-09-04 -- Dhan's real GET /orders/{id}
+    # response wraps the order in a LIST under "data" (confirmed against a
+    # real response), not a bare dict as the (unverified) docs suggested.
     dhan_client = MagicMock()
     order_client = MagicMock()
     order_client.get_order_status.return_value = {
-        "data": {"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 155123.5, "filledQty": 1}
+        "status": "success",
+        "data": [{"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 155123.5, "filledQty": 1}],
     }
     session = MagicMock()
     pending_order = SimpleNamespace(
@@ -389,6 +393,26 @@ def test_reconcile_pending_orders_updates_status_and_fill_price():
     assert pending_order.order_status == "TRADED"
     assert float(pending_order.fill_price) == pytest.approx(155123.5)
     session.add.assert_any_call(pending_order)
+
+
+def test_reconcile_pending_orders_also_handles_a_bare_dict_data_shape():
+    # Defensive: Dhan's public docs describe "data" as a bare object, not a
+    # list -- support both shapes rather than assuming either is permanent.
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": {"orderId": "ORD1", "orderStatus": "TRADED", "averageTradedPrice": 155123.5}
+    }
+    session = MagicMock()
+    pending_order = SimpleNamespace(
+        id=uuid.uuid4(), broker_order_id="ORD1", order_status="TRANSIT", fill_price=155000,
+    )
+    session.query.return_value.filter.return_value.all.return_value = [pending_order]
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()
+
+    assert pending_order.order_status == "TRADED"
 
 
 def test_reconcile_pending_orders_handles_missing_fields_without_raising():

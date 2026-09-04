@@ -66,5 +66,16 @@ class BollingerReversionStrategy(Strategy):
     def debug_state(self) -> dict[str, Optional[float]]:
         return {"upper_band": self._last_upper, "lower_band": self._last_lower}
 
+    def get_state_snapshot(self) -> dict[str, Any]:
+        if self._prev_below is None and self._prev_above is None:
+            return {}
+        return {"prev_below": self._prev_below, "prev_above": self._prev_above}
+
+    def load_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if "prev_below" in snapshot:
+            self._prev_below = snapshot["prev_below"]
+        if "prev_above" in snapshot:
+            self._prev_above = snapshot["prev_above"]
+
 
 __all__ = ["BollingerReversionStrategy"]

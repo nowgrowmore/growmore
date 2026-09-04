@@ -54,5 +54,35 @@ class Strategy(ABC):
         """
         return {}
 
+    def get_state_snapshot(self) -> dict[str, Any]:
+        """Whatever internal "previous value" state this strategy needs to
+        correctly resume crossing/threshold-recovery detection on the NEXT
+        live tick. Empty dict (default) for strategies that don't need this.
+
+        Why this exists: `growmore_bot.scheduler.run` builds a fresh
+        strategy instance every tick and replays historical bars up to
+        yesterday's close (`_warm_up_strategy`) before evaluating today's
+        live quote -- so without restoring this snapshot, a strategy's
+        "previous value" for crossing detection is always yesterday's
+        close, not the last time it was actually checked. A signal meant to
+        fire exactly once at a real crossing would instead re-fire on every
+        tick for the rest of the day the live value stays past the
+        threshold, since every tick compares against the same fixed
+        (yesterday's) baseline. Found live 2026-09-04: a real position's
+        unrealized P&L stayed stuck because the strategy kept re-signalling
+        BUY (correctly rejected by the max_position_size guard, but that
+        code path skips mark-to-market) instead of correctly reporting HOLD.
+        """
+        return {}
+
+    def load_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """Restore state saved by `get_state_snapshot` from the last LIVE
+        tick. Called (by `growmore_bot.scheduler.run`) after historical
+        warm-up completes but before evaluating the live quote. Must ignore
+        an empty dict or unknown keys rather than raising -- the first tick
+        ever for a config has no prior snapshot to restore.
+        """
+        return None
+
 
 __all__ = ["Strategy", "Signal", "SignalAction"]

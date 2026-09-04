@@ -54,7 +54,7 @@ interface StrategiesClientProps {
 }
 
 export function StrategiesClient({ configs, onToggle, onSaveRiskParams }: StrategiesClientProps) {
-  const [mode, setMode] = useState<Mode>("all");
+  const [mode, setMode] = useState<Mode>("live");
   const filtered = mode === "all" ? configs : configs.filter((c) => c.mode === mode);
 
   return (

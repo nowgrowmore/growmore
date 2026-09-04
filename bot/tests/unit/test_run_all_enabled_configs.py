@@ -316,6 +316,43 @@ def test_live_mode_config_past_close_out_cutoff_places_a_real_closing_order(sess
     dhan_client.get_historical_ohlc.assert_not_called()
 
 
+def test_run_all_enabled_configs_restores_persisted_crossing_state(session, monkeypatch):
+    # Regression: found live 2026-09-04 -- without restoring the crossing
+    # reference from the last LIVE tick, a fresh warmed-up strategy always
+    # compares against yesterday's close, so a signal meant to fire once
+    # re-fires every tick. This verifies the WIRING: the persisted
+    # bot_signal_state.crossing_state actually reaches
+    # Strategy.load_state_snapshot() before the live quote is evaluated.
+    from growmore_bot.persistence.models import BotSignalState
+    from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
+
+    strategy, instrument, config = _make_strategy_instrument_config(session, "always_flip", {})
+    session.add(
+        BotSignalState(
+            id=uuid.uuid4(), bot_config_id=config.id, last_signal="BUY",
+            checked_at=datetime.now(MCX_TZ), ltp=100, indicators={},
+            crossing_state={"some_reference": True},
+        )
+    )
+    session.commit()
+
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+
+    received: list[dict] = []
+    original_load = AlwaysFlipStrategy.load_state_snapshot
+
+    def _spy_load(self, snapshot):
+        received.append(snapshot)
+        return original_load(self, snapshot)
+
+    monkeypatch.setattr(AlwaysFlipStrategy, "load_state_snapshot", _spy_load)
+
+    run_all_enabled_configs(session, dhan_client)
+
+    assert received == [{"some_reference": True}]
+
+
 def test_warm_up_strategy_replays_historical_bars_in_order():
     seen_closes = []
 

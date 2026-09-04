@@ -91,7 +91,7 @@ export function OverviewClient({
   paperPositions: PaperPosition[];
   livePositions: LivePosition[];
 }) {
-  const [mode, setMode] = useState<Mode>("paper");
+  const [mode, setMode] = useState<Mode>("live");
 
   const positions = mode === "paper" ? paperPositions : livePositions;
   const summary = summarizePositions(positions);

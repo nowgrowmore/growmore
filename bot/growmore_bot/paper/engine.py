@@ -157,6 +157,7 @@ class PaperTradingEngine:
                     checked_at=now,
                     ltp=quote.ltp,
                     indicators=strategy.debug_state(),
+                    crossing_state=strategy.get_state_snapshot(),
                 )
             )
         else:
@@ -164,6 +165,7 @@ class PaperTradingEngine:
             existing.checked_at = now
             existing.ltp = quote.ltp
             existing.indicators = strategy.debug_state()
+            existing.crossing_state = strategy.get_state_snapshot()
             self.session.add(existing)
 
     @staticmethod

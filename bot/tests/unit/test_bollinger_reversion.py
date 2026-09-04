@@ -81,3 +81,24 @@ def test_bollinger_reversion_debug_state_exposes_bands():
     state = strategy.debug_state()
     assert state["upper_band"] is not None
     assert state["lower_band"] is not None
+
+
+def test_bollinger_reversion_state_snapshot_round_trips_the_breach_reference():
+    strategy = BollingerReversionStrategy(period=4, num_std=1.0)
+    for close in CLOSES[:5]:  # through the known BUY at idx4
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    snapshot = strategy.get_state_snapshot()
+    assert snapshot == {"prev_below": False, "prev_above": False}
+
+    fresh = BollingerReversionStrategy(period=4, num_std=1.0)
+    fresh.load_state_snapshot(snapshot)
+    signal = fresh.on_bar(SimpleNamespace(close=999999), position_state=None)
+    # A single fresh bar has no window history to compute bands from --
+    # this just confirms load doesn't raise mid-sequence.
+    assert signal.action == SignalAction.HOLD
+
+
+def test_bollinger_reversion_load_state_snapshot_ignores_unknown_keys_and_empty_dict():
+    strategy = BollingerReversionStrategy(period=4, num_std=1.0)
+    strategy.load_state_snapshot({})  # must not raise
+    strategy.load_state_snapshot({"unrelated": 1})  # must not raise

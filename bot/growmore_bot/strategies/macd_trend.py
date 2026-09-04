@@ -90,5 +90,14 @@ class MacdTrendStrategy(Strategy):
         )
         return {"macd": macd, "signal": self._signal}
 
+    def get_state_snapshot(self) -> dict[str, Any]:
+        if self._prev_macd_above_signal is None:
+            return {}
+        return {"prev_macd_above_signal": self._prev_macd_above_signal}
+
+    def load_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if "prev_macd_above_signal" in snapshot:
+            self._prev_macd_above_signal = snapshot["prev_macd_above_signal"]
+
 
 __all__ = ["MacdTrendStrategy"]

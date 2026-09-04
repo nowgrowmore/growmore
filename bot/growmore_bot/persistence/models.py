@@ -225,6 +225,14 @@ class BotSignalState(Base):
     ltp: Mapped[float] = mapped_column(Numeric, nullable=False)
     # Strategy.debug_state()'s raw dict, e.g. {"macd": -1113.34, "signal": 363.55}.
     indicators: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    # Strategy.get_state_snapshot()'s raw dict, e.g. {"prev_macd_above_signal":
+    # True} -- restored via Strategy.load_state_snapshot() after the next
+    # tick's historical warm-up but before evaluating the live quote, so a
+    # crossing/threshold-recovery signal compares against the last LIVE
+    # tick's state, not always yesterday's close (see Strategy.
+    # get_state_snapshot's docstring for why this matters -- found live
+    # 2026-09-04). Distinct from `indicators`, which is display-only.
+    crossing_state: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
 
     bot_config: Mapped["BotConfig"] = relationship()
 

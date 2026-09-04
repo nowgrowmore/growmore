@@ -89,3 +89,37 @@ def test_macd_trend_debug_state_exposes_macd_and_signal():
     state = strategy.debug_state()
     assert state["macd"] is not None
     assert state["signal"] is not None
+
+
+def test_macd_trend_state_snapshot_round_trips_the_crossing_reference():
+    # Regression: found live 2026-09-04 -- the scheduler rebuilds a fresh
+    # strategy every tick and warms it up from history ending yesterday, so
+    # without restoring the crossing reference from the last LIVE tick, a
+    # signal that should fire once re-fires every tick for the rest of the
+    # day the live value stays past the threshold (compared against
+    # yesterday's fixed baseline every time).
+    strategy = MacdTrendStrategy(fast_period=2, slow_period=3, signal_period=2)
+    for close in CLOSES[:6]:  # through the known BUY at idx5
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    snapshot = strategy.get_state_snapshot()
+    assert snapshot == {"prev_macd_above_signal": True}
+
+    # A fresh instance (as the scheduler builds every tick) with no snapshot
+    # loaded has no crossing reference -- first computable point is HOLD.
+    fresh = MacdTrendStrategy(fast_period=2, slow_period=3, signal_period=2)
+    for close in CLOSES[:5]:
+        fresh.on_bar(SimpleNamespace(close=close), position_state=None)
+    # macd/signal already both above their prior relation at idx4 (still
+    # below) -- load the restored snapshot before the next live bar so the
+    # comparison is against the LAST LIVE TICK's state, not a fresh None.
+    fresh.load_state_snapshot(snapshot)
+    signal = fresh.on_bar(SimpleNamespace(close=CLOSES[5]), position_state=None)
+    # Already "above" per the restored snapshot, and idx5 is also above --
+    # correctly HOLD, not a repeated BUY.
+    assert signal.action == SignalAction.HOLD
+
+
+def test_macd_trend_load_state_snapshot_ignores_unknown_keys_and_empty_dict():
+    strategy = MacdTrendStrategy(fast_period=2, slow_period=3, signal_period=2)
+    strategy.load_state_snapshot({})  # must not raise
+    strategy.load_state_snapshot({"unrelated_key": 123})  # must not raise

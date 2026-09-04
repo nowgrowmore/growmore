@@ -68,6 +68,32 @@ def test_rsi_mean_reversion_requires_valid_thresholds():
         RsiMeanReversionStrategy(period=14, oversold=70, overbought=30)
 
 
+def test_rsi_state_snapshot_round_trips_prev_rsi():
+    # Regression: found live 2026-09-04 (in macd_trend, same underlying
+    # scheduler bug applies here) -- without restoring the last LIVE tick's
+    # RSI value, a fresh warmed-up instance always compares against
+    # yesterday's closing RSI, so a BUY/SELL that should fire once re-fires
+    # every tick for the rest of the day the live RSI stays past threshold.
+    strategy = RsiMeanReversionStrategy(period=3, oversold=30, overbought=70)
+    for close in CLOSES[:5]:  # through the known BUY at idx4
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    snapshot = strategy.get_state_snapshot()
+    assert snapshot == {"prev_rsi": pytest.approx(42.857, abs=0.001)}
+
+    fresh = RsiMeanReversionStrategy(period=3, oversold=30, overbought=70)
+    fresh.load_state_snapshot(snapshot)
+    signal = fresh.on_bar(SimpleNamespace(close=CLOSES[5]), position_state=None)
+    # idx5 alone has no window history to compute an RSI from -- HOLD either
+    # way, this just confirms load doesn't raise mid-sequence.
+    assert signal.action == SignalAction.HOLD
+
+
+def test_rsi_load_state_snapshot_ignores_unknown_keys_and_empty_dict():
+    strategy = RsiMeanReversionStrategy(period=3, oversold=30, overbought=70)
+    strategy.load_state_snapshot({})  # must not raise
+    strategy.load_state_snapshot({"unrelated": 1})  # must not raise
+
+
 def test_rsi_mean_reversion_requires_positive_period():
     with pytest.raises(ValueError):
         RsiMeanReversionStrategy(period=0)

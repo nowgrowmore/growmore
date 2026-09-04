@@ -68,3 +68,25 @@ def test_sma_crossover_debug_state_exposes_computed_smas():
     state = strategy.debug_state()
     assert state["fast_sma"] == pytest.approx(11.5)  # SMA2(11,12)
     assert state["slow_sma"] == pytest.approx(11.0)  # SMA3(10,11,12)
+
+
+def test_sma_crossover_state_snapshot_round_trips_the_crossing_reference():
+    strategy = SmaCrossoverStrategy(fast_period=2, slow_period=3)
+    for close in CLOSES[:7]:  # through the known BUY at idx6
+        strategy.on_bar(SimpleNamespace(close=close), position_state=None)
+    snapshot = strategy.get_state_snapshot()
+    assert snapshot == {"prev_fast_above_slow": True}
+
+    fresh = SmaCrossoverStrategy(fast_period=2, slow_period=3)
+    fresh.load_state_snapshot(snapshot)
+    fresh._closes.extend(CLOSES[5:7])  # seed enough history to compute idx7's SMAs
+    signal = fresh.on_bar(SimpleNamespace(close=CLOSES[7]), position_state=None)
+    # Already "above" per the restored snapshot -- idx7 is also above, so
+    # this must be HOLD, not a repeated BUY.
+    assert signal.action == SignalAction.HOLD
+
+
+def test_sma_crossover_load_state_snapshot_ignores_unknown_keys_and_empty_dict():
+    strategy = SmaCrossoverStrategy(fast_period=2, slow_period=3)
+    strategy.load_state_snapshot({})  # must not raise
+    strategy.load_state_snapshot({"unrelated": 1})  # must not raise

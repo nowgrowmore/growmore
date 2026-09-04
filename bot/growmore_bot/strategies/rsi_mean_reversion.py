@@ -67,5 +67,14 @@ class RsiMeanReversionStrategy(Strategy):
     def debug_state(self) -> dict[str, Optional[float]]:
         return {"rsi": self._prev_rsi}
 
+    def get_state_snapshot(self) -> dict[str, Any]:
+        if self._prev_rsi is None:
+            return {}
+        return {"prev_rsi": self._prev_rsi}
+
+    def load_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if "prev_rsi" in snapshot:
+            self._prev_rsi = snapshot["prev_rsi"]
+
 
 __all__ = ["RsiMeanReversionStrategy"]

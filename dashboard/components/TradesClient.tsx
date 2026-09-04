@@ -36,7 +36,7 @@ function formatExpiry(expiry: string | null | undefined): string {
 }
 
 export function TradesClient({ rows }: { rows: UnifiedTradeRow[] }) {
-  const [mode, setMode] = useState<Mode>("all");
+  const [mode, setMode] = useState<Mode>("live");
   const filtered = mode === "all" ? rows : rows.filter((r) => r.tradeType === mode);
 
   return (

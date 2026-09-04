@@ -54,5 +54,14 @@ class SmaCrossoverStrategy(Strategy):
     def debug_state(self) -> dict[str, Optional[float]]:
         return {"fast_sma": self._last_fast_sma, "slow_sma": self._last_slow_sma}
 
+    def get_state_snapshot(self) -> dict[str, Any]:
+        if self._prev_fast_above_slow is None:
+            return {}
+        return {"prev_fast_above_slow": self._prev_fast_above_slow}
+
+    def load_state_snapshot(self, snapshot: dict[str, Any]) -> None:
+        if "prev_fast_above_slow" in snapshot:
+            self._prev_fast_above_slow = snapshot["prev_fast_above_slow"]
+
 
 __all__ = ["SmaCrossoverStrategy"]
