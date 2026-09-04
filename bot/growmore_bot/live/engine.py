@@ -30,6 +30,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from growmore_bot.broker.dhan_order_client import DhanOrderError
 from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder, LivePosition
 from growmore_bot.strategies.base import SignalAction, Strategy
 
@@ -136,9 +137,25 @@ class LiveTradingEngine:
 
         now = datetime.now(timezone.utc)
         quote = self.dhan_client.get_quote(instrument)
-        placed = self.order_client.place_market_order(
-            instrument, transaction_type="SELL", quantity=current_position_qty
-        )
+        try:
+            placed = self.order_client.place_market_order(
+                instrument, transaction_type="SELL", quantity=current_position_qty
+            )
+        except Exception:
+            # Never let an order-placement failure propagate: session_scope()
+            # rolls back the ENTIRE tick's session on any uncaught exception,
+            # which would also discard the audit_log entry
+            # DhanOrderClient.place_market_order already wrote for this exact
+            # failure -- found live 2026-09-04 (a real DH-905 "Invalid IP"
+            # rejection left literally no trace). The position is left open
+            # for manual review; the next tick's close-out-cutoff check will
+            # simply try again.
+            logger.exception(
+                "%s -- LIVE EXPIRY CLOSE-OUT order FAILED -- position remains open, will retry "
+                "next tick",
+                label or live_position_id,
+            )
+            return
         pnl = (float(quote.ltp) - float(avg_entry_price)) * current_position_qty * instrument.lot_size
 
         position = self.session.get(LivePosition, live_position_id)
@@ -418,9 +435,21 @@ class LiveTradingEngine:
             )
             return
 
-        placed = self.order_client.place_market_order(
-            instrument, transaction_type="BUY", quantity=size
-        )
+        try:
+            placed = self.order_client.place_market_order(
+                instrument, transaction_type="BUY", quantity=size
+            )
+        except Exception:
+            # See force_close_for_expiry's comment: never let this propagate
+            # up to session_scope()'s rollback, which would also discard the
+            # audit_log entry the order client already wrote for the
+            # failure. No position/order is recorded -- nothing was filled.
+            logger.exception(
+                "%s -- LIVE BUY order FAILED (qty=%s) -- no position opened",
+                label or config.strategy_id,
+                size,
+            )
+            return
 
         logger.warning(
             "%s -- LIVE BUY PLACED (REAL MONEY) qty=%s ltp=%s broker_order_id=%s status=%s %s",
@@ -490,9 +519,20 @@ class LiveTradingEngine:
         close_qty = min(size, current_position_qty)
         remaining_qty = current_position_qty - close_qty
 
-        placed = self.order_client.place_market_order(
-            instrument, transaction_type="SELL", quantity=close_qty
-        )
+        try:
+            placed = self.order_client.place_market_order(
+                instrument, transaction_type="SELL", quantity=close_qty
+            )
+        except Exception:
+            # See force_close_for_expiry's comment: never let this propagate
+            # up to session_scope()'s rollback. Position is left exactly as
+            # it was -- nothing was actually closed.
+            logger.exception(
+                "%s -- LIVE SELL order FAILED (qty=%s) -- position unchanged",
+                label or live_position_id,
+                close_qty,
+            )
+            return
 
         pnl = (float(quote.ltp) - float(avg_entry_price)) * close_qty * instrument.lot_size
 

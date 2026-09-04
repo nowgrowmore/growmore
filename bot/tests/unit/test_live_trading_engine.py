@@ -116,6 +116,86 @@ def test_buy_rejected_when_exceeding_max_position_size_places_no_order():
     order_client.place_market_order.assert_not_called()
 
 
+def test_buy_order_failure_is_caught_not_raised_and_persists_no_position():
+    # Regression: found live 2026-09-04 -- a real DH-905 "Invalid IP" order
+    # rejection propagated all the way out of process_tick, which meant
+    # session_scope()'s except-block rolled back the ENTIRE tick's session,
+    # including the audit_log entry DhanOrderClient had already written for
+    # the failure -- so a failed real order attempt left no trace at all.
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    order_client.place_market_order.side_effect = DhanOrderError("DH-905: Invalid IP")
+    session = MagicMock()
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    # Must not raise -- the whole point of the fix.
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    assert not any(_looks_like_order(obj) for obj in added)
+    assert not any(isinstance(obj, type(config)) for obj in added)  # no LivePosition mock artifacts
+
+
+def test_sell_order_failure_is_caught_not_raised():
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.SELL, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.side_effect = DhanOrderError("DH-905: Invalid IP")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, live_position_id=existing_position.id,
+    )
+
+    # Position must be left exactly as it was -- no phantom close recorded.
+    assert existing_position.status == "open"
+    assert existing_position.quantity == 1
+
+
+def test_force_close_for_expiry_order_failure_is_caught_not_raised():
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.side_effect = DhanOrderError("DH-905: Invalid IP")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.force_close_for_expiry(
+        config=config, instrument=instrument, current_position_qty=1,
+        avg_entry_price=150000, live_position_id=existing_position.id,
+    )
+
+    assert existing_position.status == "open"
+    assert existing_position.quantity == 1
+
+
 def test_daily_loss_limit_trip_disables_config_without_attempting_an_order():
     config = _bot_config(daily_loss_limit=1_000)
     instrument = _instrument(config)
