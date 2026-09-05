@@ -34,7 +34,7 @@ from growmore_bot.broker.dhan_client import DhanClient
 from growmore_bot.config import Settings
 from growmore_bot.costs import DEFAULT_COST_MODEL
 from growmore_bot.persistence.db import session_scope
-from growmore_bot.persistence.models import BacktestTrade, Instrument
+from growmore_bot.persistence.models import BacktestRun, BacktestTrade, Instrument
 from growmore_bot.persistence.models import Strategy as StrategyRow
 from growmore_bot.risk.sizing import notional_per_lot
 from growmore_bot.risk.wrapper import build_risk_managed
@@ -139,6 +139,30 @@ def profit_factor_for_ranking(stored_value: float | None) -> float:
     win-rate rows showed profit_factor=0.00).
     """
     return float("inf") if stored_value is None else float(stored_value)
+
+
+def delete_existing_runs(session: Any, strategy_id: Any, instrument_id: Any) -> None:
+    """Delete any previously-persisted `BacktestRun` rows for this exact
+    (strategy_id, instrument_id) pairing before persisting a fresh one.
+
+    Without this, re-running the sweep after a code change -- a real,
+    repeated occurrence, see docs/backtest-results.md's revision history --
+    piles up duplicate rows that look identical on the dashboard (same
+    strategy/version/params/instrument) except for their real result
+    numbers and `started_at`. Found live 2026-09-05: the Backtests/Rankings
+    page had no way to tell these apart or collapse them, so the same
+    strategy+instrument pairing showed up several times with different
+    Sharpe/CAGR each time. Cascades to the run's own `BacktestTrade`/
+    `EquityCurvePoint` rows via the ORM relationship's
+    `cascade="all, delete-orphan"` (see persistence/models.py).
+    """
+    old_runs = (
+        session.query(BacktestRun)
+        .filter_by(strategy_id=strategy_id, instrument_id=instrument_id)
+        .all()
+    )
+    for old_run in old_runs:
+        session.delete(old_run)
 
 
 def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]:
@@ -396,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     tick_size=float(instrument.tick_size or 0.0),
                     allow_shorts=args.allow_shorts,
                 )
+                delete_existing_runs(session, strategy_row.id, instrument.id)
                 run_row = engine.run_and_persist(
                     bars,
                     session=session,
