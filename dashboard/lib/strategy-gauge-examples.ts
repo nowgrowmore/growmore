@@ -38,6 +38,11 @@ const EXAMPLE_SCENARIOS: Record<
     strategy_params: { adx_period: 14, adx_trend_enter: 25, adx_trend_exit: 20, ranging_strategy: "rsi" },
     signal_indicators: { adx: 32, regime: 1 }, // regime is a string in real data; unused by the gauge
   },
+  risk_managed: {
+    strategy_params: { inner_strategy: "macd_trend", initial_stop_atr: 2, trail_atr: 3 },
+    signal_indicators: { atr: 3.1, macd: -0.14, signal: 0.05 },
+    signal_ltp: "100",
+  },
   vwap_session_bounce: {
     strategy_params: {},
     signal_indicators: { cpr_bottom: 101.67, cpr_pivot: 103.33, cpr_top: 105, vwap: 104 },

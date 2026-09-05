@@ -300,6 +300,29 @@ function explainSignalBase(
       );
     }
 
+    case "risk_managed": {
+      const atr = n(ind.atr);
+      if (atr === null || price === null) {
+        return "Not enough price history yet to measure volatility (ATR), so no stop can be placed.";
+      }
+      const stopMultiple = n(p.initial_stop_atr) ?? 2;
+      const trail = n(p.trail_atr);
+      const stop = price - stopMultiple * atr;
+      const distancePct = ((price - stop) / price) * 100;
+      const inner = typeof p.inner_strategy === "string" ? p.inner_strategy : "the wrapped strategy";
+      return (
+        `Entries come from ${inner}; this layer only decides when to get out. Recent volatility ` +
+        `(ATR) is ${formatCurrency(atr)}, so a fresh ${stopMultiple}x-ATR stop would sit around ` +
+        `${formatCurrency(stop)} — about ${distancePct.toFixed(1)}% below the current price ` +
+        `(${formatCurrency(price)}).` +
+        (trail !== null
+          ? ` Once in profit a ${trail}x-ATR trailing stop follows the best price seen and never loosens.`
+          : " There is no trailing stop configured, so the initial stop stays where it was placed.") +
+        " Note the stop is checked once per 5-minute poll, not resting at the exchange, so a fast" +
+        " move can fill worse than the level shown."
+      );
+    }
+
     case "always_flip":
       return "Demo/test strategy, not a real trading signal -- it deliberately alternates BUY and SELL every single tick to prove the pipeline works end to end.";
 

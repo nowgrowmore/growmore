@@ -140,6 +140,26 @@ export function buildGaugeConfig(config: BotConfig): LevelGaugeProps | null {
       };
     }
 
+    case "risk_managed": {
+      // The one number that matters for an open risk-managed position is how
+      // far price is from its stop. The wrapped strategy's own indicators are
+      // still in signal_indicators, but the stop is what the owner needs to
+      // see at a glance.
+      const atr = ind.atr;
+      if (atr === undefined || atr === null || ltp === null) return null;
+      const atrNum = Number(atr);
+      const stopMultiple = Number(params.initial_stop_atr ?? 2);
+      const stop = ltp - stopMultiple * atrNum;
+      const [min, max] = priceGaugeRange([stop, ltp]);
+      return {
+        min,
+        max,
+        zones: [{ from: min, to: stop, color: "var(--critical-text)" }],
+        referenceLines: [{ value: stop, label: "Stop (est.)" }],
+        markers: [{ value: ltp, label: "Price", color: CURRENT_COLOR }],
+      };
+    }
+
     case "vwap_session_bounce": {
       const cprBottom = ind.cpr_bottom;
       const cprPivot = ind.cpr_pivot;

@@ -1,5 +1,35 @@
 # Technical Debt / Known Limitations
 
+- **(2026-09-05) Deflated Sharpe: almost nothing in the sweep is statistically distinguishable from
+  selection luck.** `research/validation/deflate_sweep.py` applies Bailey & Lopez de Prado's
+  Deflated Sharpe Ratio to the stored runs. The sweep is now 24 variants x 8 instruments = **192
+  backtests**, but those are only **15 effective trials** once you account for how correlated they
+  are (participation ratio of the equity-curve correlation matrix 15.0, correlation clusters 31 --
+  the smaller is used). The best of 15 independent trials would be expected to post **Sharpe 0.97
+  annualised by chance alone**. Against that bar:
+
+  | Result | Sharpe | DSR | Verdict |
+  | --- | --- | --- | --- |
+  | Risk-managed MACD(5,13,5) / Gold Mini | 1.68 | 0.94 | borderline |
+  | Bollinger(20, 2.5) / Zinc Mini | 1.61 | 0.93 | borderline |
+  | Risk-managed MACD(12,26,9) / Gold Mini | 1.57 | 0.91 | borderline |
+  | **MACD(5,13,5) / Gold Mini** (the incumbent pick) | 1.42 | **0.79** | not distinguishable from luck |
+  | Regime-Switch(5,13,5+VWAP/EMA) / Aluminium Mini | 1.30 | 0.77 | not distinguishable from luck |
+  | Everything else in the top 15 | ≤1.27 | ≤0.71 | not distinguishable from luck |
+
+  **Nothing clears the conventional 0.95 bar.** This is not a sign the bot is broken; it is the
+  honest statistical position of a 5-year single-window sweep that reports its own best result, and
+  it is exactly why the risk architecture rather than more strategies was the right thing to build.
+  Two things follow. First, **the risk layer measurably improves statistical standing, not just the
+  headline numbers**: MACD(5,13,5)/Gold Mini goes from DSR 0.79 without stops to 0.94 with them —
+  the largest single improvement available anywhere in the sweep. Second, **adding more parameter
+  variants now actively costs you**, because every additional trial raises the bar the winner has to
+  clear; the grid should shrink, not grow.
+
+  Caveats on the number itself: effective trials is estimated from equity-curve correlations, which
+  is a defensible but not unique choice, and DSR assumes the trials are drawn from a common
+  distribution. Treat 15 as an order-of-magnitude estimate. Walk-forward validation (train 504 bars
+  / test 126 / step 126) is still not built and remains the stronger test.
 - **(Found + fixed 2026-09-05) Dhan returns corrupt NICKEL bars, and they had been silently
   poisoning every NICKEL backtest.** 5 of 1,252 daily bars over the 5-year window come back with
   `open=high=low=0.0` alongside a real `close` and a real `volume` — those zeros are missing fields,

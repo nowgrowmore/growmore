@@ -72,6 +72,19 @@ export const STRATEGY_INFO: Record<string, StrategyInfo> = {
       ranging_strategy: { label: "Ranging-mode strategy", explain: "Which mean-reversion strategy runs during a ranging regime -- \"rsi\" or \"vwap_ema\"." },
     },
   },
+  risk_managed: {
+    label: "Risk-Managed (ATR stop)",
+    summary:
+      "Not a strategy of its own -- it wraps one of the others and adds the exits none of them have: a protective stop placed a fixed number of ATRs from entry, a Chandelier trailing stop that ratchets in your favour and never loosens, and an optional time stop. Measured across 13 same-strategy/same-instrument pairs it improved BOTH Sharpe and max drawdown in 8 and worsened both in 3 -- the gains are large where drawdown was worst (Gold Mini MACD: 19.1% -> 8.8%), the losses are on low-volatility contracts where a 2xATR stop sits inside normal noise. See docs/technical-debt.md.",
+    params: {
+      inner_strategy: { label: "Wrapped strategy", explain: "Which strategy generates the entry signals. The risk layer only decides when to get out." },
+      inner_params: { label: "Wrapped strategy's params", explain: "Passed straight through to the wrapped strategy, unchanged." },
+      atr_period: { label: "ATR period", explain: "Bars used to measure recent volatility (Average True Range), which sets how far away the stops sit. 14 is Wilder's standard." },
+      initial_stop_atr: { label: "Initial stop (ATRs)", explain: "How many ATRs below the entry the protective stop starts. Lower = tighter, exits sooner, but risks being stopped out by ordinary noise." },
+      trail_atr: { label: "Trailing stop (ATRs)", explain: "How many ATRs behind the best price seen the trailing stop follows. Only ever ratchets in your favour. Empty means no trailing stop -- the initial stop stays put." },
+      max_bars_held: { label: "Time stop (bars)", explain: "Force an exit after this many bars regardless of price. Empty means no time limit, which is the default for these multi-day strategies." },
+    },
+  },
   vwap_session_bounce: {
     label: "VWAP + CPR Session-Bounce",
     summary:
