@@ -150,4 +150,25 @@ describe("buildGaugeConfig", () => {
       expect(buildGaugeConfig(config)).toBeNull();
     });
   });
+
+  describe("ensemble_trend", () => {
+    it("builds a 0-to-members gauge with the votes-needed reference line", () => {
+      const config = makeConfig({
+        strategy_name: "ensemble_trend",
+        strategy_params: { min_agreement: 3 },
+        signal_indicators: { bullish_votes: 2, votes_cast: 5, votes_needed: 3, members: 5 },
+      });
+      const gauge = buildGaugeConfig(config);
+      expect(gauge).not.toBeNull();
+      expect(gauge!.min).toBe(0);
+      expect(gauge!.max).toBe(5);
+      expect(gauge!.referenceLines).toEqual([{ value: 3, label: "Votes needed" }]);
+      expect(gauge!.markers).toEqual([{ value: 2, label: "Bullish votes", color: expect.any(String) }]);
+    });
+
+    it("returns null before any member has an opinion yet", () => {
+      const config = makeConfig({ strategy_name: "ensemble_trend", signal_indicators: {} });
+      expect(buildGaugeConfig(config)).toBeNull();
+    });
+  });
 });

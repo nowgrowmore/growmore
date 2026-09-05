@@ -283,6 +283,30 @@ describe("explainSignal", () => {
     expect(text).toMatch(/not enough/i);
   });
 
+  it("ensemble_trend: explains the vote count and whether it's enough to go long", () => {
+    const long = explainSignal(
+      "ensemble_trend",
+      { bullish_votes: 3, votes_cast: 5, votes_needed: 3, members: 5 },
+      { min_agreement: 3 },
+      100
+    );
+    expect(long).toContain("3 of 5 MACD members");
+    expect(long).toContain("ensemble is long");
+
+    const flat = explainSignal(
+      "ensemble_trend",
+      { bullish_votes: 2, votes_cast: 5, votes_needed: 3, members: 5 },
+      { min_agreement: 3 },
+      100
+    );
+    expect(flat).toContain("stays flat");
+  });
+
+  it("ensemble_trend: not enough data yet", () => {
+    const text = explainSignal("ensemble_trend", {}, {}, 100);
+    expect(text).toMatch(/not enough/i);
+  });
+
   it("always_flip: explains it's a demo strategy", () => {
     const text = explainSignal("always_flip", { last_close: 100 }, {}, 100);
     expect(text).toMatch(/demo|test/i);

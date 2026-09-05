@@ -140,6 +140,23 @@ export function buildGaugeConfig(config: BotConfig): LevelGaugeProps | null {
       };
     }
 
+    case "ensemble_trend": {
+      const bullishVotes = ind.bullish_votes;
+      const members = ind.members;
+      const votesNeeded = Number(params.min_agreement ?? ind.votes_needed ?? 3);
+      if (bullishVotes === undefined || bullishVotes === null || members === undefined || members === null) {
+        return null;
+      }
+      const membersNum = Number(members);
+      return {
+        min: 0,
+        max: membersNum,
+        zones: [{ from: votesNeeded, to: membersNum, color: "var(--success-text)" }],
+        referenceLines: [{ value: votesNeeded, label: "Votes needed" }],
+        markers: [{ value: Number(bullishVotes), label: "Bullish votes", color: CURRENT_COLOR }],
+      };
+    }
+
     case "risk_managed": {
       // The one number that matters for an open risk-managed position is how
       // far price is from its stop. The wrapped strategy's own indicators are

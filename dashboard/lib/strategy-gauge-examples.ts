@@ -43,6 +43,10 @@ const EXAMPLE_SCENARIOS: Record<
     signal_indicators: { atr: 3.1, macd: -0.14, signal: 0.05 },
     signal_ltp: "100",
   },
+  ensemble_trend: {
+    strategy_params: { min_agreement: 3 },
+    signal_indicators: { bullish_votes: 2, votes_cast: 5, votes_needed: 3, members: 5 },
+  },
   vwap_session_bounce: {
     strategy_params: {},
     signal_indicators: { cpr_bottom: 101.67, cpr_pivot: 103.33, cpr_top: 105, vwap: 104 },

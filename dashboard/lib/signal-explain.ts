@@ -300,6 +300,24 @@ function explainSignalBase(
       );
     }
 
+    case "ensemble_trend": {
+      const bullishVotes = n(ind.bullish_votes);
+      const votesCast = n(ind.votes_cast);
+      const votesNeeded = n(ind.votes_needed);
+      const members = n(ind.members);
+      if (bullishVotes === null || votesCast === null || votesNeeded === null || members === null) {
+        return "Not enough price history yet for the 5 MACD members to all have an opinion.";
+      }
+      const isLong = bullishVotes >= votesNeeded;
+      return (
+        `${bullishVotes} of ${votesCast} MACD members (of ${members} total) are currently bullish -- ` +
+        `${votesNeeded} needed to go long. ${isLong ? "That's enough: the ensemble is long." : "Not enough yet: the ensemble stays flat."} ` +
+        `Every member keeps updating every tick regardless of its own vote, so the count can shift ` +
+        `up or down as individual MACD crossings happen, without necessarily crossing the ` +
+        `${votesNeeded}-vote threshold.`
+      );
+    }
+
     case "risk_managed": {
       const atr = n(ind.atr);
       if (atr === null || price === null) {

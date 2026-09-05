@@ -85,6 +85,14 @@ export const STRATEGY_INFO: Record<string, StrategyInfo> = {
       max_bars_held: { label: "Time stop (bars)", explain: "Force an exit after this many bars regardless of price. Empty means no time limit, which is the default for these multi-day strategies." },
     },
   },
+  ensemble_trend: {
+    label: "Multi-Speed MACD Ensemble",
+    summary:
+      "Runs 5 MACD speeds at once (5/13/5 through 26/52/18) and goes long only when at least min_agreement of them are bullish -- there's no single lookback to select, so there's no selection-luck bias in choosing one. Almost always scores worse in isolation than the single luckiest MACD variant in a backtest -- that's the intended trade-off, giving up the lucky tail for a result that isn't just the winner of many tries. Wrapped in the risk-managed ATR stop layer, this combination is the only result in the full sweep that clears the conventional statistical-significance bar (DSR >= 0.95) -- see docs/backtest-results.md.",
+    params: {
+      min_agreement: { label: "Votes needed", explain: "How many of the 5 MACD members must agree (be bullish) for the ensemble to go long. Higher = more conservative, fewer but higher-conviction trades." },
+    },
+  },
   vwap_session_bounce: {
     label: "VWAP + CPR Session-Bounce",
     summary:
