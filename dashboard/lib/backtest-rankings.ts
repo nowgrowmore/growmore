@@ -119,7 +119,7 @@ export interface RankPosition {
 /** Where a specific backtest run stands among ALL guardrail-passing runs,
  * for each ranking criterion -- only includes a criterion where the run
  * places in the top `limit` (default 10), i.e. it would actually be visible
- * on the /rankings page for that criterion. */
+ * in the Backtests page's Rankings view for that criterion. */
 export function findRankPositions(
   run: BacktestRun | undefined,
   allRuns: BacktestRun[],

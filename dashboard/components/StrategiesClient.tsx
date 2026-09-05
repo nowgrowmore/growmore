@@ -218,7 +218,7 @@ export function StrategiesClient({
                             {positions.map((pos) => (
                               <Link
                                 key={pos.criterion}
-                                href={`/rankings`}
+                                href={`/backtests?view=ranked&criterion=${pos.criterion}`}
                                 className="rounded bg-[color:var(--series-1)]/10 px-1.5 py-0.5 text-xs font-medium text-[color:var(--series-1)] hover:underline"
                                 title={`#${pos.rank} in the top-10 ${pos.label} backtest ranking`}
                               >

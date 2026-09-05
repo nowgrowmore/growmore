@@ -155,8 +155,29 @@ export function OverviewClient({
     });
   };
 
+  // Union of both modes' instrument symbols, same reasoning as strategy names.
+  const instrumentOptions = Array.from(
+    new Set([...paperPositions, ...livePositions].map((p) => p.instrument_symbol).filter(Boolean))
+  )
+    .filter((symbol): symbol is string => symbol !== undefined)
+    .sort()
+    .map((symbol) => ({ value: symbol, label: symbol }));
+  const [selectedInstruments, setSelectedInstruments] = useState<Set<string>>(
+    () => new Set(instrumentOptions.map((o) => o.value))
+  );
+  const toggleInstrument = (symbol: string) => {
+    setSelectedInstruments((prev) => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol);
+      else next.add(symbol);
+      return next;
+    });
+  };
+
   const positions = (mode === "paper" ? paperPositions : livePositions).filter(
-    (p) => !p.strategy_name || selectedStrategyNames.has(p.strategy_name)
+    (p) =>
+      (!p.strategy_name || selectedStrategyNames.has(p.strategy_name)) &&
+      (!p.instrument_symbol || selectedInstruments.has(p.instrument_symbol))
   );
   const summary = summarizePositions(positions);
   const openPositions = positions.filter((p) => p.status === "open");
@@ -174,6 +195,14 @@ export function OverviewClient({
             onToggle={toggleStrategyName}
             onSelectAll={() => setSelectedStrategyNames(new Set(strategyNameOptions.map((o) => o.value)))}
             onSelectNone={() => setSelectedStrategyNames(new Set())}
+          />
+          <StrategyNameFilter
+            options={instrumentOptions}
+            selected={selectedInstruments}
+            onToggle={toggleInstrument}
+            onSelectAll={() => setSelectedInstruments(new Set(instrumentOptions.map((o) => o.value)))}
+            onSelectNone={() => setSelectedInstruments(new Set())}
+            label="Instrument:"
           />
         </div>
         {mode === "live" && (

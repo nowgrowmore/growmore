@@ -17,19 +17,21 @@ export function StrategyNameFilter({
   onToggle,
   onSelectAll,
   onSelectNone,
+  label = "Strategy:",
 }: {
   options: StrategyNameOption[];
   selected: Set<string>;
   onToggle: (value: string) => void;
   onSelectAll: () => void;
   onSelectNone: () => void;
+  label?: string;
 }) {
   if (options.length <= 1) return null;
   const allSelected = selected.size === options.length;
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-xs font-medium text-[color:var(--text-muted)]">Strategy:</span>
+      <span className="text-xs font-medium text-[color:var(--text-muted)]">{label}</span>
       {options.map((opt) => {
         const isOn = selected.has(opt.value);
         return (

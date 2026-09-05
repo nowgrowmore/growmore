@@ -79,4 +79,29 @@ describe("StrategyNameFilter", () => {
     expect(screen.getByText("MACD Trend")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("Regime-Switch")).toHaveAttribute("aria-pressed", "false");
   });
+
+  it("defaults its label to 'Strategy:' but accepts a custom one for reuse (e.g. instruments)", () => {
+    const { rerender } = render(
+      <StrategyNameFilter
+        options={OPTIONS}
+        selected={new Set(["macd_trend", "regime_switch"])}
+        onToggle={vi.fn()}
+        onSelectAll={vi.fn()}
+        onSelectNone={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Strategy:")).toBeInTheDocument();
+
+    rerender(
+      <StrategyNameFilter
+        options={OPTIONS}
+        selected={new Set(["macd_trend", "regime_switch"])}
+        onToggle={vi.fn()}
+        onSelectAll={vi.fn()}
+        onSelectNone={vi.fn()}
+        label="Instrument:"
+      />
+    );
+    expect(screen.getByText("Instrument:")).toBeInTheDocument();
+  });
 });
