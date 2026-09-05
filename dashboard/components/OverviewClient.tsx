@@ -5,7 +5,9 @@ import Link from "next/link";
 import { computePctChangeToday, formatCurrency, formatPercent, summarizePositions, toNumber } from "@/lib/format";
 import { SummaryCards } from "@/components/SummaryCards";
 import { ModeFilter } from "@/components/ModeFilter";
+import { StrategyNameFilter } from "@/components/StrategyNameFilter";
 import { EquityChart, type EquityChartPoint } from "@/components/EquityChart";
+import { STRATEGY_INFO } from "@/lib/strategy-info";
 import type { LivePosition, PaperPosition } from "@/lib/types";
 
 type Mode = "paper" | "live";
@@ -122,7 +124,29 @@ export function OverviewClient({
 }) {
   const [mode, setMode] = useState<Mode>("live");
 
-  const positions = mode === "paper" ? paperPositions : livePositions;
+  // Union of both modes' strategy names -- switching Paper/Live never hides
+  // a strategy's toggle just because the other mode happened to have it.
+  const strategyNameOptions = Array.from(
+    new Set([...paperPositions, ...livePositions].map((p) => p.strategy_name).filter(Boolean))
+  )
+    .filter((name): name is string => name !== undefined)
+    .sort()
+    .map((name) => ({ value: name, label: STRATEGY_INFO[name]?.label ?? name }));
+  const [selectedStrategyNames, setSelectedStrategyNames] = useState<Set<string>>(
+    () => new Set(strategyNameOptions.map((o) => o.value))
+  );
+  const toggleStrategyName = (name: string) => {
+    setSelectedStrategyNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const positions = (mode === "paper" ? paperPositions : livePositions).filter(
+    (p) => !p.strategy_name || selectedStrategyNames.has(p.strategy_name)
+  );
   const summary = summarizePositions(positions);
   const openPositions = positions.filter((p) => p.status === "open");
   const pnlTrend = buildPnlTrend(positions);
@@ -131,7 +155,16 @@ export function OverviewClient({
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <ModeFilter value={mode} onChange={setMode} options={MODE_OPTIONS} />
+        <div className="flex flex-wrap items-center gap-3">
+          <ModeFilter value={mode} onChange={setMode} options={MODE_OPTIONS} />
+          <StrategyNameFilter
+            options={strategyNameOptions}
+            selected={selectedStrategyNames}
+            onToggle={toggleStrategyName}
+            onSelectAll={() => setSelectedStrategyNames(new Set(strategyNameOptions.map((o) => o.value)))}
+            onSelectNone={() => setSelectedStrategyNames(new Set())}
+          />
+        </div>
         {mode === "live" && (
           <span className="rounded bg-[color:var(--critical-text)]/15 px-1.5 py-0.5 text-xs font-medium uppercase text-[color:var(--critical-text)]">
             real money
