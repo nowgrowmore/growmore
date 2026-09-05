@@ -165,6 +165,12 @@ class PaperPosition(Base):
     unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Per-trade risk state for RiskManagedStrategy (stop_price, high_water,
+    # entry_atr, bars_held, direction) -- round-tripped through
+    # position_state["risk"] every tick so the wrapper's computed stop
+    # actually persists instead of resetting each tick. Empty {} for a
+    # position opened by a non-risk-managed strategy.
+    risk_state: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
 
     strategy: Mapped["Strategy"] = relationship(back_populates="paper_positions")
     instrument: Mapped["Instrument"] = relationship(back_populates="paper_positions")
@@ -351,6 +357,14 @@ class LivePosition(Base):
     unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # See PaperPosition.risk_state -- same meaning.
+    risk_state: Mapped[dict] = mapped_column(JSONType, nullable=False, default=dict)
+    # The resting real STOP_LOSS_MARKET order protecting this position (see
+    # DhanOrderClient.place_stop_loss_market_order), if a risk-managed
+    # strategy placed one. NULL for a non-risk-managed config, or before the
+    # entry's stop order has been placed yet.
+    stop_order_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_order_trigger_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
     strategy: Mapped["Strategy"] = relationship()
     instrument: Mapped["Instrument"] = relationship()

@@ -34,6 +34,7 @@ from typing import Any, Optional
 from growmore_bot.persistence.models import (
     AuditLog,
     BotSignalState,
+    Instrument,
     LiveOrder,
     LivePosition,
     SignalHistory,
@@ -145,10 +146,19 @@ class LiveTradingEngine:
 
         quote = self.dhan_client.get_quote(instrument)
 
+        existing_risk_state: dict = {}
+        if current_position_qty != 0 and live_position_id is not None:
+            existing_position = self.session.get(LivePosition, live_position_id)
+            existing_risk_state = existing_position.risk_state or {}
+
         position_state = (
             None
             if current_position_qty == 0
-            else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
+            else {
+                "quantity": current_position_qty,
+                "avg_entry_price": avg_entry_price,
+                "risk": existing_risk_state,
+            }
         )
         # See the identical fix/comment in paper/engine.py's process_tick --
         # Quote.close is yesterday's frozen close, not today's live price;
@@ -163,7 +173,12 @@ class LiveTradingEngine:
             if current_position_qty != 0 and live_position_id is not None:
                 position = self.session.get(LivePosition, live_position_id)
                 self._mark_to_market(position, quote.ltp, instrument.lot_size)
+                # See the identical fix in paper/engine.py -- persists
+                # RiskManagedStrategy's computed stop/trail forward instead
+                # of it resetting every tick (found live 2026-09-05).
+                position.risk_state = signal.risk_state or {}
                 self.session.add(position)
+                self._ensure_stop_order(position, instrument, signal.stop_price, label)
             logger.info("%s -- HOLD ltp=%s %s", label, quote.ltp, computed)
             return
 
@@ -172,12 +187,12 @@ class LiveTradingEngine:
         if signal.action == SignalAction.BUY:
             self._handle_buy(
                 config, instrument, quote, current_position_qty, size, now, label, computed,
-                live_position_id,
+                live_position_id, signal.risk_state,
             )
         elif signal.action == SignalAction.SELL:
             self._handle_sell(
                 instrument, current_position_qty, avg_entry_price, live_position_id, quote, size,
-                now, label, computed,
+                now, label, computed, signal.risk_state,
             )
 
     def force_close_for_expiry(
@@ -251,6 +266,14 @@ class LiveTradingEngine:
 
         now = datetime.now(timezone.utc)
         quote = self.dhan_client.get_quote(instrument)
+        position = self.session.get(LivePosition, live_position_id)
+        # Cancelled BEFORE placing this exit, deliberately -- otherwise both
+        # orders can be live for the brief window in between and race each
+        # other. Accepted trade-off, matching the retry-next-tick pattern
+        # this whole method already uses: if the market order below then
+        # fails, the position is briefly unprotected (no stop, no exit)
+        # until the next tick retries the same close-out condition.
+        self._cancel_stop_order_if_any(position, label)
         try:
             placed = self.order_client.place_market_order(
                 instrument, transaction_type="SELL", quantity=current_position_qty
@@ -272,7 +295,6 @@ class LiveTradingEngine:
             return
         pnl = (float(quote.ltp) - float(avg_entry_price)) * current_position_qty * instrument.lot_size
 
-        position = self.session.get(LivePosition, live_position_id)
         position.realized_pnl = float(position.realized_pnl or 0) + pnl
         position.quantity = 0
         position.status = "closed"
@@ -400,6 +422,46 @@ class LiveTradingEngine:
 
             self.session.add(order)
 
+            # The actual payoff of placing a real stop order: it can fill
+            # here, between polls, with the bot never having "decided" to
+            # exit -- the exchange enforced it. Detect that and close the
+            # LivePosition instead of leaving it recorded as open (which
+            # would otherwise risk a redundant sell once the strategy also
+            # decides to exit later).
+            if (
+                new_status == "TRADED"
+                and getattr(order, "side", None) == "sell"
+                and getattr(order, "close_reason", None) == "broker_stop_loss"
+            ):
+                self._close_position_from_filled_stop_order(order)
+
+    def _close_position_from_filled_stop_order(self, order: Any) -> None:
+        position = self.session.get(LivePosition, order.live_position_id)
+        if position is None or position.status != "open":
+            return  # Already closed by some other path -- nothing to do.
+
+        instrument = self.session.get(Instrument, position.instrument_id)
+        lot_size = getattr(instrument, "lot_size", 1) or 1
+        fill_price = float(order.fill_price) if order.fill_price is not None else float(position.avg_entry_price)
+        qty = float(order.quantity)
+        pnl = (fill_price - float(position.avg_entry_price)) * qty * lot_size
+
+        order.pnl = pnl
+        position.realized_pnl = float(position.realized_pnl or 0) + pnl
+        position.quantity = 0
+        position.status = "closed"
+        position.closed_at = datetime.now(timezone.utc)
+        position.stop_order_id = None
+        position.stop_order_trigger_price = None
+        self._mark_to_market(position, fill_price, lot_size)
+        self.session.add(position)
+        self.session.add(order)
+        logger.warning(
+            "LIVE STOP ORDER %s FILLED (REAL MONEY) -- position %s closed automatically, "
+            "fill_price=%.2f pnl=%.2f",
+            order.broker_order_id, position.id, fill_price, pnl,
+        )
+
     def retry_pending_auto_close(self, config: Any, instrument: Any, now: datetime) -> None:
         """Retry a real close-out that failed when the daily loss guard
         first tripped (`_trip_daily_loss_guard`). Called every tick for
@@ -437,6 +499,7 @@ class LiveTradingEngine:
 
         try:
             quote = self.dhan_client.get_quote(instrument)
+            self._cancel_stop_order_if_any(open_position, label=str(config.strategy_id))
             placed = self.order_client.place_market_order(
                 instrument, transaction_type="SELL", quantity=qty
             )
@@ -667,6 +730,88 @@ class LiveTradingEngine:
             (float(ltp) - float(position.avg_entry_price)) * float(position.quantity) * lot_size
         )
 
+    def _cancel_stop_order_if_any(self, position: Any, label: str = "") -> None:
+        """Cancel a risk-managed position's resting real stop order, if it
+        has one -- called before any OTHER exit (a strategy signal, time
+        stop, expiry/end-of-day flatten, daily-loss-limit auto-close) so the
+        stop doesn't stay resting and potentially fire after the bot has
+        already exited for a different reason. Never raises --
+        `DhanOrderClient.cancel_stop_loss_order` already swallows failures
+        (the order may have just filled moments earlier, an expected race).
+        """
+        if position is None or not getattr(position, "stop_order_id", None):
+            return
+        logger.warning(
+            "%s -- cancelling resting stop order %s ahead of a different exit",
+            label or position.id, position.stop_order_id,
+        )
+        self.order_client.cancel_stop_loss_order(position.stop_order_id)
+        position.stop_order_id = None
+        position.stop_order_trigger_price = None
+        self.session.add(position)
+
+    def _ensure_stop_order(
+        self, position: Any, instrument: Any, stop_price: Optional[float], label: str = ""
+    ) -> None:
+        """Place or move a risk-managed position's resting real stop order
+        so it always reflects the wrapper's latest computed `stop_price` --
+        the actual point of this feature: the exchange enforces this level
+        instantly, rather than the bot only detecting a breach on its next
+        ~5-minute poll. A missing stop (no prior placement, or a placement
+        that failed) is retried here every tick until it succeeds; an
+        unchanged stop is left alone (no reason to hit Dhan's API for a
+        trail that hasn't moved). Never raises -- placement/modify failures
+        are logged and audited by DhanOrderClient itself; the position
+        stays open either way and the next tick tries again.
+        """
+        if position is None or stop_price is None:
+            return
+        qty = int(float(position.quantity))
+        if qty <= 0:
+            return
+
+        if not position.stop_order_id:
+            try:
+                placed = self.order_client.place_stop_loss_market_order(
+                    instrument, transaction_type="SELL", quantity=qty, trigger_price=stop_price
+                )
+            except Exception:
+                logger.exception(
+                    "%s -- LIVE STOP ORDER placement FAILED -- position remains "
+                    "protected only by software, will retry next tick",
+                    label or position.id,
+                )
+                return
+            position.stop_order_id = placed.order_id
+            position.stop_order_trigger_price = stop_price
+            self.session.add(position)
+            # A real LiveOrder row, same as any other order -- this is what
+            # lets `reconcile_pending_orders` notice when it actually fills
+            # (pnl left None until then; close_reason is already known).
+            self.session.add(
+                LiveOrder(
+                    id=uuid.uuid4(),
+                    live_position_id=position.id,
+                    side="sell",
+                    quantity=qty,
+                    broker_order_id=placed.order_id,
+                    order_status=placed.order_status,
+                    fill_price=None,
+                    filled_at=datetime.now(timezone.utc),
+                    close_reason="broker_stop_loss",
+                )
+            )
+            return
+
+        if float(position.stop_order_trigger_price or 0) == float(stop_price):
+            return  # Trail hasn't moved -- nothing to modify.
+
+        self.order_client.modify_stop_loss_trigger(
+            position.stop_order_id, quantity=qty, new_trigger_price=stop_price
+        )
+        position.stop_order_trigger_price = stop_price
+        self.session.add(position)
+
     def _trip_daily_loss_guard(
         self,
         config: Any,
@@ -691,6 +836,9 @@ class LiveTradingEngine:
             auto_close_attempted = True
             try:
                 quote = self.dhan_client.get_quote(instrument)
+                self._cancel_stop_order_if_any(
+                    self.session.get(LivePosition, live_position_id), label
+                )
                 placed = self.order_client.place_market_order(
                     instrument, transaction_type="SELL", quantity=current_position_qty
                 )
@@ -777,6 +925,7 @@ class LiveTradingEngine:
         label: str = "",
         computed: str = "",
         live_position_id: Optional[uuid.UUID] = None,
+        risk_state: Optional[dict] = None,
     ) -> None:
         new_total = current_position_qty + size
         if new_total > float(config.max_position_size):
@@ -831,20 +980,20 @@ class LiveTradingEngine:
 
         if current_position_qty == 0 or live_position_id is None:
             position_id = uuid.uuid4()
-            self.session.add(
-                LivePosition(
-                    id=position_id,
-                    strategy_id=config.strategy_id,
-                    instrument_id=instrument.id,
-                    status="open",
-                    quantity=size,
-                    avg_entry_price=quote.ltp,
-                    realized_pnl=0,
-                    unrealized_pnl=0,
-                    opened_at=now,
-                    closed_at=None,
-                )
+            position = LivePosition(
+                id=position_id,
+                strategy_id=config.strategy_id,
+                instrument_id=instrument.id,
+                status="open",
+                quantity=size,
+                avg_entry_price=quote.ltp,
+                realized_pnl=0,
+                unrealized_pnl=0,
+                opened_at=now,
+                closed_at=None,
+                risk_state=risk_state or {},
             )
+            self.session.add(position)
         else:
             position_id = live_position_id
             position = self.session.get(LivePosition, live_position_id)
@@ -853,8 +1002,13 @@ class LiveTradingEngine:
             ) / new_total
             position.avg_entry_price = blended_avg
             position.quantity = new_total
+            position.risk_state = risk_state or {}
             self._mark_to_market(position, quote.ltp, instrument.lot_size)
             self.session.add(position)
+            # Quantity just changed -- a resting stop for the old quantity
+            # would be wrong; cancel it and let _ensure_stop_order below
+            # place a fresh one for the new total.
+            self._cancel_stop_order_if_any(position, label)
 
         self.session.add(
             LiveOrder(
@@ -869,6 +1023,8 @@ class LiveTradingEngine:
             )
         )
 
+        self._ensure_stop_order(position, instrument, (risk_state or {}).get("stop_price"), label)
+
     def _handle_sell(
         self,
         instrument: Any,
@@ -880,12 +1036,19 @@ class LiveTradingEngine:
         now: datetime,
         label: str = "",
         computed: str = "",
+        risk_state: Optional[dict] = None,
     ) -> None:
         if current_position_qty <= 0 or live_position_id is None or avg_entry_price is None:
             return  # Nothing open to close -- no shorting.
 
         close_qty = min(size, current_position_qty)
         remaining_qty = current_position_qty - close_qty
+
+        # A different exit is about to fire (the strategy's own signal) --
+        # cancel any resting stop first so it can't also fire and race this
+        # sell (see docs/technical-debt.md's real-stop-order entry).
+        position = self.session.get(LivePosition, live_position_id)
+        self._cancel_stop_order_if_any(position, label)
 
         try:
             placed = self.order_client.place_market_order(
@@ -904,12 +1067,13 @@ class LiveTradingEngine:
 
         pnl = (float(quote.ltp) - float(avg_entry_price)) * close_qty * instrument.lot_size
 
-        position = self.session.get(LivePosition, live_position_id)
         position.realized_pnl = float(position.realized_pnl or 0) + pnl
         position.quantity = remaining_qty
         if remaining_qty <= 0:
             position.status = "closed"
             position.closed_at = now
+        else:
+            position.risk_state = risk_state or {}
         self._mark_to_market(position, quote.ltp, instrument.lot_size)
         self.session.add(position)
 

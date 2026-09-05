@@ -147,10 +147,19 @@ class PaperTradingEngine:
 
         quote = self.dhan_client.get_quote(instrument)
 
+        existing_risk_state: dict = {}
+        if current_position_qty != 0 and paper_position_id is not None:
+            existing_position = self.session.get(PaperPosition, paper_position_id)
+            existing_risk_state = existing_position.risk_state or {}
+
         position_state = (
             None
             if current_position_qty == 0
-            else {"quantity": current_position_qty, "avg_entry_price": avg_entry_price}
+            else {
+                "quantity": current_position_qty,
+                "avg_entry_price": avg_entry_price,
+                "risk": existing_risk_state,
+            }
         )
         # Regression: found live 2026-09-04 -- Quote.close is Dhan's
         # ohlc.close, the PREVIOUS trading day's official close (fixed all
@@ -179,6 +188,11 @@ class PaperTradingEngine:
             if current_position_qty != 0 and paper_position_id is not None:
                 position = self.session.get(PaperPosition, paper_position_id)
                 self._mark_to_market(position, quote.ltp, instrument.lot_size)
+                # Carries the risk-managed wrapper's stop/trail forward --
+                # without this, RiskManagedStrategy always saw an empty risk
+                # dict and its computed stop was silently reset every tick
+                # (found live 2026-09-05).
+                position.risk_state = signal.risk_state or {}
                 self.session.add(position)
             # INFO, not DEBUG: fires once per tick per enabled config (every
             # 5 minutes by default), so it's a cheap, useful "still alive and
@@ -191,12 +205,12 @@ class PaperTradingEngine:
         if signal.action == SignalAction.BUY:
             self._handle_buy(
                 config, instrument, quote, current_position_qty, size, now, label, computed,
-                paper_position_id,
+                paper_position_id, signal.risk_state,
             )
         elif signal.action == SignalAction.SELL:
             self._handle_sell(
                 instrument, current_position_qty, avg_entry_price, paper_position_id, quote, size,
-                now, label, computed,
+                now, label, computed, signal.risk_state,
             )
 
     def _record_signal_state(
@@ -482,6 +496,7 @@ class PaperTradingEngine:
         label: str = "",
         computed: str = "",
         paper_position_id: Optional[uuid.UUID] = None,
+        risk_state: Optional[dict] = None,
     ) -> None:
         new_total = current_position_qty + size
         if new_total > float(config.max_position_size):
@@ -530,6 +545,7 @@ class PaperTradingEngine:
                     unrealized_pnl=0,
                     opened_at=now,
                     closed_at=None,
+                    risk_state=risk_state or {},
                 )
             )
         else:
@@ -544,6 +560,7 @@ class PaperTradingEngine:
             ) / new_total
             position.avg_entry_price = blended_avg
             position.quantity = new_total
+            position.risk_state = risk_state or {}
             self._mark_to_market(position, quote.ltp, instrument.lot_size)
             self.session.add(position)
 
@@ -569,6 +586,7 @@ class PaperTradingEngine:
         now: datetime,
         label: str = "",
         computed: str = "",
+        risk_state: Optional[dict] = None,
     ) -> None:
         if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
             return  # Nothing open to close -- no shorting.
@@ -585,6 +603,8 @@ class PaperTradingEngine:
         if remaining_qty <= 0:
             position.status = "closed"
             position.closed_at = now
+        else:
+            position.risk_state = risk_state or {}
         self._mark_to_market(position, quote.ltp, instrument.lot_size)
         self.session.add(position)
 

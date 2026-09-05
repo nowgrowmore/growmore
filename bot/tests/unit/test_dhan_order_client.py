@@ -97,6 +97,178 @@ def test_rejects_invalid_transaction_type(instrument):
     session.add.assert_not_called()
 
 
+def test_stop_loss_order_refuses_when_live_trading_disabled(instrument):
+    from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
+
+    session = MagicMock()
+    client = _make_client(live_trading_enabled=False, session=session)
+
+    with pytest.raises(LiveTradingDisabledError):
+        client.place_stop_loss_market_order(
+            instrument, transaction_type="SELL", quantity=1, trigger_price=146760
+        )
+
+    session.add.assert_not_called()
+
+
+@responses.activate
+def test_places_a_real_stop_loss_market_order_and_writes_audit_log(instrument):
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"orderId": "112111182199", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    placed = client.place_stop_loss_market_order(
+        instrument, transaction_type="SELL", quantity=1, trigger_price=146760
+    )
+
+    assert placed.order_id == "112111182199"
+    assert placed.order_status == "TRANSIT"
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["transactionType"] == "SELL"
+    assert sent["orderType"] == "STOP_LOSS_MARKET"
+    assert sent["triggerPrice"] == 146760
+    assert sent["productType"] == "MARGIN"
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_placed"
+    assert audit_entries[0].payload["broker_order_id"] == "112111182199"
+    assert audit_entries[0].payload["trigger_price"] == 146760
+
+
+@responses.activate
+def test_stop_loss_order_failure_raises_and_writes_audit_log(instrument):
+    from growmore_bot.broker.dhan_order_client import DhanOrderError
+
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"errorCode": "DH-901", "errorMessage": "Insufficient balance"},
+        status=400,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    with pytest.raises(DhanOrderError):
+        client.place_stop_loss_market_order(
+            instrument, transaction_type="SELL", quantity=1, trigger_price=146760
+        )
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_failed"
+
+
+def test_modify_stop_loss_trigger_refuses_when_live_trading_disabled():
+    from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
+
+    session = MagicMock()
+    client = _make_client(live_trading_enabled=False, session=session)
+
+    with pytest.raises(LiveTradingDisabledError):
+        client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)
+
+
+@responses.activate
+def test_modify_stop_loss_trigger_writes_audit_log_on_success():
+    responses.add(
+        responses.PUT,
+        f"{API_BASE}/orders/112111182199",
+        json={"orderId": "112111182199", "orderStatus": "PENDING"},
+        status=200,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["triggerPrice"] == 148000
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_modified"
+
+
+@responses.activate
+def test_modify_stop_loss_trigger_does_not_raise_on_failure_only_audits():
+    responses.add(
+        responses.PUT,
+        f"{API_BASE}/orders/112111182199",
+        json={"errorCode": "DH-904", "errorMessage": "Order already executed"},
+        status=400,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)  # must not raise
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_modify_failed"
+
+
+def test_cancel_stop_loss_order_refuses_when_live_trading_disabled():
+    from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
+
+    session = MagicMock()
+    client = _make_client(live_trading_enabled=False, session=session)
+
+    with pytest.raises(LiveTradingDisabledError):
+        client.cancel_stop_loss_order("112111182199")
+
+
+@responses.activate
+def test_cancel_stop_loss_order_writes_audit_log_on_success():
+    responses.add(
+        responses.DELETE,
+        f"{API_BASE}/orders/112111182199",
+        json={"orderId": "112111182199", "orderStatus": "CANCELLED"},
+        status=200,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    client.cancel_stop_loss_order("112111182199")
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_cancelled"
+
+
+@responses.activate
+def test_cancel_stop_loss_order_does_not_raise_when_already_filled():
+    # A real race: the stop may have triggered moments before the bot
+    # decided to exit for its own reason -- cancelling an already-filled
+    # order is expected, not fatal.
+    responses.add(
+        responses.DELETE,
+        f"{API_BASE}/orders/112111182199",
+        json={"errorCode": "DH-907", "errorMessage": "Order already executed/cancelled"},
+        status=400,
+    )
+    session = MagicMock()
+    client = _make_client(session=session)
+
+    client.cancel_stop_loss_order("112111182199")  # must not raise
+
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert len(audit_entries) == 1
+    assert audit_entries[0].event_type == "live_stop_order_cancel_failed"
+
+
 def test_get_order_status_refuses_when_live_trading_disabled():
     from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
 

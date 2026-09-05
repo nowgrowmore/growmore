@@ -27,7 +27,7 @@ import pytest
 
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.paper.engine import PaperTradingEngine, _format_debug_state
-from growmore_bot.persistence.models import BotSignalState, PaperOrder
+from growmore_bot.persistence.models import BotSignalState, PaperOrder, PaperPosition
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -54,6 +54,25 @@ class _SpyStrategy(Strategy):
     def on_bar(self, bar, position_state):
         self.received_bars.append(bar)
         return self._signal
+
+
+class _RiskAwareSpyStrategy(Strategy):
+    """Emits a scripted sequence of (action, risk_state) pairs and records
+    the `position_state` it's actually called with each tick -- lets a test
+    assert the engine round-trips `position_state["risk"]` without needing
+    to also exercise RiskManagedStrategy's real ATR math.
+    """
+
+    def __init__(self, steps: list[tuple]):
+        self._steps = list(steps)
+        self.received_position_states: list = []
+
+    def on_bar(self, bar, position_state):
+        self.received_position_states.append(position_state)
+        action, risk_state = self._steps.pop(0)
+        # Real RiskManagedStrategy sets both risk_state["stop_price"] and
+        # Signal.stop_price to the same value -- match that here.
+        return Signal(action=action, size=1, risk_state=risk_state, stop_price=risk_state.get("stop_price"))
 
 
 def _bot_config(**overrides):
@@ -317,7 +336,7 @@ def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -359,7 +378,7 @@ def test_daily_loss_limit_disabled_skips_the_guard_even_when_breached():
     session.query.return_value.filter_by.return_value.one_or_none.return_value = None
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -422,6 +441,7 @@ def test_sell_closes_position_and_records_lot_scaled_realized_pnl():
         unrealized_pnl=0,
         status="open",
         closed_at=None,
+        risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -467,6 +487,7 @@ def test_partial_sell_reduces_quantity_without_closing():
         unrealized_pnl=0,
         status="open",
         closed_at=None,
+        risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -501,6 +522,7 @@ def test_buy_adding_to_existing_position_blends_avg_entry_price():
         unrealized_pnl=0,
         status="open",
         closed_at=None,
+        risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -534,7 +556,7 @@ def test_hold_marks_open_position_to_market():
 
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -573,7 +595,7 @@ def test_buy_adding_to_existing_position_recomputes_unrealized_pnl():
 
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -598,7 +620,7 @@ def test_partial_sell_recomputes_unrealized_pnl_on_remaining_quantity():
 
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=3, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -621,7 +643,7 @@ def test_force_close_for_expiry_closes_position_and_records_pnl():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -657,7 +679,7 @@ def test_force_close_end_of_day_closes_position_with_its_own_audit_label():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -704,7 +726,7 @@ def test_force_close_for_expiry_is_logged_at_warning_level(caplog):
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -810,6 +832,47 @@ def test_process_tick_appends_a_signal_history_row_on_buy_too():
     assert added[0].action == "BUY"
 
 
+def test_risk_state_round_trips_across_ticks_for_a_risk_managed_strategy():
+    # Regression: found live 2026-09-05 -- neither engine ever constructed a
+    # "risk" key in position_state, so RiskManagedStrategy (or any strategy
+    # carrying per-trade risk_state) always saw an empty risk dict and its
+    # computed stop was silently reset every single tick.
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=1)
+    strategy = _RiskAwareSpyStrategy([
+        (SignalAction.BUY, {"stop_price": 95.0, "high_water": 100.0}),
+        (SignalAction.HOLD, {"stop_price": 97.0, "high_water": 105.0}),
+    ])
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+
+    # Tick 1: BUY, opens a new position -- its risk_state must be seeded
+    # from the signal, not left empty.
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+    added_positions = [
+        c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], PaperPosition)
+    ]
+    assert len(added_positions) == 1
+    position = added_positions[0]
+    assert position.risk_state == {"stop_price": 95.0, "high_water": 100.0}
+
+    # Tick 2: HOLD, with the position now open -- the engine must fetch the
+    # persisted risk_state back into position_state["risk"] (proving it
+    # actually round-trips), and then persist the newly-ratcheted value.
+    session.get.return_value = position
+    dhan_client.get_quote.return_value = Quote(ltp=105, open=105, high=106, low=104, close=105)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=100, paper_position_id=position.id,
+    )
+    assert strategy.received_position_states[1]["risk"] == {"stop_price": 95.0, "high_water": 100.0}
+    assert position.risk_state == {"stop_price": 97.0, "high_water": 105.0}
+
+
 def test_buy_fill_is_logged_at_info_level(caplog):
     # Found while running the bot for real: nothing was ever logged when a
     # trade actually happened -- you'd only find out by checking the
@@ -867,7 +930,7 @@ def test_sell_fill_is_logged_with_pnl(caplog):
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 

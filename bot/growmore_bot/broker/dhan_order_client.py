@@ -154,6 +154,212 @@ class DhanOrderClient:
         logger.warning("LIVE ORDER PLACED (REAL MONEY): %s", audit_payload)
         return PlacedOrder(order_id=order_id, order_status=order_status)
 
+    def place_stop_loss_market_order(
+        self, instrument: Any, transaction_type: str, quantity: int, trigger_price: float
+    ) -> PlacedOrder:
+        """Place a real resting STOP_LOSS_MARKET (SL-M) order on MCX for
+        `instrument` -- lets the EXCHANGE enforce a risk-managed strategy's
+        stop instantly, instead of the bot only detecting a breach on its
+        next ~5-minute poll (see growmore_bot.risk.wrapper.RiskManagedStrategy
+        and docs/technical-debt.md's "software stop, not a real order" entry).
+
+        `transaction_type` is the OPPOSITE side of the open position (SELL
+        to protect a long) -- same convention as `place_market_order`'s
+        closing calls. `trigger_price` is the wrapper's own computed
+        `Signal.stop_price`, in the same per-lot rupee terms the quote/ATR
+        values are already in.
+
+        **UNVERIFIED against a real MCX order**: `order_type=SLM` +
+        `trigger_price` is confirmed present in the installed dhanhq SDK
+        (`dhanhq.SLM = "STOP_LOSS_MARKET"`, `_order.py`'s `place_order`
+        signature), but whether Dhan actually accepts an SL-M order for the
+        MCX_COMM segment, and what its real fill behavior is around a fast
+        move, has not been confirmed with a real placed order. Resolve
+        before relying on this for real risk management -- see
+        docs/pending-actions.md.
+
+        Raises/audits identically to `place_market_order`.
+        """
+        from growmore_bot.persistence.models import AuditLog
+
+        if not self._live_trading_enabled:
+            raise LiveTradingDisabledError(
+                "Refusing to place a real order: live trading is disabled "
+                "(Settings().live_trading_enabled is False)."
+            )
+        if transaction_type not in _VALID_TRANSACTION_TYPES:
+            raise ValueError(f"transaction_type must be BUY or SELL, got {transaction_type!r}")
+
+        now = datetime.now(timezone.utc)
+        audit_payload: dict[str, Any] = {
+            "instrument_id": str(getattr(instrument, "id", instrument)),
+            "symbol": instrument.symbol,
+            "security_id": instrument.security_id,
+            "transaction_type": transaction_type,
+            "quantity": quantity,
+            "trigger_price": trigger_price,
+            "order_purpose": "stop_loss",
+        }
+
+        response = self._sdk.place_order(
+            security_id=instrument.security_id,
+            exchange_segment=instrument.exchange_segment,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type=self._sdk.SLM,
+            product_type="MARGIN",
+            price=0,
+            trigger_price=trigger_price,
+        )
+
+        if response.get("status") != "success":
+            audit_payload["result"] = "failed"
+            audit_payload["error"] = str(response.get("remarks"))
+            self._session.add(
+                AuditLog(
+                    id=uuid.uuid4(), ts=now, event_type="live_stop_order_failed", payload=audit_payload
+                )
+            )
+            logger.error("LIVE STOP ORDER FAILED (real money attempt): %s", audit_payload)
+            raise DhanOrderError(str(response.get("remarks")))
+
+        data = response.get("data") or {}
+        order_id = data.get("orderId")
+        order_status = data.get("orderStatus")
+        audit_payload["result"] = "placed"
+        audit_payload["broker_order_id"] = order_id
+        audit_payload["order_status"] = order_status
+        self._session.add(
+            AuditLog(id=uuid.uuid4(), ts=now, event_type="live_stop_order_placed", payload=audit_payload)
+        )
+        logger.warning("LIVE STOP ORDER PLACED (REAL MONEY): %s", audit_payload)
+        return PlacedOrder(order_id=order_id, order_status=order_status)
+
+    def modify_stop_loss_trigger(self, order_id: str, quantity: int, new_trigger_price: float) -> None:
+        """Move a resting SL-M order's trigger price -- how a risk-managed
+        position's trailing stop actually ratchets at the exchange, instead
+        of the bot re-detecting and re-placing an order every tick.
+
+        **UNVERIFIED against a real order**: the installed SDK's
+        `modify_order` sends a `legName` field on every call regardless of
+        whether the target is a plain order or a Super Order leg
+        (`_order.py`); its effect (if any) on a plain SL-M order's modify
+        has not been confirmed against a real Dhan response. Passed as an
+        empty string here since this is not a Super Order leg.
+
+        Never raises: a modify failing (already filled, already cancelled,
+        a stale trigger) is logged and audited, not treated as fatal -- the
+        position stays open with whatever stop is actually resting, and the
+        next tick's reconciliation is what actually matters here.
+        """
+        from growmore_bot.persistence.models import AuditLog
+
+        if not self._live_trading_enabled:
+            raise LiveTradingDisabledError(
+                "Refusing to modify a real order: live trading is disabled "
+                "(Settings().live_trading_enabled is False)."
+            )
+
+        now = datetime.now(timezone.utc)
+        audit_payload: dict[str, Any] = {
+            "broker_order_id": order_id,
+            "new_trigger_price": new_trigger_price,
+        }
+        try:
+            response = self._sdk.modify_order(
+                order_id=order_id,
+                order_type=self._sdk.SLM,
+                leg_name="",
+                quantity=quantity,
+                price=0,
+                trigger_price=new_trigger_price,
+                disclosed_quantity=0,
+                validity="DAY",
+            )
+        except Exception as exc:
+            audit_payload["result"] = "failed"
+            audit_payload["error"] = str(exc)
+            self._session.add(
+                AuditLog(
+                    id=uuid.uuid4(), ts=now, event_type="live_stop_order_modify_failed",
+                    payload=audit_payload,
+                )
+            )
+            logger.exception("LIVE STOP ORDER MODIFY FAILED: %s", audit_payload)
+            return
+
+        if response.get("status") != "success":
+            audit_payload["result"] = "failed"
+            audit_payload["error"] = str(response.get("remarks"))
+            self._session.add(
+                AuditLog(
+                    id=uuid.uuid4(), ts=now, event_type="live_stop_order_modify_failed",
+                    payload=audit_payload,
+                )
+            )
+            logger.warning("LIVE STOP ORDER MODIFY FAILED: %s", audit_payload)
+            return
+
+        audit_payload["result"] = "modified"
+        self._session.add(
+            AuditLog(id=uuid.uuid4(), ts=now, event_type="live_stop_order_modified", payload=audit_payload)
+        )
+        logger.warning("LIVE STOP ORDER MODIFIED (REAL MONEY): %s", audit_payload)
+
+    def cancel_stop_loss_order(self, order_id: str) -> None:
+        """Cancel a resting SL-M order -- called before the bot places any
+        OTHER exit (a strategy signal, time stop, end-of-day flatten,
+        contract-expiry close-out, daily-loss-limit auto-close), so the
+        stop order doesn't stay resting and fire unexpectedly after the bot
+        has already exited for a different reason.
+
+        Never raises: cancelling an order that already filled or was
+        already cancelled is an entirely expected race (the stop may have
+        just triggered moments before the bot decided to exit for its own
+        reason) -- logged and audited, not fatal.
+        """
+        from growmore_bot.persistence.models import AuditLog
+
+        if not self._live_trading_enabled:
+            raise LiveTradingDisabledError(
+                "Refusing to cancel a real order: live trading is disabled "
+                "(Settings().live_trading_enabled is False)."
+            )
+
+        now = datetime.now(timezone.utc)
+        audit_payload: dict[str, Any] = {"broker_order_id": order_id}
+        try:
+            response = self._sdk.cancel_order(order_id)
+        except Exception as exc:
+            audit_payload["result"] = "failed"
+            audit_payload["error"] = str(exc)
+            self._session.add(
+                AuditLog(
+                    id=uuid.uuid4(), ts=now, event_type="live_stop_order_cancel_failed",
+                    payload=audit_payload,
+                )
+            )
+            logger.warning("LIVE STOP ORDER CANCEL FAILED (may already be filled): %s", audit_payload)
+            return
+
+        if response.get("status") != "success":
+            audit_payload["result"] = "failed"
+            audit_payload["error"] = str(response.get("remarks"))
+            self._session.add(
+                AuditLog(
+                    id=uuid.uuid4(), ts=now, event_type="live_stop_order_cancel_failed",
+                    payload=audit_payload,
+                )
+            )
+            logger.warning("LIVE STOP ORDER CANCEL FAILED (may already be filled): %s", audit_payload)
+            return
+
+        audit_payload["result"] = "cancelled"
+        self._session.add(
+            AuditLog(id=uuid.uuid4(), ts=now, event_type="live_stop_order_cancelled", payload=audit_payload)
+        )
+        logger.warning("LIVE STOP ORDER CANCELLED: %s", audit_payload)
+
     def get_order_status(self, order_id: str) -> dict:
         """Read-only lookup of a real order's current status (GET
         /orders/{order_id}) -- used for fill reconciliation (see

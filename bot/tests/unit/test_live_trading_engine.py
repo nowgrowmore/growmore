@@ -20,7 +20,7 @@ import pytest
 from growmore_bot.broker.dhan_client import Quote
 from growmore_bot.broker.dhan_order_client import PlacedOrder
 from growmore_bot.live.engine import LiveTradingEngine, _format_debug_state
-from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder
+from growmore_bot.persistence.models import AuditLog, BotSignalState, LiveOrder, LivePosition
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
@@ -43,6 +43,23 @@ class _SpyStrategy(Strategy):
     def on_bar(self, bar, position_state):
         self.received_bars.append(bar)
         return self._signal
+
+
+class _RiskAwareSpyStrategy(Strategy):
+    """See the identical class in test_paper_engine.py -- emits a scripted
+    sequence of (action, risk_state) pairs and records the position_state
+    it's actually called with each tick."""
+
+    def __init__(self, steps: list[tuple]):
+        self._steps = list(steps)
+        self.received_position_states: list = []
+
+    def on_bar(self, bar, position_state):
+        self.received_position_states.append(position_state)
+        action, risk_state = self._steps.pop(0)
+        # Real RiskManagedStrategy sets both risk_state["stop_price"] and
+        # Signal.stop_price to the same value -- match that here.
+        return Signal(action=action, size=1, risk_state=risk_state, stop_price=risk_state.get("stop_price"))
 
 
 def _bot_config(**overrides):
@@ -207,7 +224,7 @@ def test_sell_order_failure_is_caught_not_raised():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -234,7 +251,7 @@ def test_force_close_for_expiry_order_failure_is_caught_not_raised():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -334,7 +351,7 @@ def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -376,7 +393,7 @@ def test_daily_loss_limit_disabled_skips_the_guard_even_when_breached():
     session.query.return_value.filter_by.return_value.one_or_none.return_value = None
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -408,7 +425,7 @@ def test_daily_loss_limit_trip_auto_close_failure_is_logged_not_raised():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -452,7 +469,7 @@ def test_retry_pending_auto_close_succeeds_and_clears_the_retry_state():
     session = MagicMock()
     open_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.query.return_value.filter_by.return_value.one_or_none.return_value = open_position
 
@@ -490,7 +507,7 @@ def test_retry_pending_auto_close_failure_backs_off_and_never_raises():
     session = MagicMock()
     open_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.query.return_value.filter_by.return_value.one_or_none.return_value = open_position
 
@@ -557,7 +574,7 @@ def test_sell_closes_position_places_a_real_order_and_records_realized_pnl():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -578,6 +595,36 @@ def test_sell_closes_position_places_a_real_order_and_records_realized_pnl():
     assert added_orders[0].close_reason == "strategy_signal"
 
 
+def test_sell_cancels_the_resting_stop_order_before_placing_the_exit():
+    # A different exit is firing (the strategy's own signal) -- the resting
+    # real stop order must be cancelled first, so it can't also fire and
+    # race this sell.
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.SELL, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD2", order_status="TRANSIT")
+    session = MagicMock()
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
+        stop_order_id="STOP1", stop_order_trigger_price=146760,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, live_position_id=existing_position.id,
+    )
+
+    order_client.cancel_stop_loss_order.assert_called_once_with("STOP1")
+    assert existing_position.stop_order_id is None
+    assert existing_position.stop_order_trigger_price is None
+
+
 def test_force_close_for_expiry_places_a_real_closing_order_and_records_pnl():
     config = _bot_config()
     instrument = _instrument(config, lot_size=100)
@@ -588,7 +635,7 @@ def test_force_close_for_expiry_places_a_real_closing_order_and_records_pnl():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -624,7 +671,7 @@ def test_force_close_end_of_day_places_a_real_closing_order_with_its_own_audit_l
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 
@@ -694,6 +741,58 @@ def test_reconcile_pending_orders_updates_status_and_fill_price():
     assert pending_order.order_status == "TRADED"
     assert float(pending_order.fill_price) == pytest.approx(155123.5)
     session.add.assert_any_call(pending_order)
+
+
+def test_reconcile_pending_orders_closes_the_position_when_a_stop_order_fills():
+    # The actual payoff of placing a real stop order: it can fill here,
+    # between polls, with the bot never having "decided" to exit -- the
+    # exchange enforced it. This must close the LivePosition, not just
+    # correct the LiveOrder's own status/fill_price and leave the position
+    # looking like it's still open.
+    dhan_client = MagicMock()
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "status": "success",
+        "data": [{"orderId": "STOP1", "orderStatus": "TRADED", "averageTradedPrice": 146750.0}],
+    }
+    session = MagicMock()
+    position_id = uuid.uuid4()
+    stop_order = SimpleNamespace(
+        id=uuid.uuid4(), broker_order_id="STOP1", order_status="TRANSIT", fill_price=None,
+        side="sell", close_reason="broker_stop_loss", quantity=1, live_position_id=position_id,
+        pnl=None,
+    )
+    session.query.return_value.filter.return_value.all.return_value = [stop_order]
+    instrument_id = uuid.uuid4()
+    position = SimpleNamespace(
+        id=position_id, quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None, instrument_id=instrument_id,
+        stop_order_id="STOP1", stop_order_trigger_price=146760,
+    )
+    instrument = SimpleNamespace(id=instrument_id, lot_size=100)
+
+    def fake_get(model, obj_id):
+        from growmore_bot.persistence.models import Instrument, LivePosition
+        if model is LivePosition:
+            return position
+        if model is Instrument:
+            return instrument
+        return None
+
+    session.get.side_effect = fake_get
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.reconcile_pending_orders()
+
+    assert stop_order.order_status == "TRADED"
+    assert float(stop_order.fill_price) == pytest.approx(146750.0)
+    # (146750 - 150000) * 1 lot * 100 lot size = -325,000
+    assert float(stop_order.pnl) == pytest.approx(-325_000)
+    assert position.status == "closed"
+    assert position.quantity == 0
+    assert float(position.realized_pnl) == pytest.approx(-325_000)
+    assert position.stop_order_id is None
+    assert position.stop_order_trigger_price is None
 
 
 def test_reconcile_pending_orders_also_handles_a_bare_dict_data_shape():
@@ -916,6 +1015,62 @@ def test_process_tick_appends_a_signal_history_row_every_tick_including_hold():
     assert float(added[0].ltp) == pytest.approx(155000)
 
 
+def test_risk_state_round_trips_across_ticks_for_a_risk_managed_strategy():
+    # See the identical regression test in test_paper_engine.py -- found
+    # live 2026-09-05: neither engine ever constructed a "risk" key in
+    # position_state, so a risk-managed strategy's computed stop was
+    # silently reset every single tick.
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=1)
+    strategy = _RiskAwareSpyStrategy([
+        (SignalAction.BUY, {"stop_price": 95.0, "high_water": 100.0}),
+        (SignalAction.HOLD, {"stop_price": 97.0, "high_water": 105.0}),
+    ])
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD1", order_status="TRANSIT")
+    order_client.place_stop_loss_market_order.return_value = PlacedOrder(
+        order_id="STOP1", order_status="TRANSIT"
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+    added_positions = {
+        id(c.args[0]) for c in session.add.call_args_list if isinstance(c.args[0], LivePosition)
+    }
+    assert len(added_positions) == 1
+    position = [
+        c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], LivePosition)
+    ][0]
+    assert position.risk_state == {"stop_price": 95.0, "high_water": 100.0}
+    # The real point of Part 2: a resting broker-side stop order is placed
+    # at entry, at the wrapper's own computed stop price.
+    order_client.place_stop_loss_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1, trigger_price=95.0
+    )
+    assert position.stop_order_id == "STOP1"
+    assert position.stop_order_trigger_price == 95.0
+
+    session.get.return_value = position
+    dhan_client.get_quote.return_value = Quote(ltp=105, open=105, high=106, low=104, close=105)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=100, live_position_id=position.id,
+    )
+    assert strategy.received_position_states[1]["risk"] == {"stop_price": 95.0, "high_water": 100.0}
+    assert position.risk_state == {"stop_price": 97.0, "high_water": 105.0}
+    # The trail ratcheted (95.0 -> 97.0) -- the resting stop is MOVED via
+    # modify, not cancelled and re-placed.
+    order_client.modify_stop_loss_trigger.assert_called_once_with(
+        "STOP1", quantity=1, new_trigger_price=97.0
+    )
+    assert position.stop_order_trigger_price == 97.0
+
+
 def test_hold_marks_open_position_to_market():
     config = _bot_config()
     instrument = _instrument(config, lot_size=100)
@@ -926,7 +1081,7 @@ def test_hold_marks_open_position_to_market():
     session = MagicMock()
     existing_position = SimpleNamespace(
         id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
-        unrealized_pnl=0, status="open", closed_at=None,
+        unrealized_pnl=0, status="open", closed_at=None, risk_state={},
     )
     session.get.return_value = existing_position
 

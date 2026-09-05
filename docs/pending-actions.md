@@ -15,7 +15,7 @@ Plain-language list of things only you can do or decide. Updated as the project 
   universe per your call). Found and fixed a real bug along the way: Dhan's quote endpoint needs
   security IDs as integers, not strings (`bot/growmore_bot/broker/dhan_client.py`).
 - [x] **Fund the Dhan account ledger balance** — done (2026-09-04). Covers the ₹499+GST/month Data
-  API renewal; also the real capital that would back any live order once that's ever enabled.
+  API renewal; also the real capital that would back any live order once that's ever en/abled.
 - [ ] Confirm you're comfortable with the production key having order-placement capability at the
   API level even though our bot will never call those endpoints (Dhan doesn't offer a data-only
   key). Access is scoped by what our code calls, not by the key itself.
@@ -27,7 +27,10 @@ Plain-language list of things only you can do or decide. Updated as the project 
   "Invalid TOTP" — turned out to be a one-off timing fluke, not a wrong secret or a bug; confirmed
   by comparing a locally-generated code against the authenticator app in real time before retrying.)
 
+
+
 ## Before enabling anything beyond paper trading
+
 - [ ] Decide per-strategy virtual capital and risk limits (defaults are placeholders in `bot/growmore_bot/config.py` — currently ₹5,00,000 per strategy, review before relying on the numbers).
 - [x] Full strategy/parameter sweep completed and **persisted to the real Neon database** — re-run
   2026-09-04 after fixing the cross-instrument-contamination and frozen-live-indicator bugs (the
@@ -38,14 +41,14 @@ Plain-language list of things only you can do or decide. Updated as the project 
   position-sizing isn't margin-normalized across commodities). Current standout: **MACD Trend
   (5,13,5) + Gold Mini** (CAGR 21.9%, Sharpe 1.38, 91 trades) — corrected down from a previously
   reported 78.2% CAGR / Sharpe 1.56.
-- [x] **3 `bot_config` pairs enabled for paper trading** (2026-09-03), ₹2,50,000 virtual capital /
+- [x] **3** `bot_config` **pairs enabled for paper trading** (2026-09-03), ₹2,50,000 virtual capital /
   1 lot max / ₹15,000 daily loss limit each: MACD (5,13,5) + Gold Mini (the top backtest pick),
   RSI Mean-Reversion (7, 30/70) + Copper, and MACD (12,26,9) + Aluminium Mini — the latter two
   chosen because real live data showed them genuinely close to a signal (RSI at 26 vs. a 30
   threshold; MACD/signal gap of ~0.2), specifically to see different strategy behaviors (a
   mean-reversion strategy vs. two different MACD parameterizations) play out for real, not just in
   backtest. All three ticking correctly as of this check.
-- [x] **4th `bot_config` added (2026-09-04)**: VWAP+CPR Session-Bounce + Gold Mini, paper mode,
+- [x] **4th** `bot_config` **added (2026-09-04)**: VWAP+CPR Session-Bounce + Gold Mini, paper mode,
   same ₹2,50,000/1 lot/₹15,000 risk limits. Unlike the others, this one has **no backtest at all by
   design** (see `docs/goldmini-regime-switch-results.md`) — it trades off Dhan's live intraday
   session VWAP, which doesn't exist in historical data, so it's being validated by real paper trading
@@ -68,6 +71,8 @@ Plain-language list of things only you can do or decide. Updated as the project 
   mid-to-late September 2026 — worth a quick log check around then just to confirm the automatic
   path actually worked, since it's new and unproven against a real live rollover yet.
 
+
+
 ## Before any real (live) order placement — not in scope yet
 
 - [x] **Real order-placement code path built** (2026-09-04) — `dhan_order_client.py` +
@@ -81,8 +86,7 @@ Plain-language list of things only you can do or decide. Updated as the project 
   trading is already globally armed for ALUMINI). It now shows up filtered to "Live" on the
   Strategies page, ready to flip on with the existing enable/disable toggle whenever you decide to.
 - [ ] **How to actually turn this on, when the items below are ready:** (1) set `LIVE_TRADING_ENABLED
-  =true` in the bot's `.env.local`, (2) directly update the specific `bot_config` row(s) you want live
-  to `mode = 'live'` in the database (no dashboard UI for this, deliberately) — everything else (which
+  =true`in the bot's`.env.local`, (2) directly update the specific` bot_config`row(s) you want live to`mode = 'live'` in the database (no dashboard UI for this, deliberately) — everything else (which
   strategy, which instrument, risk limits) stays exactly as already configured for paper trading.
   Both switches are independent; flipping only one does nothing. Ask the agent to do this when you're
   ready — don't do it via raw SQL yourself without walking through the current state of the items
@@ -91,7 +95,7 @@ Plain-language list of things only you can do or decide. Updated as the project 
   `growmore-bot` (Bangalore, IP `139.59.72.81`), hardened, running as a systemd service. Verified
   ticking correctly as the sole instance (the laptop's copy was stopped to avoid double-trading
   against the shared database).
-- [x] **Static IP (`139.59.72.81`) registered with Dhan** (2026-09-04, Profile → Get Trading & Data
+- [x] **Static IP (**`139.59.72.81`**) registered with Dhan** (2026-09-04, Profile → Get Trading & Data
   APIs → Add IP on web.dhan.co). Dhan's real static-IP requirement for Order Placement APIs is now
   actually satisfied, not just "the VPS exists." **Locked for 7 days from today** — don't try to
   change it before ~2026-09-11 even if the VPS needs to move.
@@ -128,6 +132,19 @@ Plain-language list of things only you can do or decide. Updated as the project 
   single real 1-lot MCX order placed manually through their web/app interface and read back what
   `quantity` the API reports for it), tell the agent the answer, and it will make the code and the
   docstring agree. Do this before flipping either live-trading switch.
+- [ ] **Verify the real broker-side stop order (SL-M) mechanism against an actual placed order,
+  before enabling any `risk_managed` config in live mode.** Built 2026-09-05 (`DhanOrderClient.
+  place_stop_loss_market_order`/`modify_stop_loss_trigger`/`cancel_stop_loss_order`) to place a real
+  resting stop at Dhan for a risk-managed position, so the exchange enforces it instantly instead of
+  the bot only detecting a breach on its next ~5-minute poll. Confirmed against the installed
+  `dhanhq` SDK's source code (the request shapes exist), but NOT against a real Dhan response:
+  whether Dhan accepts `STOP_LOSS_MARKET` for the `MCX_COMM` segment, whether `modify_order` actually
+  moves a plain SL-M order's trigger price the way it's expected to (the SDK sends a `legName` field
+  on every modify call, including for a non-Super-Order, and its real effect there hasn't been
+  checked), and what a filled stop order's real response looks like. **What to do**: same as the
+  quantity-unit item above -- either ask Dhan support directly, or place one real small SL-M order
+  manually (or via a scratch script once you're ready) on a real MCX contract and confirm it behaves
+  as expected, including a manual modify and cancel. Tell the agent what you find.
 - [x] **Re-run the multi-instrument backtest sweep** -- done 2026-09-04. Old 112 corrupted rows
   deleted from the real Neon database, full 144-run sweep re-run fresh. See
   `docs/backtest-results.md` for the corrected numbers -- most notably, GOLDM `rsi_mean_reversion`
@@ -135,7 +152,10 @@ Plain-language list of things only you can do or decide. Updated as the project 
   own merits (highest win rate in the set), but worth a fresh look now that the number that
   originally justified it has changed this much -- your call, nothing technical left to do here.
 
+
+
 ## Infrastructure setup (one-time)
+
 - [x] Vercel project `growmore-dashboard` created (team `beautifulforce`), GitHub-connected, Neon
   Postgres provisioned and migrated.
 - [x] ~~Upgrade the `beautifulforce` Vercel team to Pro, enable Vercel Authentication on
@@ -147,3 +167,4 @@ Plain-language list of things only you can do or decide. Updated as the project 
 - [ ] **Confirm only your account (and anyone else you intend) is a member of the `beautifulforce`
   Vercel team** — this is what actually gates access to the Preview URL via Vercel Authentication,
   today, not something waiting on a future Pro upgrade. Worth checking now.
+

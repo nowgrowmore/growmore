@@ -158,13 +158,38 @@
   instrument, not applying universally at 2×ATR.** That calibration has not been done and is the
   obvious next experiment; until it is, a risk-managed config should only be enabled on an
   instrument where the paired comparison above is favourable.
-- **The backtest's stops are optimistic relative to what this bot can execute.** There is no resting
-  stop order: the scheduler polls every 5 minutes and `DhanClient` is hard-limited to read-only Data
-  APIs, so a live "stop" is a software stop firing at the next poll's LTP, not at the stop level.
-  The backtest fills at the stop level (or the gapped open, whichever is worse) plus
-  `stop_slippage_ticks`. That extra slippage is a deliberate, documented hedge rather than a
-  measurement — closing the gap properly needs a real SL-M order, which is tracked in
-  `docs/pending-actions.md`.
+- **(Found + fixed 2026-09-05) `risk_managed` had no working stop in paper or live trading at all --
+  `position_state["risk"]` was never constructed.** `RiskManagedStrategy`'s per-trade stop/trail
+  state is designed to round-trip through `position_state["risk"]` every tick (`BacktestEngine`
+  does this correctly), but neither `paper/engine.py` nor `live/engine.py` ever built a `"risk"` key
+  -- both only passed `{"quantity": ..., "avg_entry_price": ...}`. Any `risk_managed` config running
+  in paper or live trading had its computed stop silently reset every single tick: the wrapper always
+  saw an empty risk dict, so the initial stop was lost immediately and the trailing stop never
+  advanced. Found investigating the account owner's request (below) to place a real broker-side stop
+  order -- there was no correct stop price to place one at until this was fixed. Fixed: both engines
+  now fetch the open position's `risk_state` into `position_state["risk"]` every tick and persist
+  `Signal.risk_state` back onto the position row afterward (new `risk_state` JSONB column, migration
+  `0017_risk_state`). Regression tests in both `test_paper_engine.py` and `test_live_trading_engine.py`
+  assert the round-trip explicitly.
+- **(Fixed 2026-09-05) A real resting SL-M stop order, for `live/engine.py` only.** Previously the
+  backtest's stops were optimistic relative to what the bot could execute: the scheduler polls every
+  5 minutes, so a live "stop" only fired in software at the next poll's LTP, not at the actual stop
+  level -- the backtest's `stop_slippage_ticks` was a deliberate hedge for exactly this gap, not a
+  measurement of a real mechanism. Fixed: `DhanOrderClient` gained
+  `place_stop_loss_market_order`/`modify_stop_loss_trigger`/`cancel_stop_loss_order` (confirmed
+  against the installed `dhanhq==2.2.0` SDK source -- `place_order`'s `order_type=SLM`/
+  `trigger_price`, `modify_order`, `cancel_order` all already exist). `LiveTradingEngine` now places a
+  real stop at entry (`stop_order_id`/`stop_order_trigger_price` on `LivePosition`), moves it via
+  modify whenever the wrapper's trailing stop ratchets, cancels it before any other exit fires (so it
+  can't race a strategy-signal sell, a time stop, expiry, end-of-day, or a daily-loss-limit
+  auto-close), and `reconcile_pending_orders` now closes the `LivePosition` (with
+  `close_reason="broker_stop_loss"`) when the resting order fills between polls -- the actual point
+  of the feature. Paper trading has no real broker to place a resting order at, so its stop stays
+  software-detected by design; the risk_state fix above means it now at least enforces correctly.
+  **UNVERIFIED against a real order**: whether Dhan accepts an SL-M order for MCX_COMM, and the
+  `modify_order`/`cancel_order` real response shapes for a plain (non-Super) order, have not been
+  confirmed with an actual placed order -- see `docs/pending-actions.md`. Not enabled anywhere yet;
+  live trading is still blocked on the pre-existing unverified MCX order-quantity-unit question.
 - **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the
   contract-expiry force-close and the end-of-day flatten for `requires_intraday_flatten` strategies
   all exist in `paper/engine.py` and `live/engine.py` and in none of `backtest/engine.py`. Backtest
