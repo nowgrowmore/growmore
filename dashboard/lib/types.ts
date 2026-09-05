@@ -96,6 +96,8 @@ export interface PaperOrder {
   // "daily_loss_limit". NULL for buy fills and for rows predating this column.
   close_reason: string | null;
   // Joined convenience fields (populated by getTradeLog()).
+  strategy_id?: string;
+  instrument_id?: string;
   strategy_name?: string;
   instrument_symbol?: string;
   position_status?: "open" | "closed";
@@ -137,6 +139,8 @@ export interface LiveOrder {
   // See PaperOrder.close_reason -- same values, same meaning.
   close_reason: string | null;
   // Joined convenience fields (populated by getLiveTradeLog()).
+  strategy_id?: string;
+  instrument_id?: string;
   strategy_name?: string;
   instrument_symbol?: string;
   position_status?: "open" | "closed";
@@ -217,4 +221,12 @@ export interface AuditLogEntry {
   ts: string;
   event_type: string;
   payload: Record<string, unknown>;
+}
+
+export interface SignalHistoryRow {
+  id: string;
+  bot_config_id: string;
+  checked_at: string;
+  action: "HOLD" | "BUY" | "SELL";
+  ltp: string;
 }

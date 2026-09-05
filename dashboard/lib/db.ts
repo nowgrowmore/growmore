@@ -13,6 +13,7 @@ import type {
   PortfolioBacktestRun,
   PortfolioEquityCurvePoint,
   PortfolioRebalanceHolding,
+  SignalHistoryRow,
 } from "./types";
 
 // Thin, typed query layer against the shared Postgres schema owned by
@@ -130,7 +131,8 @@ export async function getAllLivePositions(limit = 200): Promise<LivePosition[]> 
     from live_positions p
     join strategies s on s.id = p.strategy_id
     join instruments i on i.id = p.instrument_id
-    left join bot_config c on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id
+    left join bot_config c
+      on c.strategy_id = p.strategy_id and c.instrument_id = p.instrument_id and c.mode = 'live'
     left join bot_signal_state st on st.bot_config_id = c.id
     order by coalesce(p.closed_at, p.opened_at) desc
     limit ${limit}
@@ -143,6 +145,8 @@ export async function getLiveTradeLog(limit = 100): Promise<LiveOrder[]> {
   const rows = await sql`
     select
       o.*,
+      p.strategy_id as strategy_id,
+      p.instrument_id as instrument_id,
       s.name as strategy_name,
       i.symbol as instrument_symbol,
       i.lot_size as instrument_lot_size,
@@ -215,6 +219,8 @@ export async function getTradeLog(limit = 100): Promise<PaperOrder[]> {
   const rows = await sql`
     select
       o.*,
+      p.strategy_id as strategy_id,
+      p.instrument_id as instrument_id,
       s.name as strategy_name,
       i.symbol as instrument_symbol,
       i.lot_size as instrument_lot_size,
@@ -328,6 +334,101 @@ export async function getAuditLog(limit = 200): Promise<AuditLogEntry[]> {
     limit ${limit}
   `;
   return rows as unknown as AuditLogEntry[];
+}
+
+/** The last `limit` ticks' signals for one bot_config, oldest first -- for
+ * the dashboard's "recent signal history" strip. Unlike bot_signal_state
+ * (upsert-only, one row per config), signal_history is append-only: one row
+ * per tick regardless of whether the signal was HOLD/BUY/SELL. */
+export async function getRecentSignals(
+  botConfigId: string,
+  limit = 5
+): Promise<SignalHistoryRow[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from signal_history
+    where bot_config_id = ${botConfigId}
+    order by checked_at desc
+    limit ${limit}
+  `;
+  return (rows as unknown as SignalHistoryRow[]).reverse();
+}
+
+/** Same as getRecentSignals, batched for every config on a page in one round
+ * trip -- a window function keeps the last `limit` rows per bot_config_id
+ * server-side rather than running one query per card. Returns a map keyed
+ * by bot_config_id, each value oldest-first (empty array if a config has no
+ * history yet). */
+export async function getRecentSignalsForConfigs(
+  botConfigIds: string[],
+  limit = 5
+): Promise<Record<string, SignalHistoryRow[]>> {
+  const byConfig: Record<string, SignalHistoryRow[]> = {};
+  for (const id of botConfigIds) byConfig[id] = [];
+  if (botConfigIds.length === 0) return byConfig;
+
+  const sql = getClient();
+  const rows = await sql`
+    select * from (
+      select *, row_number() over (partition by bot_config_id order by checked_at desc) as rn
+      from signal_history
+      where bot_config_id = any(${botConfigIds}::uuid[])
+    ) ranked
+    where rn <= ${limit}
+    order by bot_config_id, checked_at asc
+  `;
+  for (const row of rows as unknown as (SignalHistoryRow & { rn: number })[]) {
+    byConfig[row.bot_config_id]?.push(row);
+  }
+  return byConfig;
+}
+
+/** The most recent audit_log entry that changed one bot_config's enabled
+ * state -- a manual toggle (payload has bot_config_id directly) or a
+ * daily-loss-limit trip (payload has bot_config_id since the 2026-09-05 fix
+ * -- older trip rows predating that fix won't match, and this returns null
+ * for them, same as showing nothing extra today). */
+export async function getLastConfigStateChange(botConfigId: string): Promise<AuditLogEntry | null> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from audit_log
+    where event_type in (
+      'strategy_enabled', 'strategy_disabled',
+      'risk_guard_daily_loss_limit_tripped', 'live_risk_guard_daily_loss_limit_tripped'
+    )
+    and payload->>'bot_config_id' = ${botConfigId}
+    order by ts desc
+    limit 1
+  `;
+  return (rows[0] as unknown as AuditLogEntry) ?? null;
+}
+
+/** Batched version of getLastConfigStateChange for a page rendering many
+ * configs at once (e.g. 12 disabled live configs) -- one query instead of
+ * one per config. Returns a map keyed by bot_config_id; a config with no
+ * matching row (predates the payload fix, or was never toggled) is simply
+ * absent from the map. */
+export async function getLastConfigStateChangeForConfigs(
+  botConfigIds: string[]
+): Promise<Record<string, AuditLogEntry>> {
+  const byConfig: Record<string, AuditLogEntry> = {};
+  if (botConfigIds.length === 0) return byConfig;
+
+  const sql = getClient();
+  const rows = await sql`
+    select distinct on (payload->>'bot_config_id') *
+    from audit_log
+    where event_type in (
+      'strategy_enabled', 'strategy_disabled',
+      'risk_guard_daily_loss_limit_tripped', 'live_risk_guard_daily_loss_limit_tripped'
+    )
+    and payload->>'bot_config_id' = any(${botConfigIds})
+    order by payload->>'bot_config_id', ts desc
+  `;
+  for (const row of rows as unknown as AuditLogEntry[]) {
+    byConfig[row.payload.bot_config_id as string] = row;
+  }
+  return byConfig;
 }
 
 // ---------------------------------------------------------------------------

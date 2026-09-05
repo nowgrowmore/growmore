@@ -1,14 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __setTestClient,
+  getAllLivePositions,
   getAllPaperPositions,
   getAuditLog,
   getBotConfigs,
   getBotStatus,
+  getLastConfigStateChange,
+  getLastConfigStateChangeForConfigs,
   getOpenPaperPositions,
   getPortfolioBacktestRuns,
   getPortfolioEquityCurve,
   getPortfolioHoldings,
+  getRecentSignals,
+  getRecentSignalsForConfigs,
   setBotConfigEnabled,
   updateBotConfigRiskParams,
 } from "./db";
@@ -70,6 +75,123 @@ describe("getAllPaperPositions", () => {
     type MockFn = { mock: { calls: unknown[][] } };
     const queryText = ((fakeSql as unknown as MockFn).mock.calls[0][0] as string[]).join("");
     expect(queryText).toContain("mode = 'paper'");
+  });
+});
+
+describe("getAllLivePositions", () => {
+  it("joins bot_config filtered to mode='live', mirroring the identical fix on the paper side", async () => {
+    const fakeRows = [{ id: "p1", status: "open" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getAllLivePositions();
+
+    expect(result).toBe(fakeRows);
+    type MockFn = { mock: { calls: unknown[][] } };
+    const queryText = ((fakeSql as unknown as MockFn).mock.calls[0][0] as string[]).join("");
+    expect(queryText).toContain("mode = 'live'");
+  });
+});
+
+describe("getRecentSignals", () => {
+  it("returns rows in oldest-first order for the sparkline", async () => {
+    // The query orders by checked_at DESC (most efficient for LIMIT), so the
+    // function must reverse before returning -- oldest-to-newest is what a
+    // left-to-right sparkline needs.
+    const newestFirst = [
+      { id: "3", action: "BUY", checked_at: "2026-01-03T00:00:00Z" },
+      { id: "2", action: "HOLD", checked_at: "2026-01-02T00:00:00Z" },
+      { id: "1", action: "HOLD", checked_at: "2026-01-01T00:00:00Z" },
+    ];
+    const fakeSql = makeFakeSql(newestFirst);
+    __setTestClient(fakeSql as never);
+
+    const result = await getRecentSignals("config-1", 5);
+
+    expect(result.map((r) => r.id)).toEqual(["1", "2", "3"]);
+  });
+});
+
+describe("getRecentSignalsForConfigs", () => {
+  it("groups rows by bot_config_id, each oldest-first", async () => {
+    const rows = [
+      { id: "1", bot_config_id: "a", action: "HOLD", checked_at: "2026-01-01T00:00:00Z" },
+      { id: "2", bot_config_id: "a", action: "BUY", checked_at: "2026-01-02T00:00:00Z" },
+      { id: "3", bot_config_id: "b", action: "SELL", checked_at: "2026-01-01T00:00:00Z" },
+    ];
+    const fakeSql = makeFakeSql(rows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getRecentSignalsForConfigs(["a", "b"]);
+
+    expect(result["a"].map((r) => r.id)).toEqual(["1", "2"]);
+    expect(result["b"].map((r) => r.id)).toEqual(["3"]);
+  });
+
+  it("includes an empty array for a config with no history yet", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getRecentSignalsForConfigs(["a"]);
+
+    expect(result).toEqual({ a: [] });
+  });
+
+  it("returns an empty map without querying when given no ids", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getRecentSignalsForConfigs([]);
+
+    expect(result).toEqual({});
+    expect(fakeSql).not.toHaveBeenCalled();
+  });
+});
+
+describe("getLastConfigStateChangeForConfigs", () => {
+  it("groups the most recent matching row by bot_config_id", async () => {
+    const rows = [
+      { id: "a1", event_type: "strategy_disabled", payload: { bot_config_id: "c1" } },
+      { id: "a2", event_type: "strategy_enabled", payload: { bot_config_id: "c2" } },
+    ];
+    const fakeSql = makeFakeSql(rows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getLastConfigStateChangeForConfigs(["c1", "c2"]);
+
+    expect(result["c1"].id).toBe("a1");
+    expect(result["c2"].id).toBe("a2");
+  });
+
+  it("returns an empty map without querying when given no ids", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getLastConfigStateChangeForConfigs([]);
+
+    expect(result).toEqual({});
+    expect(fakeSql).not.toHaveBeenCalled();
+  });
+});
+
+describe("getLastConfigStateChange", () => {
+  it("returns the matching audit_log row when one exists", async () => {
+    const fakeRows = [{ id: "a1", event_type: "strategy_disabled", payload: { bot_config_id: "c1" } }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getLastConfigStateChange("c1");
+
+    expect(result).toEqual(fakeRows[0]);
+  });
+
+  it("returns null when no matching row exists (e.g. predates the bot_config_id payload fix)", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getLastConfigStateChange("c1");
+
+    expect(result).toBeNull();
   });
 });
 

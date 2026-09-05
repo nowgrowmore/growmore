@@ -2,7 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { computePctChangeToday, formatCurrency, formatPercent, summarizePositions, toNumber } from "@/lib/format";
+import {
+  computePctChangeToday,
+  formatCurrency,
+  formatPercent,
+  formatPositionAge,
+  summarizePositions,
+  toNumber,
+} from "@/lib/format";
 import { SummaryCards } from "@/components/SummaryCards";
 import { ModeFilter } from "@/components/ModeFilter";
 import { StrategyNameFilter } from "@/components/StrategyNameFilter";
@@ -29,6 +36,7 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
             <th className="px-3 py-2 font-medium">Strategy</th>
             <th className="px-3 py-2 font-medium">Instrument</th>
             <th className="px-3 py-2 font-medium">Contract expiry</th>
+            <th className="px-3 py-2 font-medium">Age</th>
             <th className="px-3 py-2 font-medium text-right">Qty (lots)</th>
             <th className="px-3 py-2 font-medium text-right">Avg entry</th>
             <th className="px-3 py-2 font-medium text-right">Current price</th>
@@ -56,6 +64,9 @@ function OpenPositionsTable({ positions }: { positions: (PaperPosition | LivePos
                         year: "numeric",
                       })
                     : "—"}
+                </td>
+                <td className="px-3 py-2 text-[color:var(--text-secondary)] tabular-nums">
+                  {formatPositionAge(p.opened_at)}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{p.quantity}</td>
                 <td className="px-3 py-2 text-right tabular-nums">

@@ -39,7 +39,13 @@ from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from growmore_bot.persistence.models import AuditLog, BotSignalState, PaperOrder, PaperPosition
+from growmore_bot.persistence.models import (
+    AuditLog,
+    BotSignalState,
+    PaperOrder,
+    PaperPosition,
+    SignalHistory,
+)
 from growmore_bot.strategies.base import SignalAction, Strategy
 
 logger = logging.getLogger(__name__)
@@ -233,6 +239,19 @@ class PaperTradingEngine:
             existing.indicators = strategy.debug_state()
             existing.crossing_state = strategy.get_state_snapshot()
             self.session.add(existing)
+
+        # Append-only, unlike the upsert above -- lets the dashboard show a
+        # short recent-signal strip ("HOLD HOLD HOLD BUY HOLD"), which the
+        # upsert-only BotSignalState row can never provide by itself.
+        self.session.add(
+            SignalHistory(
+                id=uuid.uuid4(),
+                bot_config_id=config.id,
+                checked_at=now,
+                action=signal.action.value,
+                ltp=quote.ltp,
+            )
+        )
 
     @staticmethod
     def _mark_to_market(position: Any, ltp: Any, lot_size: int) -> None:
@@ -440,6 +459,7 @@ class PaperTradingEngine:
                 ts=now,
                 event_type="risk_guard_daily_loss_limit_tripped",
                 payload={
+                    "bot_config_id": str(config.id),
                     "strategy_id": str(config.strategy_id),
                     "instrument_id": str(config.instrument_id),
                     "cumulative_daily_pnl": cumulative_daily_pnl,

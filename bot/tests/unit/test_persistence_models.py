@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "live_orders",
     "bot_config",
     "bot_signal_state",
+    "signal_history",
     "audit_log",
     "bot_status",
     "portfolio_backtest_runs",

@@ -362,6 +362,7 @@ def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
     assert len(trip_entries) == 1
     assert trip_entries[0].payload["auto_close_attempted"] is True
     assert trip_entries[0].payload["auto_close_succeeded"] is True
+    assert trip_entries[0].payload["bot_config_id"] == str(config.id)
 
 
 def test_daily_loss_limit_disabled_skips_the_guard_even_when_breached():
@@ -891,6 +892,28 @@ def test_process_tick_records_signal_state_on_hold():
     assert added[0].indicators == {"macd": -12.34, "signal": 5.67}
     assert float(added[0].prev_close) == pytest.approx(155000)
     assert float(added[0].daily_pnl) == pytest.approx(-2500.0)
+
+
+def test_process_tick_appends_a_signal_history_row_every_tick_including_hold():
+    from growmore_bot.persistence.models import SignalHistory
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], SignalHistory)]
+    assert len(added) == 1
+    assert added[0].bot_config_id == config.id
+    assert added[0].action == "HOLD"
+    assert float(added[0].ltp) == pytest.approx(155000)
 
 
 def test_hold_marks_open_position_to_market():

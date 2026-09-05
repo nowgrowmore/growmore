@@ -7,6 +7,7 @@ import {
   formatCurrency,
   formatDateRange,
   formatPercent,
+  formatPositionAge,
   formatNumber,
   formatProfitFactor,
   formatStrategyParams,
@@ -145,6 +146,28 @@ describe("formatPercent / formatNumber", () => {
   it("formats to the requested precision", () => {
     expect(formatPercent(12.3456, 2)).toBe("12.35%");
     expect(formatNumber(1.005, 1)).toMatch(/^1\.0/);
+  });
+});
+
+describe("formatPositionAge", () => {
+  it("shows days+hours once a position has been open over a day", () => {
+    const openedAt = new Date(Date.now() - (3 * 24 + 4) * 60 * 60 * 1000).toISOString();
+    expect(formatPositionAge(openedAt)).toBe("3d 4h");
+  });
+
+  it("shows hours+minutes for a position open less than a day", () => {
+    const openedAt = new Date(Date.now() - (12 * 60 + 30) * 60 * 1000).toISOString();
+    expect(formatPositionAge(openedAt)).toBe("12h 30m");
+  });
+
+  it("shows just minutes for a position open less than an hour", () => {
+    const openedAt = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    expect(formatPositionAge(openedAt)).toBe("45m");
+  });
+
+  it("never goes negative for a clock-skewed future opened_at", () => {
+    const openedAt = new Date(Date.now() + 60 * 1000).toISOString();
+    expect(formatPositionAge(openedAt)).toBe("0m");
   });
 });
 

@@ -16,12 +16,21 @@ import { explainSignal } from "@/lib/signal-explain";
 import { buildGaugeConfig } from "@/lib/strategy-gauge";
 import { STRATEGY_INFO } from "@/lib/strategy-info";
 import { findMatchingBacktestRun, findRankPositions } from "@/lib/backtest-rankings";
+import { computeLiveStats, flagDrift } from "@/lib/live-stats";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import { RiskParamsForm } from "@/components/RiskParamsForm";
 import { ModeFilter } from "@/components/ModeFilter";
 import { StrategyNameFilter } from "@/components/StrategyNameFilter";
 import { LevelGauge } from "@/components/LevelGauge";
-import type { BacktestRun, BotConfig } from "@/lib/types";
+import { SignalSparkline } from "@/components/SignalSparkline";
+import type {
+  AuditLogEntry,
+  BacktestRun,
+  BotConfig,
+  LiveOrder,
+  PaperOrder,
+  SignalHistoryRow,
+} from "@/lib/types";
 import { Fragment } from "react";
 
 type Mode = "all" | "paper" | "live";
@@ -66,13 +75,38 @@ function lossBarColor(severity: "ok" | "warning" | "critical"): string {
 interface StrategiesClientProps {
   configs: BotConfig[];
   backtestRuns: BacktestRun[];
+  paperOrders: PaperOrder[];
+  liveOrders: LiveOrder[];
+  recentSignals: Record<string, SignalHistoryRow[]>;
+  lastStateChanges: Record<string, AuditLogEntry>;
   onToggle: (id: string, enabled: boolean) => Promise<void>;
   onSaveRiskParams: (id: string, formData: FormData) => Promise<void>;
+}
+
+const STATE_CHANGE_LABELS: Record<string, string> = {
+  strategy_enabled: "manual",
+  strategy_disabled: "manual",
+  risk_guard_daily_loss_limit_tripped: "daily loss limit tripped",
+  live_risk_guard_daily_loss_limit_tripped: "daily loss limit tripped",
+};
+
+function formatRelativeTime(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days >= 1) return `${days}d ago`;
+  const hours = Math.floor(ms / (1000 * 60 * 60));
+  if (hours >= 1) return `${hours}h ago`;
+  const minutes = Math.max(0, Math.floor(ms / (1000 * 60)));
+  return `${minutes}m ago`;
 }
 
 export function StrategiesClient({
   configs,
   backtestRuns,
+  paperOrders,
+  liveOrders,
+  recentSignals,
+  lastStateChanges,
   onToggle,
   onSaveRiskParams,
 }: StrategiesClientProps) {
@@ -125,6 +159,19 @@ export function StrategiesClient({
               config.strategy_params,
               config.signal_ltp
             );
+            const matchedRun = findMatchingBacktestRun(config, backtestRuns);
+            const configOrders =
+              config.mode === "paper"
+                ? paperOrders.filter(
+                    (o) => o.strategy_id === config.strategy_id && o.instrument_id === config.instrument_id
+                  )
+                : liveOrders.filter(
+                    (o) => o.strategy_id === config.strategy_id && o.instrument_id === config.instrument_id
+                  );
+            const liveStats = computeLiveStats(configOrders);
+            const drift = flagDrift(liveStats, matchedRun);
+            const stateChange = !config.enabled ? lastStateChanges[config.id] : undefined;
+            const history = recentSignals[config.id] ?? [];
             return (
               <div
                 key={config.id}
@@ -164,9 +211,8 @@ export function StrategiesClient({
                         </Link>
                       </div>
                       {(() => {
-                        const matchedRun = findMatchingBacktestRun(config, backtestRuns);
                         const positions = findRankPositions(matchedRun, backtestRuns);
-                        if (positions.length === 0) return null;
+                        if (positions.length === 0 && !drift) return null;
                         return (
                           <div className="mt-1 flex flex-wrap gap-1">
                             {positions.map((pos) => (
@@ -179,9 +225,29 @@ export function StrategiesClient({
                                 #{pos.rank} {pos.label}
                               </Link>
                             ))}
+                            {drift && (
+                              <span
+                                className="rounded bg-[color:var(--critical-text)]/10 px-1.5 py-0.5 text-xs font-medium text-[color:var(--critical-text)]"
+                                title={`Backtest win rate ${formatPercent(drift.backtestWinRatePct)}, live win rate ${formatPercent(drift.liveWinRatePct)} over ${liveStats.tradeCount} closed trades`}
+                              >
+                                Live win rate {formatPercent(drift.liveWinRatePct)} vs backtest{" "}
+                                {formatPercent(drift.backtestWinRatePct)} — worth a look
+                              </span>
+                            )}
                           </div>
                         );
                       })()}
+                      {stateChange && (
+                        <p className="mt-1 text-xs text-[color:var(--text-muted)]">
+                          Disabled {formatRelativeTime(stateChange.ts)} —{" "}
+                          {STATE_CHANGE_LABELS[stateChange.event_type] ?? stateChange.event_type}
+                        </p>
+                      )}
+                      {history.length > 0 && (
+                        <div className="mt-1.5">
+                          <SignalSparkline history={history} />
+                        </div>
+                      )}
                     </div>
                   </div>
                   <RiskParamsForm

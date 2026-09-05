@@ -284,6 +284,26 @@ class BotSignalState(Base):
     bot_config: Mapped["BotConfig"] = relationship()
 
 
+class SignalHistory(Base):
+    """One row per tick per bot_config, regardless of what the signal was --
+    unlike `BotSignalState` (upsert-only, "what did the strategy see just
+    now"), this is a genuine append-only log, specifically so the dashboard
+    can show a short "HOLD HOLD HOLD BUY HOLD" recent-signal strip. Written
+    right after BotSignalState's own upsert in
+    PaperTradingEngine/LiveTradingEngine._record_signal_state.
+    """
+
+    __tablename__ = "signal_history"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    bot_config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("bot_config.id"), nullable=False
+    )
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # HOLD|BUY|SELL
+    ltp: Mapped[float] = mapped_column(Numeric, nullable=False)
+
+
 class LivePosition(Base):
     """Mirrors PaperPosition exactly, but for REAL orders placed via
     growmore_bot.broker.dhan_order_client -- kept as an entirely separate

@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { href: "/rankings", label: "Rankings" },
   { href: "/trades", label: "Trade Log" },
   { href: "/strategies", label: "Strategies" },
+  { href: "/compare", label: "Compare" },
   { href: "/guide", label: "Strategy Guide" },
   { href: "/audit", label: "Audit Log" },
   { href: "/smallcap", label: "Smallcap" },

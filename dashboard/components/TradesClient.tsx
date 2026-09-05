@@ -79,11 +79,43 @@ export function TradesClient({
     });
   };
 
+  type SortKey = "filled_at" | "fill_price" | "pnl";
+  const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({
+    key: "filled_at",
+    direction: "desc",
+  });
+  function toggleSort(key: SortKey) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "desc" }
+    );
+  }
+  function sortIndicator(key: SortKey): string {
+    if (sort.key !== key) return "";
+    return sort.direction === "asc" ? " ↑" : " ↓";
+  }
+
   const filtered = (mode === "all" ? rows : rows.filter((r) => r.tradeType === mode))
     .filter((r) => (positionFilter ? r.positionId === positionFilter : true))
     .filter((r) => !r.strategy_name || selectedStrategyNames.has(r.strategy_name));
 
-  const csv = toCsv(filtered, [
+  const sorted = [...filtered].sort((a, b) => {
+    const direction = sort.direction === "asc" ? 1 : -1;
+    if (sort.key === "filled_at") {
+      return direction * (new Date(a.filled_at).getTime() - new Date(b.filled_at).getTime());
+    }
+    if (sort.key === "fill_price") {
+      return direction * (toNumber(a.fill_price) - toNumber(b.fill_price));
+    }
+    // pnl: nulls (buys) always sort last, regardless of direction.
+    if (a.pnl === null && b.pnl === null) return 0;
+    if (a.pnl === null) return 1;
+    if (b.pnl === null) return -1;
+    return direction * (toNumber(a.pnl) - toNumber(b.pnl));
+  });
+
+  const csv = toCsv(sorted, [
     { header: "Type", value: (r) => r.tradeType },
     { header: "Filled at", value: (r) => r.filled_at },
     { header: "Strategy", value: (r) => r.strategy_name },
@@ -133,22 +165,34 @@ export function TradesClient({
             <thead>
               <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
                 <th className="px-3 py-2 font-medium">Type</th>
-                <th className="px-3 py-2 font-medium">Filled at</th>
+                <th className="px-3 py-2 font-medium">
+                  <button type="button" onClick={() => toggleSort("filled_at")} className="hover:underline">
+                    Filled at{sortIndicator("filled_at")}
+                  </button>
+                </th>
                 <th className="px-3 py-2 font-medium">Strategy</th>
                 <th className="px-3 py-2 font-medium">Instrument</th>
                 <th className="px-3 py-2 font-medium">Contract expiry</th>
                 <th className="px-3 py-2 font-medium">Side</th>
                 <th className="px-3 py-2 font-medium text-right">Qty (lots)</th>
                 <th className="px-3 py-2 font-medium text-right">Lot size</th>
-                <th className="px-3 py-2 font-medium text-right">Fill price</th>
+                <th className="px-3 py-2 font-medium text-right">
+                  <button type="button" onClick={() => toggleSort("fill_price")} className="hover:underline">
+                    Fill price{sortIndicator("fill_price")}
+                  </button>
+                </th>
                 <th className="px-3 py-2 font-medium text-right">Notional value</th>
-                <th className="px-3 py-2 font-medium text-right">Realized P&amp;L</th>
+                <th className="px-3 py-2 font-medium text-right">
+                  <button type="button" onClick={() => toggleSort("pnl")} className="hover:underline">
+                    Realized P&amp;L{sortIndicator("pnl")}
+                  </button>
+                </th>
                 <th className="px-3 py-2 font-medium">Close reason</th>
                 <th className="px-3 py-2 font-medium">Position</th>
               </tr>
             </thead>
             <tbody>
-              {filtered.map((order) => {
+              {sorted.map((order) => {
                 const lotSize = toNumber(order.instrument_lot_size) || 1;
                 const fillPrice = toNumber(order.fill_price);
                 const notional = fillPrice * toNumber(order.quantity) * lotSize;

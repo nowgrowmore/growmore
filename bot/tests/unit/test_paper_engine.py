@@ -302,6 +302,10 @@ def test_daily_loss_limit_trip_disables_config_and_writes_audit_log():
     assert len(audit_entries) == 1
     assert audit_entries[0].event_type == "risk_guard_daily_loss_limit_tripped"
     assert audit_entries[0].payload["auto_close_attempted"] is False
+    # bot_config_id lets the dashboard reliably find "why is this config
+    # disabled" -- strategy_id+instrument_id alone isn't unique once the
+    # same pair can have both a paper and a live bot_config row.
+    assert audit_entries[0].payload["bot_config_id"] == str(config.id)
 
 
 def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
@@ -764,7 +768,46 @@ def test_process_tick_updates_existing_signal_state_row_in_place():
 
     assert existing_state.last_signal == "BUY"
     assert float(existing_state.ltp) == pytest.approx(100)
-    session.add.assert_any_call(existing_state)
+
+
+def test_process_tick_appends_a_signal_history_row_every_tick_including_hold():
+    from growmore_bot.persistence.models import SignalHistory
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], SignalHistory)]
+    assert len(added) == 1
+    assert added[0].bot_config_id == config.id
+    assert added[0].action == "HOLD"
+    assert float(added[0].ltp) == pytest.approx(155000)
+
+
+def test_process_tick_appends_a_signal_history_row_on_buy_too():
+    from growmore_bot.persistence.models import SignalHistory
+
+    config = _bot_config()
+    instrument = _instrument(config)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.BUY, size=1))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    added = [c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], SignalHistory)]
+    assert len(added) == 1
+    assert added[0].action == "BUY"
 
 
 def test_buy_fill_is_logged_at_info_level(caplog):

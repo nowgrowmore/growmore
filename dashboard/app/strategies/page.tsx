@@ -1,11 +1,29 @@
-import { getBacktestRuns, getBotConfigs } from "@/lib/db";
+import {
+  getBacktestRuns,
+  getBotConfigs,
+  getLastConfigStateChangeForConfigs,
+  getLiveTradeLog,
+  getRecentSignalsForConfigs,
+  getTradeLog,
+} from "@/lib/db";
 import { StrategiesClient } from "@/components/StrategiesClient";
 import { saveRiskParams, toggleBotConfigEnabled } from "./actions";
 
 export const dynamic = "force-dynamic";
 
 export default async function StrategiesPage() {
-  const [configs, backtestRuns] = await Promise.all([getBotConfigs(), getBacktestRuns()]);
+  const [configs, backtestRuns, paperOrders, liveOrders] = await Promise.all([
+    getBotConfigs(),
+    getBacktestRuns(),
+    getTradeLog(500),
+    getLiveTradeLog(500),
+  ]);
+  const configIds = configs.map((c) => c.id);
+  const disabledConfigIds = configs.filter((c) => !c.enabled).map((c) => c.id);
+  const [recentSignals, lastStateChanges] = await Promise.all([
+    getRecentSignalsForConfigs(configIds),
+    getLastConfigStateChangeForConfigs(disabledConfigIds),
+  ]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -20,6 +38,10 @@ export default async function StrategiesPage() {
       <StrategiesClient
         configs={configs}
         backtestRuns={backtestRuns}
+        paperOrders={paperOrders}
+        liveOrders={liveOrders}
+        recentSignals={recentSignals}
+        lastStateChanges={lastStateChanges}
         onToggle={toggleBotConfigEnabled}
         onSaveRiskParams={saveRiskParams}
       />
