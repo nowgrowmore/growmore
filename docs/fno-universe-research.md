@@ -2,8 +2,8 @@
 
 **Written 2026-09-05, before any F&O price data was fetched.** That ordering is the point. Every
 metric, guardrail and decision rule below was fixed while the answer was still unknown, so nothing
-here can be a rationalisation of a number someone liked. Results, when the data exists, go in
-`docs/fno-universe-results.md`.
+here can be a rationalisation of a number someone liked. Results are in `docs/fno-universe-results.md` — and the prediction recorded at the bottom of this
+document turned out to be **half right**, which is recorded there rather than quietly amended here.
 
 Code: `bot/research/fno/`. Nothing in this study writes to Neon.
 
