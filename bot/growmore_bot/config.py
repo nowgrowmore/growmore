@@ -44,6 +44,16 @@ class CommodityPlaceholder(BaseModel):
     guessed. Without this, a backtest treats every instrument as "1 raw unit
     of the price series," which makes Sharpe/Max Drawdown incomparable across
     commodities at very different price levels.
+
+    `tick_size` is the minimum price increment in the SAME quote units as
+    `lot_size` (rupees per 10g for Gold Mini, rupees per kg for the base
+    metals). Read off Dhan's own instrument master 2026-09-05, whose
+    `SEM_TICK_SIZE` column is in PAISE -- these are that divided by 100,
+    cross-checked against MCX's published contract specs. It matters because
+    slippage is a tick effect, not a basis-point one: two ticks a side on one
+    Copper lot is Rs 500, comparable to every statutory charge on the round
+    trip combined, while on Gold Mini it is Rs 40. A flat basis-point
+    slippage assumption ranks the instruments backwards. See growmore_bot.costs.
     """
 
     symbol: str
@@ -52,6 +62,7 @@ class CommodityPlaceholder(BaseModel):
     security_id: str = "TODO_LOOKUP_DHAN_SECURITY_ID"
     contract_expiry: str | None = None  # ISO date; None only for the not-yet-looked-up default
     lot_size: int = 1
+    tick_size: float | None = None
 
 
 DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
@@ -63,6 +74,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         # 100g lot, but MCX quotes Gold Mini per 10g -- 10 quote-units per
         # lot, NOT 100. See the lot_size docstring above.
         lot_size=10,
+        tick_size=1.0,  # Rs 1 per 10g
     ),
     CommodityPlaceholder(
         symbol="SILVERM",
@@ -70,6 +82,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="483080",
         contract_expiry="2026-11-30",
         lot_size=5,  # 5 kg
+        tick_size=1.0,  # Rs 1 per kg
     ),
     CommodityPlaceholder(
         symbol="CRUDEOILM",
@@ -77,6 +90,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="565900",
         contract_expiry="2026-09-21",
         lot_size=10,  # 10 barrels
+        tick_size=1.0,  # Rs 1 per barrel
     ),
     CommodityPlaceholder(
         symbol="COPPER",
@@ -84,6 +98,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="571298",
         contract_expiry="2026-09-30",
         lot_size=2500,  # 2500 kg
+        tick_size=0.05,  # Rs 0.05 per kg -- Rs 125 a lot, the largest tick value here
     ),
     CommodityPlaceholder(
         symbol="ZINCMINI",
@@ -91,6 +106,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="571302",
         contract_expiry="2026-09-30",
         lot_size=1000,  # 1 metric tonne
+        tick_size=0.05,  # Rs 0.05 per kg
     ),
     CommodityPlaceholder(
         symbol="NICKEL",
@@ -101,6 +117,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         # before). Applied uniformly across our whole backtest window for now --
         # see docs/technical-debt.md for the pre-revision-date caveat this implies.
         lot_size=250,
+        tick_size=0.10,  # Rs 0.10 per kg
     ),
     CommodityPlaceholder(
         symbol="ALUMINI",
@@ -108,6 +125,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="571296",
         contract_expiry="2026-09-30",
         lot_size=1000,  # 1 metric tonne
+        tick_size=0.05,  # Rs 0.05 per kg
     ),
     CommodityPlaceholder(
         symbol="LEADMINI",
@@ -115,6 +133,7 @@ DEFAULT_COMMODITY_UNIVERSE: list[CommodityPlaceholder] = [
         security_id="571299",
         contract_expiry="2026-09-30",
         lot_size=1000,  # 1 metric tonne
+        tick_size=0.05,  # Rs 0.05 per kg
     ),
 ]
 

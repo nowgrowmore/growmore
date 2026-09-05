@@ -183,3 +183,126 @@ def test_equity_curve_has_one_point_per_bar():
 
     assert len(result.equity_curve) == len(bars)
     assert result.equity_curve[0].equity == pytest.approx(50_000)
+
+
+# --- Transaction costs -------------------------------------------------
+
+
+def _cost_bars():
+    """Two-bar rise then a flat bar: BUY on bar 0 fills at bar 1's open,
+    SELL on bar 1 fills at bar 2's open. Round numbers so the arithmetic
+    is checkable by hand."""
+    return [
+        _bar(1, open_=100.0, high=101.0, low=99.0, close=100.0),
+        _bar(2, open_=100.0, high=111.0, low=99.0, close=110.0),
+        _bar(3, open_=110.0, high=111.0, low=109.0, close=110.0),
+    ]
+
+
+class _BuyThenSell(Strategy):
+    def __init__(self):
+        self._i = -1
+
+    def on_bar(self, bar, position_state):
+        self._i += 1
+        if self._i == 0:
+            return Signal(action=SignalAction.BUY, size=1)
+        if self._i == 1:
+            return Signal(action=SignalAction.SELL, size=1)
+        return Signal(action=SignalAction.HOLD)
+
+
+def test_omitting_a_cost_model_reproduces_the_original_zero_cost_behaviour():
+    """Every result already in the database was measured with no costs at
+    all. The default must stay bit-for-bit identical so old and new runs are
+    comparable, and so none of the existing engine tests change meaning."""
+    result = BacktestEngine(strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10).run(
+        _cost_bars()
+    )
+    trade = result.trades[0]
+    assert trade.entry_price == pytest.approx(100.0)
+    assert trade.exit_price == pytest.approx(110.0)
+    assert trade.pnl == pytest.approx((110.0 - 100.0) * 10)
+    assert trade.transaction_cost == pytest.approx(0.0)
+    assert result.total_transaction_cost == pytest.approx(0.0)
+
+
+def test_a_cost_model_moves_the_fill_prices_and_nets_the_pnl():
+    """Slippage is a PRICE effect (a buy pays up, a sell gets hit down) and
+    the statutory charges are a rupee deduction on top. Both have to show up,
+    and gross must remain recoverable."""
+    from growmore_bot.costs import CostModel
+
+    # Deliberately simple: 1 tick of slippage, and a flat Rs 10 per leg with
+    # no percentage components, so every number below is hand-checkable.
+    model = CostModel(
+        brokerage_per_order=10.0, brokerage_pct=1.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.0, stamp_buy_pct=0.0, sebi_pct=0.0, gst_pct=0.0,
+        slippage_ticks=1.0, stop_slippage_ticks=0.0,
+    )
+    result = BacktestEngine(
+        strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10,
+        cost_model=model, tick_size=1.0,
+    ).run(_cost_bars())
+
+    trade = result.trades[0]
+    # Buy pays up one tick (100 -> 101), sell gets hit down one (110 -> 109).
+    assert trade.entry_price == pytest.approx(101.0)
+    assert trade.exit_price == pytest.approx(109.0)
+    assert trade.gross_pnl == pytest.approx((109.0 - 101.0) * 10)   # 80, slippage already in the prices
+    assert trade.transaction_cost == pytest.approx(20.0)            # Rs 10 a leg
+    assert trade.pnl == pytest.approx(80.0 - 20.0)
+    assert result.total_transaction_cost == pytest.approx(20.0)
+
+
+def test_costs_are_charged_against_cash_so_the_equity_curve_is_net_too():
+    from growmore_bot.costs import CostModel
+
+    model = CostModel(
+        brokerage_per_order=10.0, brokerage_pct=1.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.0, stamp_buy_pct=0.0, sebi_pct=0.0, gst_pct=0.0,
+        slippage_ticks=0.0, stop_slippage_ticks=0.0,
+    )
+    priced = BacktestEngine(
+        strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10,
+        cost_model=model, tick_size=1.0,
+    ).run(_cost_bars())
+    free = BacktestEngine(
+        strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10
+    ).run(_cost_bars())
+    # Two legs at Rs 10 each come straight off the final equity.
+    assert free.final_equity - priced.final_equity == pytest.approx(20.0)
+
+
+def test_the_sell_leg_is_charged_ctt_and_the_buy_leg_stamp_duty():
+    """Regression: `_leg_cost` briefly inferred the side from the sign of a
+    notional that is always positive, so every leg was billed as a BUY --
+    silently skipping CTT (sell side only, 0.01%) and always charging stamp
+    duty (buy side only, 0.002%). CTT is five times stamp duty, so that
+    understates a real round trip by a material margin."""
+    from growmore_bot.costs import CostModel
+
+    ctt_only = CostModel(
+        brokerage_per_order=0.0, brokerage_pct=0.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.01, stamp_buy_pct=0.0, sebi_pct=0.0, gst_pct=0.0,
+        slippage_ticks=0.0, stop_slippage_ticks=0.0,
+    )
+    result = BacktestEngine(
+        strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10,
+        cost_model=ctt_only, tick_size=1.0,
+    ).run(_cost_bars())
+    # Sell leg notional is 110 * 10 = 1100; 1% of that is 11. The buy leg
+    # must contribute nothing under a sell-side-only charge.
+    assert result.trades[0].transaction_cost == pytest.approx(11.0)
+
+    stamp_only = CostModel(
+        brokerage_per_order=0.0, brokerage_pct=0.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.0, stamp_buy_pct=0.01, sebi_pct=0.0, gst_pct=0.0,
+        slippage_ticks=0.0, stop_slippage_ticks=0.0,
+    )
+    result = BacktestEngine(
+        strategy=_BuyThenSell(), initial_capital=100_000, lot_size=10,
+        cost_model=stamp_only, tick_size=1.0,
+    ).run(_cost_bars())
+    # Buy leg notional is 100 * 10 = 1000; 1% is 10, and the sell adds nothing.
+    assert result.trades[0].transaction_cost == pytest.approx(10.0)

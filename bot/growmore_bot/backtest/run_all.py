@@ -32,9 +32,11 @@ from typing import Any, Callable, Sequence
 from growmore_bot.backtest.engine import BacktestEngine
 from growmore_bot.broker.dhan_client import DhanClient
 from growmore_bot.config import Settings
+from growmore_bot.costs import DEFAULT_COST_MODEL
 from growmore_bot.persistence.db import session_scope
 from growmore_bot.persistence.models import BacktestTrade, Instrument
 from growmore_bot.persistence.models import Strategy as StrategyRow
+from growmore_bot.risk.sizing import notional_per_lot
 from growmore_bot.strategies.base import Strategy
 from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
 from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
@@ -45,6 +47,39 @@ from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
 
 DEFAULT_MAX_DRAWDOWN_GUARDRAIL_PCT = 50.0
 DEFAULT_MIN_TRADE_COUNT = 15
+DEFAULT_TARGET_LEVERAGE = 1.0
+
+
+def capital_for_run(
+    mode: str,
+    first_close: float,
+    lot_size: int,
+    flat_capital: float,
+    target_leverage: float = DEFAULT_TARGET_LEVERAGE,
+) -> float:
+    """How much capital this instrument's backtest is measured against.
+
+    `"flat"` is the original behaviour: one figure for every instrument. That
+    is what makes the CAGR column incomparable, because a Copper lot
+    (~Rs 34 lakh) against Rs 5 lakh is ~6.9x leverage while a Crude Oil Mini
+    lot (~Rs 0.86 lakh) is ~0.17x -- a 40x spread in how much risk "1 lot"
+    represents. Retained so old runs can be reproduced exactly.
+
+    `"notional"` (the default) sets capital to one lot's own notional divided
+    by `target_leverage`, so every instrument starts the backtest at the SAME
+    leverage and their CAGRs finally mean the same thing.
+
+    The price used is deliberately the FIRST bar's close, not the last or the
+    mean: you capitalise an account at the start of the period, and using any
+    later price would be lookahead.
+    """
+    if mode == "flat":
+        return float(flat_capital)
+    if mode != "notional":
+        raise ValueError(f"unknown capital mode {mode!r}")
+    if target_leverage <= 0:
+        raise ValueError("target_leverage must be positive")
+    return notional_per_lot(first_close, lot_size) / target_leverage
 
 
 @dataclass
@@ -57,6 +92,8 @@ class RunSummary:
     win_rate_pct: float
     sharpe_ratio: float
     max_drawdown_pct: float
+    cagr_pct: float = 0.0
+    initial_capital: float = 0.0
     flagged_drawdown: bool = field(default=False)
     flagged_thin_sample: bool = field(default=False)
 
@@ -81,6 +118,8 @@ def rank_results(
             win_rate_pct=r.win_rate_pct,
             sharpe_ratio=r.sharpe_ratio,
             max_drawdown_pct=r.max_drawdown_pct,
+            cagr_pct=r.cagr_pct,
+            initial_capital=r.initial_capital,
             flagged_drawdown=r.max_drawdown_pct > max_drawdown_guardrail_pct,
             flagged_thin_sample=r.trade_count < min_trade_count,
         )
@@ -211,6 +250,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Flag any result whose max_drawdown_pct exceeds this (default 50).",
     )
     parser.add_argument(
+        "--capital-mode",
+        choices=["notional", "flat"],
+        default="notional",
+        help="How to capitalise each instrument's backtest. 'notional' (default) uses one lot's "
+        "own notional so every instrument runs at the same leverage and CAGRs are comparable; "
+        "'flat' reproduces the old behaviour of one figure for all of them.",
+    )
+    parser.add_argument(
+        "--target-leverage",
+        type=float,
+        default=DEFAULT_TARGET_LEVERAGE,
+        help="Leverage each instrument is capitalised to under --capital-mode=notional "
+        "(default 1.0, i.e. one lot exactly equals the account).",
+    )
+    parser.add_argument(
+        "--no-costs",
+        action="store_true",
+        help="Skip the MCX transaction-cost/slippage model (reproduces pre-2026-09 results).",
+    )
+    parser.add_argument(
         "--min-trade-count",
         type=int,
         default=DEFAULT_MIN_TRADE_COUNT,
@@ -259,10 +318,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     session.add(strategy_row)
                     session.flush()
 
+                initial_capital = capital_for_run(
+                    args.capital_mode,
+                    first_close=float(bars[0].close),
+                    lot_size=instrument.lot_size,
+                    flat_capital=settings.default_virtual_capital,
+                    target_leverage=args.target_leverage,
+                )
                 engine = BacktestEngine(
                     strategy=strategy_impl,
-                    initial_capital=settings.default_virtual_capital,
+                    initial_capital=initial_capital,
                     lot_size=instrument.lot_size,
+                    cost_model=None if args.no_costs else DEFAULT_COST_MODEL,
+                    tick_size=float(instrument.tick_size or 0.0),
                 )
                 run_row = engine.run_and_persist(
                     bars,
@@ -288,6 +356,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         win_rate_pct=float(run_row.win_rate_pct or 0),
                         sharpe_ratio=float(run_row.sharpe_ratio or 0),
                         max_drawdown_pct=float(run_row.max_drawdown_pct or 0),
+                        cagr_pct=float(run_row.cagr_pct or 0),
+                        initial_capital=initial_capital,
                     )
                 )
 
@@ -298,7 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         f"{'strategy':<20}{'version':<22}{'instrument':<15}{'trades':>7}"
-        f"{'pf':>8}{'win%':>8}{'sharpe':>8}{'maxdd%':>8}  flags"
+        f"{'pf':>8}{'win%':>8}{'sharpe':>8}{'maxdd%':>8}{'cagr%':>8}{'capital':>12}  flags"
     )
     for r in ranked:
         flags = " ".join(
@@ -311,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"{r.strategy:<20}{r.version:<22}{r.instrument:<15}{r.trade_count:>7}"
             f"{r.profit_factor:>8.2f}{r.win_rate_pct:>8.1f}{r.sharpe_ratio:>8.2f}"
-            f"{r.max_drawdown_pct:>8.2f}  {flags}"
+            f"{r.max_drawdown_pct:>8.2f}{r.cagr_pct:>8.1f}{r.initial_capital:>12,.0f}  {flags}"
         )
     return 0
 
@@ -323,6 +393,7 @@ if __name__ == "__main__":
 __all__ = [
     "RunSummary",
     "build_strategy_grid",
+    "capital_for_run",
     "rank_results",
     "profit_factor_for_ranking",
     "main",

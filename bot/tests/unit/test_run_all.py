@@ -13,9 +13,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from growmore_bot.backtest.run_all import (
     RunSummary,
     build_strategy_grid,
+    capital_for_run,
     profit_factor_for_ranking,
     rank_results,
 )
@@ -144,3 +147,41 @@ def test_reusing_one_strategy_instance_across_instruments_corrupts_results():
     assert [(t.entry_price, t.exit_price) for t in leaked.trades] != [
         (t.entry_price, t.exit_price) for t in clean.trades
     ]
+
+
+def test_capital_for_run_notional_mode_equalises_leverage_across_instruments():
+    """The whole point: at one flat capital figure, 1 lot of Copper is ~6.9x
+    leverage and 1 lot of Crude Oil Mini is ~0.17x, so their CAGRs are not
+    comparable. Capitalising each to its own lot notional puts them both at
+    exactly 1x."""
+    copper_capital = capital_for_run(
+        "notional", first_close=1_378.10, lot_size=2500, flat_capital=500_000
+    )
+    crude_capital = capital_for_run(
+        "notional", first_close=8_570.0, lot_size=10, flat_capital=500_000
+    )
+    assert copper_capital == pytest.approx(3_445_250.0)
+    assert crude_capital == pytest.approx(85_700.0)
+    # Both are exactly one lot of their own contract -> identical leverage.
+    assert 1_378.10 * 2500 / copper_capital == pytest.approx(1.0)
+    assert 8_570.0 * 10 / crude_capital == pytest.approx(1.0)
+
+
+def test_capital_for_run_target_leverage_scales_the_account_down():
+    # 2x leverage means half a lot's notional of capital behind one lot.
+    assert capital_for_run(
+        "notional", first_close=1_000.0, lot_size=100, flat_capital=1, target_leverage=2.0
+    ) == pytest.approx(50_000.0)
+
+
+def test_capital_for_run_flat_mode_reproduces_the_original_behaviour():
+    """Retained so the pre-2026-09 runs can be reproduced exactly."""
+    for close, lot in [(1_378.10, 2500), (8_570.0, 10)]:
+        assert capital_for_run("flat", close, lot, flat_capital=500_000) == 500_000
+
+
+def test_capital_for_run_rejects_an_unknown_mode_and_bad_leverage():
+    with pytest.raises(ValueError):
+        capital_for_run("magic", 100.0, 1, flat_capital=1)
+    with pytest.raises(ValueError):
+        capital_for_run("notional", 100.0, 1, flat_capital=1, target_leverage=0)

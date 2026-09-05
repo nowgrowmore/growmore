@@ -53,6 +53,12 @@ class Instrument(Base):
     # display (dashboard trade log/positions), not read by any trading logic.
     # Will need updating at each contract roll, same as security_id/lot_size.
     contract_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    #: Minimum price increment, in the instrument's own quote units (e.g.
+    #: Rs 0.05/kg for Copper, Rs 1 per 10g for Gold Mini). Slippage is a tick
+    #: effect, not a basis-point one -- one Copper tick is Rs 125 a lot, so a
+    #: flat bps assumption would rank the instruments backwards. Nullable:
+    #: rows predating growmore_bot.costs simply have no tick recorded.
+    tick_size: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
     backtest_runs: Mapped[list["BacktestRun"]] = relationship(back_populates="instrument")
     paper_positions: Mapped[list["PaperPosition"]] = relationship(back_populates="instrument")
@@ -90,6 +96,17 @@ class BacktestRun(Base):
     win_rate_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     profit_factor: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     cagr_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    #: The capital this run was actually measured against. Nullable only for
+    #: rows written before capital became per-instrument, which were all
+    #: measured against one flat figure regardless of lot notional -- so
+    #: their CAGR ranks contract size as much as edge and is not comparable
+    #: with a row that has this set.
+    initial_capital: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    total_transaction_cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    #: CAGR before costs. `cagr_pct` is net; keeping both makes the cost drag
+    #: auditable rather than something you have to take on trust.
+    gross_cagr_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    cost_model: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     strategy: Mapped["Strategy"] = relationship(back_populates="backtest_runs")
     instrument: Mapped["Instrument"] = relationship(back_populates="backtest_runs")
@@ -178,6 +195,12 @@ class PaperOrder(Base):
     # and auto-closed). NULL for buy fills (not applicable) and for any
     # historical row predating this column.
     close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: `pnl` above is NET of costs. These three record what was deducted, so
+    #: gross-vs-net is auditable. Nullable for rows predating the cost model.
+    gross_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    transaction_cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    slippage_cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
 
     paper_position: Mapped["PaperPosition"] = relationship(back_populates="orders")
 
@@ -356,6 +379,12 @@ class LiveOrder(Base):
     pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     # See PaperOrder.close_reason -- same values, same meaning.
     close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: `pnl` above is NET of costs. These three record what was deducted, so
+    #: gross-vs-net is auditable. Nullable for rows predating the cost model.
+    gross_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    transaction_cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    slippage_cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
 
     live_position: Mapped["LivePosition"] = relationship(back_populates="orders")
 

@@ -81,3 +81,64 @@ def test_run_and_persist_writes_expected_rows():
             select(EquityCurvePoint).where(EquityCurvePoint.backtest_run_id == run_id)
         ).all()
         assert len(points) == 3
+
+
+def _in_memory_session():
+    engine_db = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine_db)
+    return Session(engine_db)
+
+
+_COST_BARS = [
+    _bar(1, 100, 105, 95, 102),
+    _bar(2, 110, 112, 108, 111),
+    _bar(3, 130, 132, 128, 131),
+]
+
+
+def test_persists_the_capital_basis_and_cost_breakdown():
+    """A stored run is uninterpretable without knowing what capital it was
+    measured against: at one flat figure across instruments, CAGR ranks
+    contract size as much as edge. `cost_model` is stored for the same
+    reason -- so a run is reproducible rather than taken on trust."""
+    from growmore_bot.costs import DEFAULT_COST_MODEL
+
+    with _in_memory_session() as session:
+        engine = BacktestEngine(
+            strategy=BuyThenSell(),
+            initial_capital=1_529_500,
+            lot_size=10,
+            cost_model=DEFAULT_COST_MODEL,
+            tick_size=1.0,
+        )
+        run = engine.run_and_persist(
+            _COST_BARS,
+            session=session,
+            strategy_id=uuid.uuid4(),
+            instrument_id=uuid.uuid4(),
+            started_at=datetime.now(timezone.utc),
+        )
+        session.commit()
+
+        assert float(run.initial_capital) == 1_529_500
+        assert run.cost_model["brokerage_per_order"] == 20.0
+        assert run.cost_model["ctt_sell_pct"] == 0.0001
+        assert float(run.total_transaction_cost) > 0
+        # Costs can only reduce the net figure, never improve it.
+        assert float(run.cagr_pct) < float(run.gross_cagr_pct)
+
+
+def test_a_costless_run_records_a_null_cost_model_rather_than_a_fake_one():
+    with _in_memory_session() as session:
+        engine = BacktestEngine(strategy=BuyThenSell(), initial_capital=500_000)
+        run = engine.run_and_persist(
+            _COST_BARS,
+            session=session,
+            strategy_id=uuid.uuid4(),
+            instrument_id=uuid.uuid4(),
+            started_at=datetime.now(timezone.utc),
+        )
+        session.commit()
+        assert run.cost_model is None
+        assert float(run.total_transaction_cost) == 0.0
+        assert float(run.initial_capital) == 500_000
