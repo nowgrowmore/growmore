@@ -71,6 +71,7 @@ def run_variant(
     evaluate_from: int = 0,
     cost_model: Optional[CostModel] = DEFAULT_COST_MODEL,
     allow_shorts: bool = False,
+    size_to_equity: bool = False,
 ) -> RunResult:
     """Backtest one (symbol, strategy, params) over the cached daily series.
 
@@ -102,6 +103,7 @@ def run_variant(
         cost_model=cost_model if with_costs else None,
         tick_size=float(info["tick_size"] or 0.0),
         allow_shorts=allow_shorts,
+        size_to_equity=size_to_equity,
     )
     result = engine.run(list(bars))
 

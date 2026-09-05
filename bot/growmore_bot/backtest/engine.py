@@ -43,6 +43,10 @@ class Trade:
     #: closed. Distinguishes "the strategy changed its mind" from "we were
     #: stopped out", which review very differently.
     exit_reason: Optional[str] = None
+    #: Signed units held (negative = short). Recorded so a trade log can be
+    #: audited for SIZE as well as price -- which is what surfaced the
+    #: fixed-quantity leverage drift `size_to_equity` fixes.
+    quantity: float = 0.0
     #: Internal: the exit leg's cost, so the caller can adjust cash once.
     _exit_cost: float = 0.0
     #: True when the protective stop was hit on the SAME bar the position
@@ -75,6 +79,7 @@ class BacktestEngine:
         cost_model: Optional[CostModel] = None,
         tick_size: float = 0.0,
         allow_shorts: bool = False,
+        size_to_equity: bool = False,
     ):
         """`lot_size` is the number of QUOTE UNITS per lot -- not raw grams/kg
         (e.g. Copper=2500 kg quoted per kg; Gold Mini is a 100g lot but MCX
@@ -108,6 +113,22 @@ class BacktestEngine:
         #: each (exit - entry) * qty expression correct automatically rather
         #: than threading a +/-1 through every P&L site.
         self.allow_shorts = allow_shorts
+        #: Re-derive the position size from CURRENT equity at each entry
+        #: instead of always trading `lot_size` units.
+        #:
+        #: False (the default, and every MCX result ever published here)
+        #: is right for futures: one lot is one lot. It is wrong for a long
+        #: equity backtest, because a fixed share count against a stock that
+        #: appreciates 100x is not a constant position -- it is escalating
+        #: leverage. Re-entering 82,372 shares of a Rs 6 stock once it
+        #: trades at Rs 1,000 asks for Rs 8.2 crore from an account that
+        #: never had it. On the real F&O universe that produced costs of
+        #: 162-352% of capital and drawdowns above 100%.
+        #:
+        #: Buy-and-hold is immune, since it enters once and never re-enters
+        #: -- so the drift penalises precisely the arm under test and
+        #: flatters the benchmark.
+        self.size_to_equity = size_to_equity
 
     def run(self, bars: Sequence[Any]) -> BacktestResult:
         trades: list[Trade] = []
@@ -208,22 +229,22 @@ class BacktestEngine:
                     and not stop_fired
                 )
                 if opening_short:
-                    qty = -((signal.size or 1) * self.lot_size)
                     fill_price = self._fill_price(reference_price, "sell")
+                    qty = -self._entry_qty(signal.size, fill_price, cash)
                     entry_cost = self._leg_cost(abs(fill_price * qty), "sell")
                     position_qty = qty
                     position_entry_price = fill_price
                     open_trade = Trade(
                         side="sell", entry_price=fill_price, entered_at=bar.timestamp,
-                        transaction_cost=entry_cost,
+                        transaction_cost=entry_cost, quantity=qty,
                     )
                     trades.append(open_trade)
                     cash -= fill_price * qty + entry_cost
                     total_cost += entry_cost
                     armed_stop = signal.stop_price
                 elif signal.action == SignalAction.BUY and position_qty == 0:
-                    qty = (signal.size or 1) * self.lot_size
                     fill_price = self._fill_price(reference_price, "buy")
+                    qty = self._entry_qty(signal.size, fill_price, cash)
                     entry_cost = self._leg_cost(fill_price * qty, "buy")
                     position_qty = qty
                     position_entry_price = fill_price
@@ -232,6 +253,7 @@ class BacktestEngine:
                         entry_price=fill_price,
                         entered_at=bar.timestamp,
                         transaction_cost=entry_cost,
+                        quantity=qty,
                     )
                     trades.append(open_trade)
                     cash -= fill_price * qty + entry_cost
@@ -342,6 +364,21 @@ class BacktestEngine:
         trade.exit_reason = reason
         trade._exit_cost = exit_cost
         return slipped, exit_cost
+
+    def _entry_qty(self, signal_size: Optional[float], fill_price: float, cash: float) -> float:
+        """Units to open, honouring `size_to_equity`.
+
+        Fixed mode multiplies `lot_size`, unchanged. Equity mode spends the
+        account rather than a remembered share count, and floors at one unit
+        so a collapsed account can still take a position instead of silently
+        ceasing to trade and freezing the equity curve.
+        """
+        multiplier = signal_size if signal_size else 1
+        if not self.size_to_equity:
+            return multiplier * self.lot_size
+        if fill_price <= 0:
+            return float(self.lot_size)
+        return float(max(1, int((cash * multiplier) // fill_price)))
 
     def _fill_price(self, reference_price: float, side: Side) -> float:
         """The next-bar-open reference price, moved against us by slippage.

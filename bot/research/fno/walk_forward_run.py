@@ -80,6 +80,7 @@ def stitched_oos(
             symbol, name, params, label,
             bars=segment, meta=meta,
             cost_model=NSE_EQUITY_DELIVERY_COST_MODEL,
+            size_to_equity=True,
             evaluate_from=fold.test_start - fold.train_start,
         )
         returns.extend(result.returns)

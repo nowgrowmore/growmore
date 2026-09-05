@@ -73,6 +73,7 @@ def run_symbol(
             symbol, name, params, tag, bars=bars, meta=meta,
             cost_model=NSE_EQUITY_DELIVERY_COST_MODEL,
             allow_shorts=allow_shorts and name != "buy_and_hold",
+            size_to_equity=True,
         )
     return results
 
