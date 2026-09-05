@@ -39,6 +39,17 @@ class Trade:
     pnl: Optional[float] = None
     gross_pnl: Optional[float] = None
     transaction_cost: float = 0.0
+    #: "stop" | "trail" | "time" | "signal" | None -- why the position was
+    #: closed. Distinguishes "the strategy changed its mind" from "we were
+    #: stopped out", which review very differently.
+    exit_reason: Optional[str] = None
+    #: Internal: the exit leg's cost, so the caller can adjust cash once.
+    _exit_cost: float = 0.0
+    #: True when the protective stop was hit on the SAME bar the position
+    #: opened. A high count means the stop is tighter than the instrument's
+    #: own bar range, i.e. the backtest is measuring the stop assumption
+    #: rather than the strategy.
+    same_bar_stop: bool = False
 
 
 @dataclass
@@ -99,8 +110,40 @@ class BacktestEngine:
         open_trade: Optional[Trade] = None
         pending_signal: Optional[Signal] = None
         total_cost = 0.0
+        risk_state: dict = {}
+
+        # Stop level armed by the previous bar's signal. Deliberately only
+        # ever set from CLOSED bars: a stop derived from the bar it is being
+        # tested against would be lookahead.
+        armed_stop: Optional[float] = None
 
         for bar in bars:
+            stop_fired = False
+
+            # (1) A stop is a resting level known BEFORE this bar opens, so
+            # unlike a close-derived signal it is checked against THIS bar's
+            # own range rather than the next one's.
+            if position_qty > 0 and armed_stop is not None and open_trade is not None:
+                if float(bar.low) <= armed_stop:
+                    # A bar that GAPS through the stop never traded at it --
+                    # fill at the open. min() is the whole point: booking the
+                    # stop level on a gap would invent a price that was never
+                    # available. MCX metals gap overnight routinely.
+                    exit_price = min(float(bar.open), armed_stop)
+                    # Credit cash at the SLIPPED fill the trade actually
+                    # recorded, not the pre-slippage level, or the equity
+                    # curve and the trade log quietly disagree.
+                    filled, exit_cost = self._close_trade(
+                        open_trade, exit_price, position_qty, bar.timestamp, "stop"
+                    )
+                    cash += filled * position_qty - exit_cost
+                    total_cost += exit_cost
+                    position_qty = 0.0
+                    position_entry_price = None
+                    open_trade = None
+                    armed_stop = None
+                    stop_fired = True
+
             if pending_signal is not None:
                 signal, pending_signal = pending_signal, None
                 reference_price = float(bar.open)
@@ -120,8 +163,25 @@ class BacktestEngine:
                     trades.append(open_trade)
                     cash -= fill_price * qty + entry_cost
                     total_cost += entry_cost
+                    armed_stop = signal.stop_price
+                    # You entered at this bar's open, so a stop below it
+                    # genuinely was reachable within this same bar. Checking
+                    # it is not lookahead -- skipping it would be optimism.
+                    if armed_stop is not None and float(bar.low) <= armed_stop:
+                        filled, exit_cost = self._close_trade(
+                            open_trade, armed_stop, qty, bar.timestamp, "stop"
+                        )
+                        open_trade.same_bar_stop = True
+                        cash += filled * qty - exit_cost
+                        total_cost += exit_cost
+                        position_qty = 0.0
+                        position_entry_price = None
+                        open_trade = None
+                        armed_stop = None
+                        stop_fired = True
                 elif (
                     signal.action == SignalAction.SELL
+                    and not stop_fired
                     and position_qty > 0
                     and open_trade is not None
                     and position_entry_price is not None
@@ -138,6 +198,7 @@ class BacktestEngine:
                     open_trade.gross_pnl = gross_pnl
                     open_trade.transaction_cost += exit_cost
                     open_trade.pnl = gross_pnl - open_trade.transaction_cost
+                    open_trade.exit_reason = signal.exit_reason or "signal"
                     cash += fill_price * qty - exit_cost
                     total_cost += exit_cost
                     position_qty = 0.0
@@ -152,9 +213,16 @@ class BacktestEngine:
             position_state = (
                 None
                 if position_qty == 0
-                else {"quantity": position_qty, "avg_entry_price": position_entry_price}
+                else {
+                    "quantity": position_qty,
+                    "avg_entry_price": position_entry_price,
+                    "risk": risk_state,
+                }
             )
             new_signal = self.strategy.on_bar(bar, position_state)
+            risk_state = new_signal.risk_state or ({} if position_qty == 0 else risk_state)
+            if position_qty > 0 and new_signal.stop_price is not None:
+                armed_stop = new_signal.stop_price
             if new_signal.action != SignalAction.HOLD:
                 pending_signal = new_signal
 
@@ -165,6 +233,28 @@ class BacktestEngine:
             final_equity=final_equity,
             total_transaction_cost=total_cost,
         )
+
+    def _close_trade(
+        self, trade: Trade, exit_price: float, qty: float, ts, reason: str
+    ) -> tuple[float, float]:
+        """Book an exit at an already-decided price. Used by the stop paths,
+        where the fill price is the stop level or the gapped open rather than
+        the next bar's open."""
+        slipped = exit_price
+        if self.cost_model is not None:
+            slipped = slippage_price(
+                exit_price, "sell", self.tick_size, self.cost_model, is_stop=True
+            )
+        exit_cost = self._leg_cost(slipped * qty, "sell")
+        gross = (slipped - trade.entry_price) * qty
+        trade.exit_price = slipped
+        trade.exited_at = ts
+        trade.gross_pnl = gross
+        trade.transaction_cost += exit_cost
+        trade.pnl = gross - trade.transaction_cost
+        trade.exit_reason = reason
+        trade._exit_cost = exit_cost
+        return slipped, exit_cost
 
     def _fill_price(self, reference_price: float, side: Side) -> float:
         """The next-bar-open reference price, moved against us by slippage.

@@ -24,6 +24,22 @@ class SignalAction(str, Enum):
 class Signal:
     action: SignalAction
     size: Optional[float] = None
+    #: Where the risk layer wants the protective stop to rest for the NEXT
+    #: bar. Purely additive: every strategy that predates
+    #: growmore_bot.risk leaves it None and behaves exactly as before.
+    #: The engine, not the strategy, decides what to do with it -- see
+    #: BacktestEngine's intrabar stop check.
+    stop_price: Optional[float] = None
+    #: Why an exit fired: "stop" | "trail" | "time" | "signal". Lets the
+    #: trade log distinguish "the strategy changed its mind" from "we were
+    #: stopped out", which are very different things to review.
+    exit_reason: Optional[str] = None
+    #: Opaque risk-layer state the engine persists verbatim and hands back
+    #: on the next bar via position_state["risk"]. Kept out of the strategy
+    #: object itself because the scheduler rebuilds strategies every tick
+    #: and warms them up with position_state=None, so anything
+    #: position-derived held in the instance would be garbage after warm-up.
+    risk_state: Optional[dict[str, Any]] = None
 
 
 class Strategy(ABC):

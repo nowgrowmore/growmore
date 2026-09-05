@@ -20,7 +20,6 @@ from growmore_bot.persistence.models import (
     PortfolioEquityCurvePoint,
     PortfolioRebalanceHolding,
 )
-
 from research.smallcap_momentum.portfolio_engine import PortfolioResult
 
 

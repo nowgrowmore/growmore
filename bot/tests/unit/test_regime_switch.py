@@ -13,11 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 from growmore_bot.strategies.macd_trend import MacdTrendStrategy
 from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy, _AdxCalculator
 from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from growmore_bot.strategies.vwap_ema_reversion import VwapEmaReversionStrategy
-from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
 def _bar(high, low, close):

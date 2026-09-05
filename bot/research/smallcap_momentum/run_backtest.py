@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -24,7 +23,6 @@ from growmore_bot.backtest.metrics import cagr_pct, max_drawdown_pct, sharpe_rat
 from growmore_bot.broker.dhan_client import DhanClient
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
 from growmore_bot.config import Settings
-
 from research.smallcap_momentum.fundamentals import fetch_all_fundamentals, load_cached_fundamentals
 from research.smallcap_momentum.portfolio_engine import (
     PortfolioResult,

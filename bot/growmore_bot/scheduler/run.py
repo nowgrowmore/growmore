@@ -177,6 +177,7 @@ def run_all_enabled_configs(
         PaperPosition,
         Strategy,
     )
+    from growmore_bot.risk.wrapper import build_risk_managed
     from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
     from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
@@ -196,6 +197,8 @@ def run_all_enabled_configs(
         "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
         "regime_switch": lambda params: RegimeSwitchStrategy(**params),
         "vwap_session_bounce": lambda params: VwapSessionBounceStrategy(**params),
+        # Any strategy above, plus ATR stops -- see growmore_bot.risk.wrapper.
+        "risk_managed": lambda params: build_risk_managed(params),
         # Demo-only, not a real trading strategy -- see always_flip.py.
         "always_flip": lambda params: AlwaysFlipStrategy(**params),
     }

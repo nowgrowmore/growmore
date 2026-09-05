@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -93,6 +94,9 @@ class Bar:
     volume: float
 
 
+logger = logging.getLogger(__name__)
+
+
 class _SafeSdk:
     """Proxy that only forwards attribute access for allow-listed Data API methods."""
 
@@ -126,6 +130,55 @@ def _decode_jwt_exp(token: str) -> Optional[datetime]:
         return datetime.fromtimestamp(exp, tz=timezone.utc)
     except Exception:
         return None
+
+
+def _validated_bars(bars: list[Bar], symbol: Any) -> list[Bar]:
+    """Drop bars Dhan reports that cannot be real prices, and collapse
+    duplicate timestamps.
+
+    Found 2026-09-05: Dhan returns NICKEL bars with open=high=low=0.0
+    alongside a real close and a real volume -- 5 of 1,252 over a 5-year
+    window, plus a duplicated date. Those zeros are missing fields, not
+    prices, and unfiltered they corrupt everything computed from a bar's
+    range: a Donchian channel low of 0, a Bollinger band against a 100%
+    "move", an ATR inflated by a 1,873-point true range, and -- once
+    ATR-based stops existed -- a stop at a NEGATIVE price which then
+    "filled" and booked a Rs 485,199 loss on one trade, producing a 199%
+    max drawdown on a long-only 1x position. That impossibility is what
+    surfaced it; before stops existed the same bad bars were silently
+    skewing every NICKEL result instead.
+
+    Dropped rather than repaired: reconstructing open=high=low=close would
+    invent a zero-range bar, which quietly deflates ATR and flatters any
+    range-based indicator. Five missing days in five years is the smaller
+    distortion, and it is a visible one.
+    """
+    seen: set = set()
+    clean: list[Bar] = []
+    dropped_bad = 0
+    dropped_dupe = 0
+    for bar in bars:
+        if bar.timestamp in seen:
+            dropped_dupe += 1
+            continue
+        if min(bar.open, bar.high, bar.low, bar.close) <= 0:
+            dropped_bad += 1
+            continue
+        if bar.high < bar.low or bar.high < bar.open or bar.high < bar.close:
+            dropped_bad += 1
+            continue
+        if bar.low > bar.open or bar.low > bar.close:
+            dropped_bad += 1
+            continue
+        seen.add(bar.timestamp)
+        clean.append(bar)
+    if dropped_bad or dropped_dupe:
+        logger.warning(
+            "%s: dropped %d unusable historical bar(s) and %d duplicate timestamp(s) "
+            "out of %d returned by Dhan",
+            symbol, dropped_bad, dropped_dupe, len(bars),
+        )
+    return clean
 
 
 class DhanClient:
@@ -214,7 +267,7 @@ class DhanClient:
         self._raise_if_failed(response)
         data = response["data"] if "data" in response else response
         timestamps = data.get("timestamp", [])
-        return [
+        raw = [
             Bar(
                 timestamp=datetime.fromtimestamp(ts, tz=timezone.utc),
                 open=float(data["open"][i]),
@@ -225,6 +278,7 @@ class DhanClient:
             )
             for i, ts in enumerate(timestamps)
         ]
+        return _validated_bars(raw, getattr(instrument, "symbol", instrument))
 
     def get_fund_limits(self) -> FundLimits:
         """Real account balance/margin (GET /fundlimit) -- read-only, no

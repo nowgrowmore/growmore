@@ -31,7 +31,6 @@ from dataclasses import replace as _dataclasses_replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from growmore_bot.broker.dhan_order_client import DhanOrderError
 from growmore_bot.persistence.models import (
     AuditLog,
     BotSignalState,

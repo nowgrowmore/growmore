@@ -1,5 +1,49 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-05) Dhan returns corrupt NICKEL bars, and they had been silently
+  poisoning every NICKEL backtest.** 5 of 1,252 daily bars over the 5-year window come back with
+  `open=high=low=0.0` alongside a real `close` and a real `volume` — those zeros are missing fields,
+  not prices — plus at least one duplicated date. Unfiltered they corrupt everything derived from a
+  bar's range: a Donchian channel low of 0, a Bollinger band computed against a 100% "move", an ATR
+  inflated by a 1,873-point true range. **How it surfaced:** once ATR-based stops existed, the
+  inflated ATR placed a stop at a *negative* price (-0.4), which then "filled" and booked a
+  ₹485,199 loss on a single trade — the run reported a **199% max drawdown on a long-only,
+  1x-leverage position**, which is arithmetically impossible and was the tell. Before stops existed
+  the same bad bars were skewing NICKEL results quietly, with nothing to give them away.
+  **Fixed in two places:** `DhanClient.get_historical_ohlc` now drops any bar with a non-positive
+  OHLC value or an incoherent high/low, and collapses duplicate timestamps, logging a warning with
+  the counts; and `growmore_bot.risk.exits` refuses to place a stop at or below zero regardless of
+  what ATR says. Dropped rather than repaired: reconstructing `open=high=low=close` would invent a
+  zero-range bar, which quietly deflates ATR and flatters every range-based indicator — five missing
+  days in five years is the smaller and more visible distortion. Only NICKEL is affected today
+  (checked across all 8 instruments), but the guard is universal since bad prints are a property of
+  the feed.
+- **(2026-09-05) The risk layer helps most where drawdown was worst, and hurts on low-volatility
+  contracts.** A paired comparison of the same strategy on the same instrument, with and without a
+  2×ATR initial stop plus a 3×ATR Chandelier trail, across 13 pairs that clear the 15-trade
+  guardrail: **better on BOTH Sharpe and max drawdown in 8, worse on both in 3.** The wins are
+  large where they land — MACD(5,13,5)/Gold Mini goes from 19.1% max drawdown to **8.8%** with
+  Sharpe 1.42 → 1.68 and CAGR slightly up; MACD(12,26,9)/Gold Mini 29.0% → **10.3%** with Sharpe
+  0.96 → 1.57; every Nickel pairing collapses from 40–65% drawdowns to 11–15%. The losses are
+  consistent and explainable: Aluminium Mini and Zinc Mini both get *worse* on both metrics,
+  because 2×ATR on a low-volatility contract sits inside normal noise and converts winners into
+  stopped-out losers. MACD(12,26,9)/Silver Mini is a genuine trade-off rather than a win — CAGR
+  33.4% → 21.6% but drawdown 36.8% → 22.4%. **Conclusion: the stop multiple wants calibrating per
+  instrument, not applying universally at 2×ATR.** That calibration has not been done and is the
+  obvious next experiment; until it is, a risk-managed config should only be enabled on an
+  instrument where the paired comparison above is favourable.
+- **The backtest's stops are optimistic relative to what this bot can execute.** There is no resting
+  stop order: the scheduler polls every 5 minutes and `DhanClient` is hard-limited to read-only Data
+  APIs, so a live "stop" is a software stop firing at the next poll's LTP, not at the stop level.
+  The backtest fills at the stop level (or the gapped open, whichever is worse) plus
+  `stop_slippage_ticks`. That extra slippage is a deliberate, documented hedge rather than a
+  measurement — closing the gap properly needs a real SL-M order, which is tracked in
+  `docs/pending-actions.md`.
+- **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the
+  contract-expiry force-close and the end-of-day flatten for `requires_intraday_flatten` strategies
+  all exist in `paper/engine.py` and `live/engine.py` and in none of `backtest/engine.py`. Backtest
+  and live are therefore not quite the same system, and the gap widens for any strategy that would
+  actually trip one of those guards.
 - **(Found + fixed one instance 2026-09-04) Neither disabling NOR deleting a `bot_config` closes its
   open position.** `scheduler/run.py`'s main tick loop only queries `enabled=True` configs -- flip a
   config to disabled (the dashboard's normal toggle) and it's simply never fetched or evaluated

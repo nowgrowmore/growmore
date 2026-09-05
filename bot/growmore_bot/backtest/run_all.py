@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from growmore_bot.backtest.engine import BacktestEngine
 from growmore_bot.broker.dhan_client import DhanClient
@@ -37,6 +37,7 @@ from growmore_bot.persistence.db import session_scope
 from growmore_bot.persistence.models import BacktestTrade, Instrument
 from growmore_bot.persistence.models import Strategy as StrategyRow
 from growmore_bot.risk.sizing import notional_per_lot
+from growmore_bot.risk.wrapper import build_risk_managed
 from growmore_bot.strategies.base import Strategy
 from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
 from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
@@ -235,6 +236,33 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
             grid.append(
                 ("regime_switch", version, params, partial(RegimeSwitchStrategy, **params))
             )
+
+    # Risk-managed variants: the SAME entry rules as above, plus an ATR stop
+    # and a Chandelier trail. Donchian is the deliberate first subject --
+    # a breakout system without a stop is the textbook case of a strategy
+    # that only works with one, so if the risk layer doesn't lift Donchian
+    # the risk layer itself is suspect. MACD 5/13/5 is included because it
+    # is the incumbent best pick and the comparison has to be fair.
+    risk_variants: list[tuple[str, dict, float, Optional[float]]] = [
+        ("donchian_breakout", {"period": 20}, 2.0, 3.0),
+        ("donchian_breakout", {"period": 20}, 2.0, None),
+        ("donchian_breakout", {"period": 55}, 2.0, 3.0),
+        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, 2.0, 3.0),
+        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, 3.0, None),
+        ("macd_trend", {"fast_period": 12, "slow_period": 26, "signal_period": 9}, 2.0, 3.0),
+    ]
+    for inner_name, inner_params, stop_atr, trail in risk_variants:
+        params = {
+            "inner_strategy": inner_name,
+            "inner_params": inner_params,
+            "atr_period": 14,
+            "initial_stop_atr": stop_atr,
+            "trail_atr": trail,
+        }
+        tag = "-".join(str(v) for v in inner_params.values())
+        trail_tag = f"trail{trail:g}" if trail is not None else "notrail"
+        version = f"{inner_name}-{tag}-stop{stop_atr:g}-{trail_tag}"
+        grid.append(("risk_managed", version, params, partial(build_risk_managed, params)))
 
     return grid
 
