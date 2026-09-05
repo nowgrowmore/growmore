@@ -12,6 +12,15 @@
   issue. `growmore-bot.service` logged `DH-906` on every 5-minute tick and never attempted a
   refresh, because by its own test nothing was wrong.
 
+  **Cause identified the same evening:** the account owner's Mac holds a token generated at
+  **08:17**, three minutes after the VPS's, and it works — a real 3,968-bar `NSE_EQ` fetch
+  succeeded on it while the VPS's was being refused. So the Mac's token invalidated the VPS's.
+  This is the *second* occurrence of the 2026-09-04 incident recorded further down, and it happened
+  the same way: a token generated on a machine other than the one live-trading. The remedy is to
+  copy the working token onto the VPS, never to generate a third — generating one would invalidate
+  the working one in turn. The deeper fix is to stop the two hosts competing for a single session:
+  have the VPS own token generation exclusively, and have the Mac read from it.
+
   Fix is small and worth doing before any live phase: treat a `DH-906` response as an expiry
   signal, not just a transport error — one forced `refresh_if_needed(..., force=True)` on the
   first `DH-906`, rate-limited so a genuinely broken credential cannot spin. Until then a dead

@@ -4,47 +4,42 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 ## URGENT — added 2026-09-05 evening
 
-- [ ] **The live bot is down, and has been since at least this evening: the Dhan token is dead.**
-  `growmore-bot.service` on the VPS is logging `DH-906 Invalid Token` on every 5-minute tick. The
-  token in the VPS's `.env.local` was written 2026-09-05 08:14 and its embedded expiry is
-  2026-09-06 08:14, so it *looks* valid — but Dhan rejects it, **including from the VPS itself**,
-  so this is not an IP or static-IP problem. The most likely cause is Dhan's one-active-token-per-
-  account rule: a token generated somewhere else after 08:14 silently invalidated this one.
+- [ ] **The live bot is down, and the fix is a one-line copy — no new token needed.**
+  `growmore-bot.service` on the VPS is logging `DH-906 Invalid Token` on every 5-minute tick.
 
-  **What is needed from you:** generate a fresh token and put it on the VPS. The sanctioned way is
-  to run, on the droplet:
+  **Cause, confirmed:** Dhan allows one active access token per account. The VPS's token was
+  written at 08:14 today; **your Mac's token was generated at 08:17**, three minutes later, and
+  that is what invalidated the VPS's. The Mac's token is live and working right now (verified
+  against a real 3,968-bar `NSE_EQ` fetch); the VPS's is dead. This is the same failure mode
+  `docs/technical-debt.md` recorded on 2026-09-04 — the one whose lesson was "never generate a
+  fresh Dhan access token from any machine other than the one currently live-trading."
+
+  **The fix is to copy the Mac's working token onto the VPS.** Do NOT generate a new one — that
+  would invalidate the working token and put you back where you started:
 
   ```
+  # on your Mac, read the live token
+  grep '^DHAN_ACCESS_TOKEN=' ~/code/src/growmore/.env.local
+
+  # on the VPS, back up and replace that one line, then restart
   ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81
-  cd /home/growmore/growmore/bot && .venv/bin/python -m growmore_bot.broker.token_refresh
+  cp ~/growmore/.env.local ~/growmore/.env.local.bak
+  #   ...edit ~/growmore/.env.local, replacing the DHAN_ACCESS_TOKEN= line...
+  sudo systemctl restart growmore-bot
+  journalctl -u growmore-bot -f      # confirm DH-906 stops
   ```
 
-  and then restart the service. `token_refresh` needs `DHAN_PIN` and `DHAN_TOTP_SECRET`, both
-  already present in the VPS's `.env.local`. Note the CLI only refreshes within 2 hours of the
-  embedded expiry, and this token's embedded expiry is not near — so it needs
-  `refresh_if_needed(..., force=True)`, which the CLI does not expose as a flag.
+  I could not do this myself: writing a credential to the live trading host is blocked for me by
+  the permission layer, and rightly so. Note the token expires **2026-09-06 08:17 UTC**, after
+  which the VPS's own TOTP refresh takes over again — so if you would rather wait, the bot will
+  most likely heal itself at the next refresh. It will not heal before then, for the reason below.
 
-  I did not do this myself: generating a token is a credential action, it invalidates whatever
-  other session currently holds one, and it was blocked for me by the permission layer. Nothing I
-  did caused the outage — I only ever *read* the VPS's existing token, never generated one.
-
-  Related: the bot cannot recover from this on its own, because
-  `refresh_access_token_if_needed` only checks the JWT `exp` claim and a server-side invalidation
-  does not change it. See `docs/technical-debt.md`.
-
-- [ ] **Then the F&O price fetch can run** (~5 minutes, read-only, 210 symbols). Once the VPS has a
-  working token, copy it into the repo-root `.env.local` on your Mac and run:
-
-  ```
-  cd bot && .venv/bin/python -m research.fno.fetch_bars     # ~5 min, resumable
-  .venv/bin/python -m research.fno.run_configs
-  .venv/bin/python -m research.fno.walk_forward_run
-  ```
-
-  Everything else for the F&O study is built, tested and committed — the universe (210 stocks,
-  sector-labelled), the store, the equity cost model, the three configs and the statistics. The
-  bars are the only missing input. Copying the token rather than generating a second one is what
-  keeps the VPS's session alive (`docs/technical-debt.md`, the 2026-09-04 incident).
+- [ ] **Consider making the bot able to recover from this at all.**
+  `refresh_access_token_if_needed` decides everything from the JWT `exp` claim, and a server-side
+  invalidation does not change it — so the bot sees a valid token, never refreshes, and stays down
+  indefinitely. Treating a `DH-906` response as an expiry signal (one forced refresh, rate-limited)
+  would have turned tonight's outage into a five-minute blip. Worth doing before any live phase.
+  Detail in `docs/technical-debt.md`.
 
 ## Decisions waiting on you — added 2026-09-05 after out-of-sample validation
 
