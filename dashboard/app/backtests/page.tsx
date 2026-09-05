@@ -30,6 +30,7 @@ const SORT_COLUMNS: { key: BacktestSortKey; label: string; explain: string }[] =
   { key: "started_at", label: "Started", explain: "When this backtest was run (not the price data's own dates -- see Timeframe)." },
   { key: "trade_count", label: "Trades", explain: "Closed trades in this run. Higher is more statistically trustworthy -- treat anything under ~15 as too thin to act on, regardless of how good the other numbers look." },
   { key: "sharpe_ratio", label: "Sharpe", explain: "Risk-adjusted return: reward per unit of volatility taken. Higher is better. Rough guide: <0.5 weak, 0.5-1 okay, >1 good, >2 excellent." },
+  { key: "dsr", label: "DSR", explain: "Deflated Sharpe Ratio: the probability this run's Sharpe reflects real edge rather than being the luckiest result of everything tried in the same sweep (216+ runs tested together -- some of that is guaranteed to look good by chance alone). Computed from how correlated the runs actually are, not just the raw count. >=0.95 is the conventional bar for \"real, not luck\"; 0.80-0.95 is borderline; below that, treat it as statistically indistinguishable from a fluke no matter how good Sharpe/CAGR look. Blank means it hasn't been computed yet for this run (see research/validation/deflate_sweep.py --persist)." },
   { key: "max_drawdown_pct", label: "Max drawdown", explain: "The worst peak-to-trough decline this run lived through. Lower is better -- it's literally how much pain before recovery." },
   { key: "win_rate_pct", label: "Win rate", explain: "% of closed trades that were profitable. Higher is generally better, but read it together with profit factor -- a high win rate with small wins and rare huge losses can still lose money overall." },
   { key: "profit_factor", label: "Profit factor", explain: "Gross profit / gross loss. Above 1 means net profitable over the sample; higher is better. \"inf\" means zero losing trades in the sample -- a sign the sample is very thin, not proof the strategy never loses." },
@@ -96,7 +97,19 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
     new Map(runs.map((r) => [r.instrument_id, r.instrument_symbol ?? r.instrument_id])).entries()
   );
   const strategies = Array.from(
-    new Map(runs.map((r) => [r.strategy_id, r.strategy_name ?? r.strategy_id])).entries()
+    new Map(
+      runs.map((r) => [
+        r.strategy_id,
+        // Multiple distinct strategy_id rows can share the same
+        // strategy_name (different param variants, e.g. several
+        // macd_trend rows) -- version + params disambiguate which is
+        // actually being selected, not just which family.
+        `${r.strategy_name ?? r.strategy_id}${r.strategy_version ? ` v${r.strategy_version}` : ""}` +
+          (r.strategy_params && Object.keys(r.strategy_params).length > 0
+            ? ` (${formatStrategyParams(r.strategy_params)})`
+            : ""),
+      ])
+    ).entries()
   );
 
   function sortHref(key: BacktestSortKey) {
@@ -273,6 +286,20 @@ export default async function BacktestsPage({ searchParams }: BacktestsPageProps
                 <td className="px-3 py-2">{new Date(run.started_at).toLocaleDateString()}</td>
                 <td className="px-3 py-2 tabular-nums">{toNumber(run.trade_count)}</td>
                 <td className="px-3 py-2 tabular-nums">{formatNumber(run.sharpe_ratio ? Number(run.sharpe_ratio) : null)}</td>
+                <td
+                  className="px-3 py-2 tabular-nums"
+                  title={
+                    run.dsr
+                      ? Number(run.dsr) >= 0.95
+                        ? "Significant -- likely real, not luck"
+                        : Number(run.dsr) >= 0.8
+                          ? "Borderline"
+                          : "Not distinguishable from luck"
+                      : "Not yet computed for this run"
+                  }
+                >
+                  {run.dsr ? formatNumber(Number(run.dsr)) : "—"}
+                </td>
                 <td className="px-3 py-2 tabular-nums">
                   {formatPercent(run.max_drawdown_pct ? Number(run.max_drawdown_pct) : null)}
                 </td>

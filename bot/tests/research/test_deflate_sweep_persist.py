@@ -4,7 +4,6 @@ write this otherwise read-only report script does. No real DB connection:
 """
 from __future__ import annotations
 
-import math
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 

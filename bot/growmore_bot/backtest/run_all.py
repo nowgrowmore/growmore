@@ -404,6 +404,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if not bars:
                 continue
+            print(f"  {instrument.symbol}: {len(bars)} bars, running {len(grid)} variants...",
+                  file=sys.stderr, flush=True)
 
             for strategy_name, version, params, strategy_factory in grid:
                 # A FRESH instance per (instrument, variant) -- strategies are
@@ -466,6 +468,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         initial_capital=initial_capital,
                     )
                 )
+
+            # Commit per INSTRUMENT, not once for the whole sweep. A single
+            # transaction spanning every run accumulates ~320,000
+            # equity-curve rows over a pooled Neon connection, and when that
+            # connection blips mid-run the whole thing rolls back with a
+            # confusing "cannot exit pipeline mode while busy" -- losing
+            # hours of work and, worse, leaving a stale previous sweep in the
+            # table that the next analysis silently scores instead. Bounded
+            # transactions make progress durable and a partial failure
+            # obvious. Found the hard way, twice.
+            session.commit()
 
     ranked = rank_results(
         summaries,

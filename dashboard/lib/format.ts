@@ -200,7 +200,8 @@ export type BacktestSortKey =
   | "profit_factor"
   | "cagr_pct"
   | "started_at"
-  | "trade_count";
+  | "trade_count"
+  | "dsr";
 
 export function sortBacktestRuns(
   runs: BacktestRun[],

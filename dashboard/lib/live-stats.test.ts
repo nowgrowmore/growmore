@@ -29,6 +29,7 @@ function backtestRun(overrides: Partial<BacktestRun>): BacktestRun {
     win_rate_pct: "70",
     profit_factor: "2.0",
     cagr_pct: "20",
+    dsr: null,
     ...overrides,
   };
 }

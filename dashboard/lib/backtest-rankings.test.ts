@@ -21,6 +21,7 @@ function makeRun(overrides: Partial<BacktestRun>): BacktestRun {
     win_rate_pct: "50",
     profit_factor: "2.0",
     cagr_pct: "20",
+    dsr: null,
     trade_count: "30",
     ...overrides,
   };

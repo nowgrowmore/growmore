@@ -33,6 +33,12 @@ export interface BacktestRun {
   win_rate_pct: string | null;
   profit_factor: string | null;
   cagr_pct: string | null;
+  // Deflated Sharpe Ratio -- the probability this run's Sharpe reflects
+  // real edge rather than being the luckiest of everything tried in its
+  // sweep. Null until a batch job (research/validation/deflate_sweep.py
+  // --persist) has computed it; it's a sweep-relative statistic, not
+  // something a single run computes for itself.
+  dsr: string | null;
   // Joined convenience fields (populated by getBacktestRuns()).
   strategy_name?: string;
   strategy_version?: string;
