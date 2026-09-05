@@ -1,128 +1,106 @@
-# Backtest Results — Strategy/Parameter Sweep (corrected 2026-09-04)
+# Backtest Results — Strategy/Parameter Sweep (re-run 2026-09-05, cost-adjusted)
 
-> **⚠️ The CAGR column below ranks LEVERAGE as much as edge — read this before acting on it
-> (found 2026-09-05).** The engine trades exactly 1 lot per signal against one flat ₹5,00,000 of
-> capital for every instrument, but MCX lot notionals span 44x: Crude Oil Mini is ₹0.78 lakh a lot
-> while Copper is ₹34.3 lakh. So this sweep silently ran **0.16x leverage on Crude Oil Mini and
-> 6.86x on Copper**. Dividing each result by its own leverage (run
-> `python -m research.capital.admission --from-db` for the current table) re-states the published
-> top five as return per unit of notional:
->
-> | Published | Headline CAGR | Leverage | Per unit notional | Sharpe |
-> | --- | --- | --- | --- | --- |
-> | #1 MACD(5,13,5) / GOLDM | 21.9% | 3.06x | 7.2% | 1.38 |
-> | #2 Regime-Switch / COPPER | 27.1% | 6.86x | **4.0%** | 1.17 |
-> | #3 MACD(5,13,5) / SILVERM | 24.4% | 2.39x | 10.2% | 1.17 |
-> | #4 MACD(12,26,9) / SILVERM | 25.4% | 2.39x | **10.6%** | 1.15 |
-> | #5 MACD(12,26,9) / COPPER | 33.0% | 6.86x | **4.8%** | 0.99 |
-> | *(not in the top 5)* MACD(12,26,9) / ALUMINI | 6.8% | 0.70x | **9.7%** | 1.06 |
->
-> So **#5's headline 33.0% — the highest raw growth in the table — is the WORST of the five on an
-> equal-risk basis**, and Aluminium Mini, dismissed below as "a notional-size effect", beats three
-> of the top five. Note that `sharpe_ratio` was the honest column all along: Sharpe is
-> leverage-invariant, CAGR is not, and the composite ranking mixed the two. Two results the
-> leverage-free view surfaces that this table buries entirely: `regime_switch
-> (adx14-macd5135-vwap_ema) / ALUMINI` at 13.6% per unit notional with **Sharpe 1.61 and a 3.4% max
-> drawdown** over 32 trades — the best risk-adjusted result anywhere in the sweep, and a direct
-> counterexample to `docs/goldmini-regime-switch-results.md`'s verdict, which tested Gold Mini only;
-> and RSI(7,30/70) / NICKEL at 22.9% per unit notional, though on a poor Sharpe of 0.51.
->
-> Dividing CAGR by leverage is a first-order correction, not a substitute for the real fix: re-run
-> the sweep with `initial_capital` set per instrument to its own lot notional. Treat every CAGR
-> below as provisional until that lands. The multiple-comparisons caveat at the bottom of this doc
-> applies to the re-stated numbers exactly as it did to the originals.
+**144 runs, 5 years of real Dhan daily data (2021-09-05 → 2026-09-05), 8 MCX commodities.** This
+supersedes the 2026-09-04 table completely. Two things changed, and between them they reorder
+almost everything:
 
+1. **Capital is now per-instrument, not one flat ₹5,00,000.** Each instrument's backtest is
+   capitalised at one lot's own notional (priced off the *first* bar — a later price would be
+   lookahead), so every result runs at exactly 1x leverage and the CAGR column finally measures
+   edge rather than contract size. Previously a Copper lot (~₹34 lakh) against ₹5 lakh was ~6.9x
+   leverage while a Crude Oil Mini lot (~₹0.86 lakh) was ~0.17x — a 40x spread.
+2. **Real MCX transaction costs and slippage are modelled** (`bot/growmore_bot/costs.py`):
+   brokerage min(₹20, 0.03%), exchange 0.0026%, CTT 0.01% sell-side, stamp 0.002% buy-side, SEBI
+   ₹20/crore, GST 18% on the service charges, plus 2 ticks of slippage per side. `cagr_pct` is now
+   **net**; `gross_cagr_pct` and `total_transaction_cost` are stored alongside it.
 
-> **Re-run 2026-09-04 after fixing the bugs described in `docs/technical-debt.md`** — most
-> significantly, `run_all.py` sharing one stateful strategy instance across every instrument in a
-> sweep (corrupting every commodity after the first one processed in any prior run), plus the frozen
-> live-indicator bug and GOLDM's 10x lot_size error. The numbers below replace the previous
-> (materially overstated) table — the old `backtest_runs` rows were deleted from the real Neon
-> database and this sweep re-run fresh against it, not patched in place.
+## Top 12, ranked by net CAGR at 1x leverage
 
-Full sweep: 6 strategy families (5 original + `regime_switch`) × parameter variants × 8 MCX
-commodities = **144 backtest runs**, against 5 years of real Dhan historical daily data (2021-09 to
-2026-09, per instrument's actual listing history). Persisted to the real Neon database — viewable in
-full on the dashboard's [Backtests page](../dashboard/app/backtests/page.tsx) and
-[Rankings page](../dashboard/app/rankings/page.tsx), which also explain every metric and every
-strategy's parameters.
+Guardrails as before: ≥15 closed trades, max drawdown ≤50%. 73 of 144 runs pass.
 
-**Do not enable anything for paper trading off this alone.** See the caveats at the bottom before
-acting on any of it.
+| # | Strategy | Instrument | Trades | Net CAGR | Sharpe | Max DD | PF | Cost drag |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | MACD (12,26,9) | Silver Mini | 43 | **33.1%** | 1.22 | 37.0% | 6.03 | 0.12pp |
+| 2 | MACD (5,13,5) | Silver Mini | 88 | 31.4% | 1.24 | 38.1% | 2.63 | 0.27pp |
+| 3 | Regime-Switch (ADX+MACD 12,26,9+VWAP/EMA) | Silver Mini | 16 | 28.5% | 1.09 | 45.2% | 8.02 | 0.06pp |
+| 4 | Regime-Switch (ADX+MACD 5,13,5+RSI) | Silver Mini | 51 | 28.0% | 1.07 | 41.3% | 2.45 | 0.19pp |
+| 5 | Regime-Switch (ADX+MACD 5,13,5+VWAP/EMA) | Silver Mini | 46 | 27.3% | 1.06 | 42.4% | 2.34 | 0.17pp |
+| 6 | Regime-Switch (ADX+MACD 12,26,9+RSI) | Silver Mini | 23 | 27.1% | 1.01 | 41.2% | 4.52 | 0.09pp |
+| 7 | RSI (7, 30/70) | Nickel | 44 | 22.9% | 0.51 | 21.9% | 2.75 | 0.13pp |
+| 8 | MACD (5,13,5) | Gold Mini | 92 | 22.5% | **1.45** | **18.6%** | 3.05 | 0.34pp |
+| 9 | RSI (7, 30/70) | Silver Mini | 39 | 21.1% | 0.99 | 37.1% | 2.70 | 0.17pp |
+| 10 | Donchian (10) | Gold Mini | 23 | 19.4% | 1.11 | 22.0% | 3.79 | 0.09pp |
+| 11 | Regime-Switch (ADX+MACD 5,13,5+VWAP/EMA) | Aluminium Mini | 32 | 18.5% | **1.53** | **6.8%** | 5.38 | 0.27pp |
+| 12 | SMA (5, 20) | Gold Mini | 38 | 18.4% | 1.04 | 24.9% | 3.31 | 0.16pp |
 
-## Top 5, highest to lowest
+### What actually changed, and why
 
-Ranked by a composite of CAGR (actual growth) and Sharpe (risk-adjusted quality), among results that
-passed both guardrails below (>=15 closed trades, max drawdown <=50%).
+**Copper is gone from the top 12 entirely.** The old table's #2 (Regime-Switch/Copper, 27.1%) and #5
+(MACD 12,26,9/Copper, "the highest raw CAGR of the top 5" at 33.0%) were **leverage artifacts**. On
+equal risk those same two runs are 10.4% and 13.2%. Copper's best result anywhere in this sweep is
+now 13.2%. Nothing about Copper got worse — it was never as good as the table said.
 
-| Rank | Strategy                             | Instrument  | Trades | CAGR      | Sharpe   | Profit factor | Max DD | Win rate  |
-| ---- | ------------------------------------ | ----------- | ------ | --------- | -------- | ------------- | ------ | --------- |
-| 1    | MACD Trend (5, 13, 5)                | Gold Mini   | 91     | 21.9%     | **1.38** | 3.20          | 24.4%  | 53.8%     |
-| 2    | Regime-Switch (ADX+MACD 12,26,9+RSI) | Copper      | 19     | 27.1%     | 1.17     | **9.64**      | 23.9%  | **84.2%** |
-| 3    | MACD Trend (5, 13, 5)                | Silver Mini | 88     | 24.4%     | 1.17     | 2.67          | 34.5%  | 51.1%     |
-| 4    | MACD Trend (12, 26, 9)               | Silver Mini | 43     | 25.4%     | 1.15     | 6.15          | 33.8%  | 46.5%     |
-| 5    | MACD Trend (12, 26, 9)               | Copper      | 50     | **33.0%** | 0.99     | 3.11          | 33.6%  | 52.0%     |
+**Silver Mini takes all six top slots**, across three different strategy families. That is a much
+stronger cross-strategy signal than the old table's "MACD appears 4 of 5 times", which was partly an
+artefact of which contracts happened to be large.
 
-**#1 — MACD Trend (5,13,5) / Gold Mini**: the best combined growth+quality result, and by far the
-largest sample (91 trades) of the top 5 — the least likely to be a fluke. Previously misreported as
-78.2% CAGR / Sharpe 1.56 (see the correction note above); still the strongest all-around pick, just a
-third of the size it looked like.
+**Regime-Switch is rehabilitated, and `docs/goldmini-regime-switch-results.md` is wrong at the
+universe level.** That document concluded regime-switch was "not recommended as built" — but it only
+ever tested **Gold Mini**, where the conclusion still holds. Across the universe, 4 of the top 6
+results are regime-switch variants on Silver Mini, and **Regime-Switch (5,13,5 + VWAP/EMA) on
+Aluminium Mini is the best risk-adjusted result in the entire sweep**: Sharpe 1.53 and a 6.8% max
+drawdown, less than half the drawdown of anything else near it, on 32 trades. Single-instrument
+negative results should not have been generalised.
 
-**#2 — Regime-Switch (ADX-gated MACD/RSI) / Copper**: the standout on quality (84% win rate, 9.64
-profit factor) but only 19 trades — barely past the 15-trade guardrail. Worth watching, not yet
-worth trusting the way #1 is.
+**Costs are immaterial for a daily book, exactly as predicted.** The drag is 0.06–0.34 percentage
+points of CAGR across the board — these strategies trade 15–90 times in *five years*. This was worth
+building for correctness and because it becomes load-bearing for any higher-turnover idea, but
+anyone hoping costs explained a disappointing result should stop looking here.
 
-**#3 / #4 — MACD Trend / Silver Mini (two parameter variants)**: both metal instruments, both MACD —
-the strategy-family-level signal (see below) shows up again here.
+**MACD (5,13,5) / Gold Mini remains the most trustworthy single pick** even though it is only 8th by
+CAGR: the best Sharpe of any high-sample result (1.45), the shallowest drawdown of the top 10
+(18.6%), and by far the largest sample (92 trades). Rank by confidence rather than by CAGR and it is
+at or near the top.
 
-**#5 — MACD Trend (12,26,9) / Copper**: the highest raw CAGR of the top 5, on a solid 50-trade sample,
-but the lowest Sharpe of the group (0.99) — real growth, choppier ride.
+**Lead Mini and Crude Oil Mini are broadly unprofitable** across every strategy family — most of
+their runs are negative. Neither currently has an enabled config, and neither should get one.
 
-**The strategy-family headline, still true after the correction**: MACD Trend appears **4 of the top
-5** times, across 3 different commodities (Gold, Silver, Copper). That cross-commodity consistency for
-one strategy family remains a stronger signal than any single number.
+## Currently-configured strategies, on the new basis
 
-## Currently-configured strategies (for reference)
+| Config (mode) | Strategy | Trades | Net CAGR | Sharpe | Max DD | PF |
+| --- | --- | --- | --- | --- | --- | --- |
+| SILVERM (paper) | MACD (12,26,9) | 43 | 33.1% | 1.22 | 37.0% | 6.03 |
+| SILVERM (paper) | MACD (5,13,5) | 88 | 31.4% | 1.24 | 38.1% | 2.63 |
+| SILVERM (paper) | Regime-Switch (12,26,9+VWAP/EMA) | 16 | 28.5% | 1.09 | 45.2% | 8.02 |
+| SILVERM (paper) | Regime-Switch (5,13,5+VWAP/EMA) | 46 | 27.3% | 1.06 | 42.4% | 2.34 |
+| GOLDM (paper) | MACD (5,13,5) | 92 | 22.5% | 1.45 | 18.6% | 3.05 |
+| GOLDM (paper) | Donchian (10) | 23 | 19.4% | 1.11 | 22.0% | 3.79 |
+| COPPER (paper) | MACD (12,26,9) | 50 | 13.2% | 0.98 | 12.6% | 2.99 |
+| COPPER (paper) | SMA (5,20) | 37 | 12.2% | 0.85 | 17.3% | 2.39 |
+| COPPER (paper) | MACD (5,13,5) | 93 | 11.5% | 0.83 | 16.1% | 1.88 |
+| COPPER (paper) | Regime-Switch (12,26,9+RSI) | 19 | 10.4% | 1.06 | 12.7% | 9.33 |
+| GOLDM (paper) | VWAP+CPR Session-Bounce | — | **never backtested** | — | — | — |
 
-| Config (mode)                  | Strategy                        | Trades | CAGR  | Sharpe | Profit factor | Max DD | Win rate |
-| ------------------------------ | -------------------------------- | ------ | ----- | ------ | -------------- | ------ | -------- |
-| GOLDM `rsi_mean_reversion` (live) | RSI (period=7, 30/70)         | 39     | 14.6% | 1.10   | 3.46           | 22.1%  | 76.9%    |
-| ALUMINI `macd_trend` (live)       | MACD (12, 26, 9)               | 33     | 6.8%  | 1.06   | 3.97           | 5.6%   | 63.6%    |
-| GOLDM `macd_trend` (paper)        | MACD (5, 13, 5)                | 91     | 21.9% | 1.38   | 3.20           | 24.4%  | 53.8%    |
-| COPPER `macd_trend` (paper)       | MACD (12, 26, 9)               | 50     | 33.0% | 0.99   | 3.11           | 33.6%  | 52.0%    |
-| COPPER `macd_trend` (paper)       | MACD (5, 13, 5)                | 93     | 30.5% | 0.92   | 1.97           | 27.7%  | 46.2%    |
-| SILVERM `macd_trend` (paper)      | MACD (12, 26, 9)               | 43     | 25.4% | 1.15   | 6.15           | 33.8%  | 46.5%    |
-
-**GOLDM `rsi_mean_reversion` (the live config)** was previously reported at 60.8% CAGR — the real
-number is 14.6%. Still a genuinely solid strategy (highest win rate of anything in this table, 3.46
-profit factor, the smallest of the live/paper set's drawdowns relative to its return), just no longer
-the standout that originally justified enabling it over every other option. Worth a fresh look before
-treating it as "the proven one," not an urgent reason to disable it — nothing here suggests it's
-losing money, only that the original growth number was inflated.
-
-**ALUMINI `macd_trend` (the other live config)** barely moved (was ~7.6%, now 6.8%) — it was never
-exposed to the worst of the bugs (small notional, not Gold-scale), so this one's history was
-consistently reported both before and after.
+The four Copper configs are the weakest of the enabled set on equal risk, though all four are
+comfortably profitable and none has an alarming drawdown — they are simply not the standouts the
+old table implied. `vwap_session_bounce` still has no backtest at all; see
+`docs/technical-debt.md` for why that is now fixable and how.
 
 ## What *not* to conclude from this
 
-- **112 of these 144 runs replace numbers that were flat-out wrong** (see the correction note at the
-  top) — don't compare anything here against a memory of the old table, compare only within this one.
-- **Aluminium Mini's small CAGR is a notional-size effect, not a weak edge** — its contract is much
-  smaller notional value than Gold/Silver/Copper's, and the backtest engine trades exactly 1 lot per
-  signal regardless of capital, so a clean, high-Sharpe edge there doesn't compound into much absolute
-  growth. See the dashboard for its own strong risk-adjusted numbers.
-- **"1 lot regardless of instrument" is not a margin-aware, capital-normalized position-sizing rule.**
-  A fair CAGR comparison across commodities with very different lot notional values would need each
-  instrument sized to use a consistent amount of capital/margin — not built yet.
-- **The top 5 concentrate in 3 commodities (Gold, Silver, Copper) and one strategy family (MACD).**
-  Picking several of these together does not diversify risk.
-- **144 combinations were tested; the "top 5" is inherently subject to the multiple-comparisons
-  trap.** No train/test split or walk-forward validation has been run yet — see
-  `docs/pending-actions.md`.
-- **`regime_switch`'s standout Copper result runs on only 19 trades.** Interesting, not yet
-  trustworthy — see `docs/goldmini-regime-switch-results.md` for the earlier (Gold Mini-specific,
-  also negative) verdict on this strategy family before reading too much into one thin Copper result.
+- **These are 1x-leverage numbers.** A 33.1% CAGR on Silver Mini means 33.1% on ~₹12 lakh of
+  capital, not on ₹2,50,000. `python -m research.capital.admission` prints what each instrument
+  actually needs; at a 2% risk-per-trade budget Silver Mini wants ~₹33 lakh and Copper ~₹40 lakh.
+- **144 combinations were tested and the top of the table was picked from them.** No walk-forward or
+  out-of-sample validation has been run yet, so selection bias is unquantified. A deflated Sharpe
+  calculation is the next item that addresses this.
+- **One five-year window, one regime** — a period containing an exceptional precious-metals bull
+  run, which is precisely where Silver Mini's dominance comes from. That is a reason to be careful
+  about extrapolating slots 1–6.
+- **Aluminium Mini's Sharpe 1.53 / 6.8% drawdown is one result out of 144.** It is the most
+  interesting thing here and the least proven.
+- **Still not modelled:** stop-losses of any kind, position sizing beyond 1 lot, short positions, and
+  the daily-loss/expiry force-close guards the live engines apply but the backtest does not.
 
 ## Methodology
 
