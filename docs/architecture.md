@@ -87,6 +87,16 @@ flowchart LR
   rupee; `crosstrend/` and `intraday/` hold completed studies. Fold geometry and grid
   fingerprinting live in `growmore_bot/backtest/walk_forward.py` so they are unit-tested with the
   rest of the engine.
+- **F&O equity study** (`bot/research/fno/`): the one research area that is NOT MCX. A committed
+  `universe.csv` of the 210 NSE stock-futures underlyings — derived from Dhan's own scrip master,
+  sector-labelled from NSE's Nifty 500 list, with a non-exclusive Defence overlay — plus a
+  full-OHLCV parquet store reaching back to 2010, and the same `BacktestEngine` reached through
+  `dailydata/runner.run_variant`. Two things differ from every MCX path and both are load-bearing:
+  costs come from `NSE_EQUITY_DELIVERY_COST_MODEL` (STT on **both** legs, ~10x the MCX charge),
+  and a "lot" is a share count from `risk.sizing.shares_for_capital` so 210 stocks priced from ₹15
+  to ₹1,50,000 all run at 1x leverage. `crosssection.py` is where 210 per-stock results become one
+  claim about a config: the unit of evidence is the config, never the stock, because the luckiest
+  of 630 runs posts Sharpe ~2.5 on noise alone.
 - **Database**: Neon Postgres, shared schema, bot owns migrations (Alembic).
 
 ## Deployment

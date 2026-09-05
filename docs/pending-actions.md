@@ -2,6 +2,50 @@
 
 Plain-language list of things only you can do or decide. Updated as the project progresses.
 
+## URGENT — added 2026-09-05 evening
+
+- [ ] **The live bot is down, and has been since at least this evening: the Dhan token is dead.**
+  `growmore-bot.service` on the VPS is logging `DH-906 Invalid Token` on every 5-minute tick. The
+  token in the VPS's `.env.local` was written 2026-09-05 08:14 and its embedded expiry is
+  2026-09-06 08:14, so it *looks* valid — but Dhan rejects it, **including from the VPS itself**,
+  so this is not an IP or static-IP problem. The most likely cause is Dhan's one-active-token-per-
+  account rule: a token generated somewhere else after 08:14 silently invalidated this one.
+
+  **What is needed from you:** generate a fresh token and put it on the VPS. The sanctioned way is
+  to run, on the droplet:
+
+  ```
+  ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81
+  cd /home/growmore/growmore/bot && .venv/bin/python -m growmore_bot.broker.token_refresh
+  ```
+
+  and then restart the service. `token_refresh` needs `DHAN_PIN` and `DHAN_TOTP_SECRET`, both
+  already present in the VPS's `.env.local`. Note the CLI only refreshes within 2 hours of the
+  embedded expiry, and this token's embedded expiry is not near — so it needs
+  `refresh_if_needed(..., force=True)`, which the CLI does not expose as a flag.
+
+  I did not do this myself: generating a token is a credential action, it invalidates whatever
+  other session currently holds one, and it was blocked for me by the permission layer. Nothing I
+  did caused the outage — I only ever *read* the VPS's existing token, never generated one.
+
+  Related: the bot cannot recover from this on its own, because
+  `refresh_access_token_if_needed` only checks the JWT `exp` claim and a server-side invalidation
+  does not change it. See `docs/technical-debt.md`.
+
+- [ ] **Then the F&O price fetch can run** (~5 minutes, read-only, 210 symbols). Once the VPS has a
+  working token, copy it into the repo-root `.env.local` on your Mac and run:
+
+  ```
+  cd bot && .venv/bin/python -m research.fno.fetch_bars     # ~5 min, resumable
+  .venv/bin/python -m research.fno.run_configs
+  .venv/bin/python -m research.fno.walk_forward_run
+  ```
+
+  Everything else for the F&O study is built, tested and committed — the universe (210 stocks,
+  sector-labelled), the store, the equity cost model, the three configs and the statistics. The
+  bars are the only missing input. Copying the token rather than generating a second one is what
+  keeps the VPS's session alive (`docs/technical-debt.md`, the 2026-09-04 incident).
+
 ## Decisions waiting on you — added 2026-09-05 after out-of-sample validation
 
 - [ ] **You are running seven configs per bullion contract, and that is not diversification.**

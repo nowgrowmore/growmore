@@ -1,5 +1,77 @@
 # Technical Debt / Known Limitations
 
+- **(OPEN, found 2026-09-05) The Dhan token can be dead while the bot believes it is valid, and
+  the bot cannot self-heal.** `DhanClient.refresh_access_token_if_needed` decides whether a token
+  needs refreshing by decoding the JWT `exp` claim and nothing else. But Dhan allows only one
+  active token per account, so a token generated elsewhere invalidates this one **server-side**,
+  and the `exp` claim on the dead token is unchanged. To the bot the token looks good for hours;
+  to Dhan it is `DH-906 Invalid Token`.
+
+  Observed live: the VPS's `.env.local` token, written 2026-09-05 08:14 with `exp` 2026-09-06
+  08:14, was rejected **from the VPS itself** — so this is not an IP or a static-IP-registration
+  issue. `growmore-bot.service` logged `DH-906` on every 5-minute tick and never attempted a
+  refresh, because by its own test nothing was wrong.
+
+  Fix is small and worth doing before any live phase: treat a `DH-906` response as an expiry
+  signal, not just a transport error — one forced `refresh_if_needed(..., force=True)` on the
+  first `DH-906`, rate-limited so a genuinely broken credential cannot spin. Until then a dead
+  token is a silent, indefinite outage. Tracked for the owner in `docs/pending-actions.md`.
+
+- **(OPEN, found 2026-09-05) The NSE equity price cache stores dates one day early.**
+  `research/smallcap_momentum/price_data._save_bars` builds its `date` column with
+  `b.timestamp.date()`. Dhan stamps daily bars `18:30:00+00:00`, which is **midnight IST of the
+  next day**, so every date it writes is shifted back by one. The signature is visible in both
+  existing caches: over five years of daily bars the day-of-week counts are 249 "Sundays" and one
+  "Friday".
+
+  Harmless for a single-symbol backtest, where only bar ORDER matters — which is why it survived
+  the small-cap study. It is wrong the moment a date is cross-referenced against another series
+  (an index, USDINR), used to snap a rebalance date, or printed in a published table. The
+  small-cap portfolio backtest does snap rebalance dates, so its 10 rebalance points are each
+  potentially one session off.
+
+  The new F&O store does not have it: `research/fno/bar_cache.trading_date` converts to
+  `Asia/Kolkata` at the point of use and the parquet keeps the lossless tz-aware timestamp. The
+  small-cap cache is **not** retro-fixed here — that would silently change published numbers
+  without re-running them. Fix it when that study is next re-run, not before.
+
+- **(CLOSED 2026-09-05) NSE cash-equity costs are ~10x MCX costs, and reusing the MCX model would
+  have flattered every equity result.** MCX pays CTT 0.01% on the sell leg only; NSE cash delivery
+  pays **STT 0.1% on both legs** — roughly 20bps a round trip against ~1bp. `CostModel` had
+  `ctt_sell_pct` (sell-only) and `stamp_buy_pct` (buy-only) but no both-legs field, so
+  `stt_both_pct` was added, defaulting to `0.0` so every published MCX number is unchanged to the
+  decimal (asserted directly in `tests/unit/test_costs.py`).
+
+  Scale of the effect, measured on the eight cached MCX series as a pipeline check: at ~86 round
+  trips over five years, STT alone is ~₹86,000–159,000 against ₹5,00,000 of capital — **17–32% of
+  capital**, or roughly 3.5%/yr of drag. It is the single largest determinant of whether a
+  high-turnover trend config can beat buy-and-hold in cash equity, and it is also why the
+  lower-turnover `vol90` variant is advantaged relative to the others on cost alone.
+
+  Deliberately NOT modelled: the depository's ~₹15 per-scrip sell debit. It is a flat per-scrip
+  charge `round_trip_cost` has nowhere to put, and at ₹5 lakh a position it is 0.3bps — two orders
+  of magnitude below STT. Recorded rather than silently dropped.
+
+- **(OPEN, by design) The F&O universe is today's membership applied backwards.** All 210 names in
+  `bot/research/fno/universe.csv` are in the F&O segment *now*; being there is itself a selection
+  on having grown large and liquid, and the backtest window reaches back to 2010. No point-in-time
+  F&O membership file was found. This is worse than the small-cap study's survivorship problem,
+  not better, and it is not solved. The mitigation is the one that study used: the buy-and-hold
+  control runs on the **identical** universe, so the bias hits both arms equally and the
+  *difference* between them stays meaningful even though neither *level* does. Any absolute CAGR
+  from this universe should be read as inflated.
+
+- **(OPEN, guarded) On a short series the volatility filter silently becomes a no-op.**
+  `VolFilteredStrategy` admits or refuses an entry by comparing realised volatility to the 90th
+  percentile of its own trailing 504-bar history. Given far fewer bars than that lookback it has
+  almost nothing to threshold against, vetoes nothing, and returns results **identical to the
+  unfiltered strategy** — while still being labelled `vol90-...`. Nothing raises and nothing looks
+  wrong; a thin stock would just contribute the wrong strategy's numbers to the `vol90` column,
+  and across 210 stocks nobody would notice. Guarded by the 1,260-bar inclusion gate in
+  `research/fno/run_configs.py` and pinned by a named test, not fixed in the wrapper — the wrapper
+  behaving this way is arguably correct, and the defence belongs at the point of use.
+
+
 - **(Partially CLOSED 2026-09-05) Dhan's stitched 5-year series does NOT appear to contain fake
   roll gains -- checked against real spot gold.** The open worry (below, and in
   `docs/architecture.md`) was that `instruments.security_id` for GOLDM is an Oct-2026 contract that
