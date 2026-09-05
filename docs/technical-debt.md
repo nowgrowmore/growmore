@@ -1,5 +1,39 @@
 # Technical Debt / Known Limitations
 
+- **(Partially CLOSED 2026-09-05) Dhan's stitched 5-year series does NOT appear to contain fake
+  roll gains -- checked against real spot gold.** The open worry (below, and in
+  `docs/architecture.md`) was that `instruments.security_id` for GOLDM is an Oct-2026 contract that
+  did not exist in 2021, so Dhan is returning something spliced by an unverified method. If it
+  splices raw prices in contango, every monthly roll injects a small fake upward jump -- which
+  would matter enormously now, because a buy-and-hold benchmark is long 100% of the time and would
+  collect *every* fake gap while a strategy that is long ~55% of the time collects only some. That
+  would bias the central "buy-and-hold beats the system" finding in buy-and-hold's favour.
+
+  Test: convert the MCX series to USD per troy ounce using the daily reference rate and compare
+  against actual spot gold at both ends of the window.
+
+  | | Sept 2021 | Sept 2026 | change |
+  |---|---|---|---|
+  | MCX-implied, duty-inclusive | $2,022/oz | $4,957/oz | **+145.1%** |
+  | Actual spot gold | ~$1,800/oz | ~$4,490/oz | **~+150%** |
+  | implied premium over spot | ~12.6% | ~10.4% | narrowed |
+
+  The stitched series shows **slightly less** than spot gold, not more. Raw contango splicing would
+  show more. The residual gap is explained by the import duty narrowing (15% -> 6% in the July 2024
+  budget, partly restored since), which mechanically costs the MCX holder relative to the metal.
+  So the benchmark is sound and, if anything, marginally conservative.
+
+  What this does NOT close: there is still no `instrument_contracts` table, `contract_rollover.py`
+  still overwrites `security_id` in place so roll history is still being destroyed, and no basis
+  history exists or can be recovered. This test bounds the error on *returns*; it does not make the
+  series auditable.
+
+- **(Measured 2026-09-05) Rolling a buy-and-hold position costs ~2.4 bps a round trip -- immaterial.**
+  Gold Mini Rs 370 and Silver Mini Rs 290 per roll at current notionals (statutory + tick
+  slippage). Even at monthly rolls that is ~1.5% over five years, against a benchmark return of
+  +161%. The backtest engine models no rolls at all, so its buy-and-hold figure omits this; the
+  omission is smaller than the rounding on the numbers it is compared against.
+
 - **(Found + fixed 2026-09-05) The trailing stop tested a level it built from the SAME bar --
   lookahead, and it was flattering Gold Mini while badly hurting Silver Mini.**
   `risk/wrapper.py:_advance` ratcheted the chandelier stop using bar B's own high, and

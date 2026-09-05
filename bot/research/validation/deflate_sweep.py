@@ -62,6 +62,12 @@ def load_runs(hours: int) -> pd.DataFrame:
         JOIN instruments i ON i.id = br.instrument_id
         WHERE br.started_at > NOW() - (:hours * INTERVAL '1 hour')
           AND br.sharpe_ratio IS NOT NULL
+          -- The benchmark is not one of the things we tried. buy_and_hold
+          -- lives in the sweep grid so every ranking is read against it, but
+          -- counting it as a searched variant would inflate the trial count
+          -- and raise the selection-luck bar for everything else -- charging
+          -- the strategies for the privilege of being compared to holding.
+          AND s.name <> 'buy_and_hold'
         -- Only the LATEST run per (strategy, version, instrument). Re-running
         -- the sweep leaves older copies behind, and counting them would be
         -- doubly wrong: it inflates the trial count, and duplicates are

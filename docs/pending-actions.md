@@ -4,6 +4,29 @@ Plain-language list of things only you can do or decide. Updated as the project 
 
 ## Decisions waiting on you — added 2026-09-05 after out-of-sample validation
 
+- [ ] **You are running seven configs per bullion contract, and that is not diversification.**
+  After this round there are 7 paper configs on Gold Mini and 7 on Silver Mini, each capped at 1
+  lot. They mostly share the same MACD family, so when they agree you hold **7 lots of the same
+  contract** — about ₹1.06 crore of Gold Mini notional. In paper that is harmless and useful for
+  comparison. Going live with more than **one config per instrument** would be taking seven
+  correlated bets and calling it a portfolio. The walk-forward result also says pick one and leave
+  it alone rather than switching between them. Deciding which one is yours.
+- [ ] **Promote the dashboard to production when you are ready.** `bot_config.virtual_capital` is
+  dropped from Neon, but the currently-deployed production dashboard still names that column in its
+  *write* path. Reads are fine (`select c.*`), the bot is unaffected, and paper trading is
+  unaffected — but the **Save button on the risk-params form will error until production is
+  promoted**. I do not promote to production without you asking, so this is waiting on you.
+- [ ] **Verify the SL-M stop path against one real MCX order — the code is done, the exchange
+  behaviour is not confirmed.** Exchange-resident stops are fully built (`dhan_order_client.py`
+  place/modify/cancel, wired into `live/engine.py:_sync_stop_order`, 15 tests): the stop is placed
+  at order time, the trigger is moved only when the trail actually moves, a failed placement is
+  retried every tick, and the resting order is cancelled before any other kind of exit so it cannot
+  fire after the bot has already closed. What is **unverified** — and the code says so in its own
+  docstring — is whether Dhan accepts `order_type=SLM` with `productType=MARGIN` for an MCX future
+  at all, and whether modify works on a resting SL-M. That can only be settled by placing one real
+  order. Until it is, a `risk_managed` config running live is protected by the software stop
+  (~5-minute poll) rather than the exchange one.
+
 - [ ] **Decide whether the Gold Mini paper config is worth running.** The first out-of-sample
   test says buying and holding one Gold Mini lot would have returned **161%** over the test
   window while the strategy returned **109%**, at almost the same Sharpe (1.99 vs 2.08). The

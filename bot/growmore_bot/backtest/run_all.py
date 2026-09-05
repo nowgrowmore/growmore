@@ -379,6 +379,15 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--symbols",
+        nargs="*",
+        default=None,
+        help="Only sweep these instrument symbols (default: all). Results commit "
+             "per instrument, so a run interrupted partway leaves whole "
+             "instruments done and none half-done -- this is how you finish the "
+             "rest without redoing them.",
+    )
     parser.add_argument("--from-date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--to-date", required=True, help="YYYY-MM-DD")
     parser.add_argument(
@@ -439,6 +448,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
         for instrument in instruments:
+            if args.symbols and instrument.symbol not in args.symbols:
+                continue
             bars = client.get_historical_ohlc(
                 instrument, from_date=args.from_date, to_date=args.to_date, interval="day"
             )

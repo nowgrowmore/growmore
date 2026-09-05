@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import sys
 import uuid
-from typing import Optional
 
 from growmore_bot.persistence.db import session_scope
 from growmore_bot.persistence.models import BotConfig, Instrument
@@ -66,19 +65,22 @@ def main(argv=None) -> int:
         instruments = {i.symbol: i for i in session.query(Instrument).all()}
         changes: list[str] = []
 
-        # --- notional per lot, for honest capital figures ---
-        from growmore_bot.broker.dhan_client import DhanClient
-        from growmore_bot.config import Settings
-        settings = Settings()
-        client = DhanClient(client_id=settings.dhan_client_id,
-                            access_token=settings.dhan_access_token)
-        client.refresh_access_token_if_needed()
+        # --- notional per lot, from the cached daily series -------------
+        # Deliberately NOT a live Dhan quote: the only thing this figure now
+        # feeds is `daily_loss_limit`, a retired display column, and calling
+        # the quote API here collides with a running sweep's rate limit. The
+        # last cached close is more than accurate enough for a number nothing
+        # acts on -- and it keeps this script runnable offline.
+        from research.dailydata import cache as daily_cache
         notional: dict[str, float] = {}
         for sym, inst in instruments.items():
-            q = client.get_quote(inst)
-            price = float(q.ltp or q.close or 0.0)
-            notional[sym] = round(price * inst.lot_size, -3)
-            print(f"  {sym:10} ltp {price:>12,.2f} x lot {inst.lot_size:>5} "
+            try:
+                last = daily_cache.load(sym)[-1]
+            except (FileNotFoundError, IndexError):
+                print(f"  {sym:10} no cached series -- skipping", file=sys.stderr)
+                continue
+            notional[sym] = round(float(last.close) * inst.lot_size, -3)
+            print(f"  {sym:10} close {float(last.close):>12,.2f} x lot {inst.lot_size:>5} "
                   f"= Rs {notional[sym]:>13,.0f} per lot", file=sys.stderr)
 
         # --- 1. new configs -------------------------------------------------
@@ -119,7 +121,8 @@ def main(argv=None) -> int:
                         session.add(cfg)
                     changes.append(
                         f"CREATE   {mode:5} {sym:9} {name}/{version}  "
-                        f"enabled={cfg.enabled}  cap=Rs {notional[sym]:,.0f}")
+                        f"enabled={cfg.enabled}  max 1 lot "
+                        f"(= Rs {notional[sym]:,.0f} notional)  loss-guard off")
 
         # --- 2 & 3. normalise every config ----------------------------------
         for cfg in session.query(BotConfig).all():
