@@ -283,28 +283,48 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
     # that only works with one, so if the risk layer doesn't lift Donchian
     # the risk layer itself is suspect. MACD 5/13/5 is included because it
     # is the incumbent best pick and the comparison has to be fair.
-    risk_variants: list[tuple[str, dict, float, Optional[float]]] = [
-        ("donchian_breakout", {"period": 20}, 2.0, 3.0),
-        ("donchian_breakout", {"period": 20}, 2.0, None),
-        ("donchian_breakout", {"period": 55}, 2.0, 3.0),
-        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, 2.0, 3.0),
-        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, 3.0, None),
-        ("macd_trend", {"fast_period": 12, "slow_period": 26, "signal_period": 9}, 2.0, 3.0),
+    # (inner strategy, its params, initial stop in ATRs, trail in ATRs or None,
+    #  version tag). The tag is explicit rather than derived, so a strategy
+    #  with nested params gets a readable name too.
+    risk_variants: list[tuple[str, dict, float, Optional[float], str]] = [
+        # --- trend / breakout: a stop fits naturally, since these have no
+        # exit at all until the opposite signal, which can be a long way off.
+        ("donchian_breakout", {"period": 20}, 2.0, 3.0, "donchian20"),
+        ("donchian_breakout", {"period": 20}, 2.0, None, "donchian20-notrail"),
+        ("donchian_breakout", {"period": 55}, 2.0, 3.0, "donchian55"),
+        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5},
+         2.0, 3.0, "macd5-13-5"),
+        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5},
+         3.0, None, "macd5-13-5-stop3-notrail"),
+        ("macd_trend", {"fast_period": 12, "slow_period": 26, "signal_period": 9},
+         2.0, 3.0, "macd12-26-9"),
+        ("sma_crossover", {"fast_period": 5, "slow_period": 20}, 2.0, 3.0, "sma5-20"),
+        ("sma_crossover", {"fast_period": 10, "slow_period": 30}, 2.0, 3.0, "sma10-30"),
+
+        # --- mean reversion: a TRAILING stop is conceptually wrong here. These
+        # trades have a target (reversion to the mean), not an open-ended trend
+        # to ride, and they already own a natural exit -- recovery back across
+        # the threshold. Worse, a stop fires exactly when the strategy's thesis
+        # ("price has overshot and will come back") is most true, so it should
+        # cut the win rate. The initial-stop-only variant is the honest test of
+        # "does capping the tail pay for that"; the trailing one is included so
+        # the claim above is measured rather than assumed.
+        ("rsi_mean_reversion", {"period": 7, "oversold": 30, "overbought": 70},
+         2.0, None, "rsi7-notrail"),
+        ("rsi_mean_reversion", {"period": 7, "oversold": 30, "overbought": 70},
+         2.0, 3.0, "rsi7-trail"),
+        ("rsi_mean_reversion", {"period": 14, "oversold": 30, "overbought": 70},
+         2.0, None, "rsi14-notrail"),
+        ("bollinger_reversion", {"period": 20, "num_std": 2.5},
+         2.0, None, "boll20-2.5-notrail"),
+        ("bollinger_reversion", {"period": 20, "num_std": 2.5},
+         2.0, 3.0, "boll20-2.5-trail"),
+
+        # --- the ensemble deserves the stops too; it is the combination, not
+        # either piece alone, that the evidence points at.
+        ("ensemble_trend", {"min_agreement": 3}, 2.0, 3.0, "ensemble-agree3"),
     ]
-    # The ensemble deserves the stops too -- it is the combination, not
-    # either piece alone, that the evidence so far points at.
-    ensemble_risk = {
-        "inner_strategy": "ensemble_trend",
-        "inner_params": {"min_agreement": 3},
-        "atr_period": 14,
-        "initial_stop_atr": 2.0,
-        "trail_atr": 3.0,
-    }
-    grid.append((
-        "risk_managed", "ensemble_trend-agree3-stop2-trail3",
-        ensemble_risk, partial(build_risk_managed, ensemble_risk),
-    ))
-    for inner_name, inner_params, stop_atr, trail in risk_variants:
+    for inner_name, inner_params, stop_atr, trail, tag in risk_variants:
         params = {
             "inner_strategy": inner_name,
             "inner_params": inner_params,
@@ -312,10 +332,7 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
             "initial_stop_atr": stop_atr,
             "trail_atr": trail,
         }
-        tag = "-".join(str(v) for v in inner_params.values())
-        trail_tag = f"trail{trail:g}" if trail is not None else "notrail"
-        version = f"{inner_name}-{tag}-stop{stop_atr:g}-{trail_tag}"
-        grid.append(("risk_managed", version, params, partial(build_risk_managed, params)))
+        grid.append(("risk_managed", tag, params, partial(build_risk_managed, params)))
 
     return grid
 

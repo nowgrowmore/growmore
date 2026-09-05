@@ -13,12 +13,17 @@ the standard "how many independent directions are in here" measure. That is
 cross-checked against a simple correlation-threshold cluster count, and the
 SMALLER (more conservative, i.e. higher bar) of the two is used.
 
-Read-only. pandas/numpy are fine here -- this is the research layer, not
-growmore_bot.
+Read-only by default. pandas/numpy are fine here -- this is the research
+layer, not growmore_bot. Pass --persist to write each considered run's DSR
+back onto `backtest_runs.dsr` (added specifically so the dashboard has a
+real data source for a DSR column/explanation instead of a number only
+ever hand-pasted into docs/backtest-results.md) -- this is the ONE write
+this module ever does, and it only ever touches the `dsr` column.
 
 Usage (from bot/):
     python -m research.validation.deflate_sweep
     python -m research.validation.deflate_sweep --hours 24
+    python -m research.validation.deflate_sweep --hours 999999 --persist
 """
 from __future__ import annotations
 
@@ -91,6 +96,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=int, default=6,
                         help="Consider runs started within this many hours (default 6).")
+    parser.add_argument("--persist", action="store_true",
+                        help="Write each considered run's DSR back onto backtest_runs.dsr.")
     args = parser.parse_args(argv)
 
     runs = load_runs(args.hours)
@@ -120,14 +127,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     print()
 
     best = runs.assign(per_obs=per_obs).sort_values("sharpe_ratio", ascending=False)
-    print(f"{'strategy':<20}{'version':<34}{'inst':<11}{'Sharpe':>8}{'DSR':>8}  verdict")
-    print("-" * 100)
-    for _, row in best.head(15).iterrows():
+
+    # Computed for EVERY considered run (not just the printed top 15) --
+    # --persist needs the full set, and computing it once here means the
+    # print loop below and the persist step can't disagree with each other.
+    dsr_by_run_id: dict[str, float] = {}
+    for _, row in best.iterrows():
         column = returns.get(row["id"])
         skew = float(column.skew()) if column is not None and column.notna().sum() > 3 else 0.0
         kurt = float(column.kurtosis()) + 3.0 if column is not None and column.notna().sum() > 3 else 3.0
         try:
-            dsr = deflated_sharpe_ratio(
+            dsr_by_run_id[row["id"]] = deflated_sharpe_ratio(
                 observed_sharpe=row["per_obs"],
                 sharpe_variance=sharpe_variance,
                 n_trials=n_eff,
@@ -136,15 +146,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 kurtosis=kurt,
             )
         except ValueError:
-            dsr = float("nan")
+            dsr_by_run_id[row["id"]] = float("nan")
+
+    print(f"{'strategy':<20}{'version':<34}{'inst':<11}{'Sharpe':>8}{'DSR':>8}  verdict")
+    print("-" * 100)
+    for _, row in best.head(15).iterrows():
+        dsr = dsr_by_run_id[row["id"]]
         verdict = "significant" if dsr >= 0.95 else ("borderline" if dsr >= 0.80 else "NOT distinguishable from luck")
         print(f"{row['strategy']:<20}{row['version']:<34}{row['symbol']:<11}"
               f"{float(row['sharpe_ratio']):>8.2f}{dsr:>8.2f}  {verdict}")
+
+    if args.persist:
+        persisted = persist_dsr(dsr_by_run_id)
+        print(f"\npersisted DSR for {persisted} run(s) onto backtest_runs.dsr")
+
     return 0
+
+
+def persist_dsr(dsr_by_run_id: dict[str, float]) -> int:
+    """Write each run's DSR back onto its own `backtest_runs.dsr` -- the one
+    write this read-only-by-default module ever does, and only this column.
+    NaN values (a run whose DSR couldn't be computed, e.g. too few
+    observations) are skipped, not written as NULL-via-NaN.
+    """
+    clean = {rid: dsr for rid, dsr in dsr_by_run_id.items() if not math.isnan(dsr)}
+    if not clean:
+        return 0
+    with _engine().begin() as conn:
+        for run_id, dsr in clean.items():
+            conn.execute(
+                text("UPDATE backtest_runs SET dsr = :dsr WHERE id = :id"),
+                {"dsr": dsr, "id": run_id},
+            )
+    return len(clean)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["load_runs", "load_return_matrix", "effective_trials", "main"]
+__all__ = ["load_runs", "load_return_matrix", "effective_trials", "persist_dsr", "main"]

@@ -90,6 +90,8 @@ def test_delete_existing_runs_removes_only_prior_runs_for_the_same_pairing(migra
         BacktestRun,
         BacktestTrade,
         Instrument,
+    )
+    from growmore_bot.persistence.models import (
         Strategy as StrategyRow,
     )
 

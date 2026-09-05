@@ -107,6 +107,15 @@ class BacktestRun(Base):
     #: auditable rather than something you have to take on trust.
     gross_cagr_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     cost_model: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: Deflated Sharpe Ratio -- the probability this run's Sharpe reflects
+    #: real edge rather than being the luckiest of everything tried in the
+    #: sweep it was part of (see bot/growmore_bot/backtest/deflated_sharpe.py
+    #: and research/validation/deflate_sweep.py --persist). Null until that
+    #: batch computation has been run against the current sweep; it is a
+    #: sweep-relative statistic (depends on every other run's correlation
+    #: structure), not something a single run computes for itself, so it
+    #: goes stale if the sweep changes without a fresh --persist run.
+    dsr: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
     strategy: Mapped["Strategy"] = relationship(back_populates="backtest_runs")
     instrument: Mapped["Instrument"] = relationship(back_populates="backtest_runs")
