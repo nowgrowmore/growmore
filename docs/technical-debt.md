@@ -1,5 +1,43 @@
 # Technical Debt / Known Limitations
 
+- **(2026-09-05) `vwap_session_bounce` finally has a backtest, and I was wrong about it.** It has
+  been enabled in paper trading with no evidence at all, justified by "today's live session VWAP
+  doesn't exist in historical bars". Dhan's intraday endpoint makes that false — 5-minute MCX
+  candles, 5 years, 90 days a request, reachable through the `interval` argument
+  `DhanClient.get_historical_ohlc` has always had and nothing had ever used. I expected a clear
+  negative result. It isn't:
+
+  | Instrument | Sessions | Trades | Signals/day | Net P&L | Gross | Costs | Win% |
+  | --- | --- | --- | --- | --- | --- | --- | --- |
+  | Gold Mini | 108 | 46 | 4.3 | **+₹46,902** | ₹64,260 | ₹17,358 | 54.3% |
+  | Silver Mini | 225 | 129 | 3.5 | **+₹132,152** | ₹171,620 | ₹39,468 | 49.6% |
+  | Copper | 90 | 49 | 3.1 | **−₹216,225** | −₹158,125 | ₹58,100 | 44.9% |
+
+  Profitable net of real costs on both bullion contracts, clearly losing on Copper. Against 1 lot of
+  notional that is roughly 7–11% annualised at 1x — modest, but real, and it survives a cost load
+  that eats 23–27% of gross. **Recommendation: keep the Gold Mini config enabled, do not add a
+  Copper one.**
+
+  Four caveats that matter more than the numbers:
+  - **The samples are months, not years** (see the next item) — 46 trades on Gold Mini.
+  - **This is not quite the strategy that is running.** The replay detects crossings on 5-minute bar
+    closes; the live bot detects them from a 5-minute LTP *snapshot*, which catches a different set
+    of crossings. A positive backtest validates a near-neighbour, not the incumbent.
+  - **Session VWAP is reconstructed** from 5-minute bars, not the exchange's own trade-by-trade
+    figure. The strategy triggers on a crossing, so a small error near the crossing point flips
+    signals. This has not been calibrated against Dhan's live `average_price` yet.
+  - **Half the strategy is dead code.** It is long-only in a long-only engine, so its entire
+    bearish-CPR SELL branch can never open a position.
+- **(2026-09-05) Intraday history is per-contract and only a few months deep, unlike the daily
+  series.** Fetching 5-minute bars for the current front-month `security_id` returns Gold Mini from
+  2026-04-07, Copper from 2026-05-01, Silver Mini from 2025-10-20 — because each `security_id` is
+  one contract month and intraday data exists only for as long as that contract has been listed.
+  The *daily* endpoint returns five years for the same ids, which all but confirms Dhan serves a
+  stitched continuous series for daily and raw per-contract data for intraday. Two consequences: any
+  intraday backtest is capped at a few months per instrument until contracts are stitched
+  explicitly, and the long-standing question of how the 5-year daily series is spliced together
+  (`docs/technical-debt.md`'s contract-continuity item) is now more pressing, since we know the two
+  endpoints behave differently.
 - **(2026-09-05) The multi-lookback trend ensemble, WITH stops, is the only result in the sweep
   that is statistically significant.** `EnsembleTrendStrategy` runs five MACD speeds (5/13/5 through
   26/52/18) and acts on their majority vote, so there is no lookback to select and therefore no
