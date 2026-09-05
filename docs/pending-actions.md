@@ -2,6 +2,31 @@
 
 Plain-language list of things only you can do or decide. Updated as the project progresses.
 
+## Decisions waiting on you — added 2026-09-05 after out-of-sample validation
+
+- [ ] **Decide whether the Gold Mini paper config is worth running.** The first out-of-sample
+  test says buying and holding one Gold Mini lot would have returned **161%** over the test
+  window while the strategy returned **109%**, at almost the same Sharpe (1.99 vs 2.08). The
+  strategy's real contribution is a much smaller worst loss — 8.1% drawdown against 18.6%. That
+  is a genuine benefit, but it is risk reduction, not extra return, and it should be your choice
+  whether it is worth the effort and the execution risk. Detail in
+  `docs/walk-forward-results.md`.
+- [ ] **Consider switching the Silver Mini work to the risk-managed ensemble with a volatility
+  filter.** It is the only idea tested that improved both bullion contracts out-of-sample, and on
+  Silver Mini it is the strongest result anywhere in the project (OOS Sharpe 2.49 vs
+  buy-and-hold 1.53). No config exists for it yet and I have not created one — enabling a new
+  paper config is your call. Detail in `docs/phase4-oos-results.md`.
+- [ ] **Do not enable anything on Lead Mini.** Out-of-sample it returns −29.3% at Sharpe −3.29
+  on the fixed variant and −21.1% on the incumbent, against a buy-and-hold that did roughly
+  nothing. Only two folds of history, so this is weak evidence, but it all points one way.
+- [ ] **Know that roughly a third of Gold Mini's historical return is rupee depreciation, not
+  gold.** USD/INR went 72.98 → 95.38 over the backtest window (+5.51%/yr). If you size Gold Mini
+  on its headline CAGR you are implicitly betting the rupee keeps weakening at that rate. Detail
+  in `docs/currency-decomposition-results.md`.
+- [ ] **`docs/backtest-results.md` is superseded** and now carries a warning banner. Do not
+  quote its numbers; the `risk_managed` rows were produced with a stop bug and the DSR column
+  ranks Gold Mini and Silver Mini backwards.
+
 ## Blocking for real-price paper trading
 
 - [x] Dhan Individual account opened, Commodity segment active.

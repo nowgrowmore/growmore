@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import date
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from growmore_bot.backtest.metrics import max_drawdown_pct, sharpe_ratio
 from research.currency import fx

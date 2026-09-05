@@ -39,7 +39,7 @@ import argparse
 import statistics
 import sys
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from growmore_bot.backtest.metrics import max_drawdown_pct, sharpe_ratio
 from growmore_bot.backtest.walk_forward import (

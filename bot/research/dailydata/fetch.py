@@ -14,7 +14,6 @@ import json
 import sys
 import time
 from datetime import date, timedelta
-from pathlib import Path
 
 from growmore_bot.broker.dhan_client import DhanClient
 from growmore_bot.config import Settings

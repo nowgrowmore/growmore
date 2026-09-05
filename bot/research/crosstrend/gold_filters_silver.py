@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Optional
 
 from growmore_bot.backtest.engine import BacktestEngine
 from growmore_bot.backtest.metrics import (

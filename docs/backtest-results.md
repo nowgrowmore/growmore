@@ -1,5 +1,29 @@
 # Backtest Results — Strategy/Parameter Sweep (definitive re-run, 2026-09-05)
 
+> ## ⚠️ SUPERSEDED — every `risk_managed` number below is wrong, and the ranking is inverted
+>
+> Read `docs/walk-forward-results.md`, `docs/currency-decomposition-results.md` and
+> `docs/phase4-oos-results.md` first. Three things happened after this table was written:
+>
+> 1. **A same-bar lookahead was found in the trailing stop** (`risk/wrapper.py`, fixed
+>    2026-09-05 evening). Every `risk_managed` row here is affected. Gold Mini's headline
+>    falls **1.79 → 1.62**; Silver Mini's rises **1.33 → 1.49**, and its best variant becomes
+>    **39.3% CAGR / 1.52 Sharpe / 16.3% DD**. See `docs/technical-debt.md`.
+> 2. **No backtest here carried a buy-and-hold control.** With one, holding the contract beats
+>    the trading system on mean out-of-sample Sharpe (1.17 vs 0.71) and on five of eight
+>    instruments. On Gold Mini specifically the strategy returns 109% where holding returned
+>    161%; what it buys is a smaller drawdown, not edge.
+> 3. **A third of Gold Mini's Sharpe is the rupee, not gold.** USD/INR went 72.98 → 95.38 over
+>    the window. Re-denominated in USD, Gold Mini's headline drops 1.62 → 1.10 while Silver
+>    Mini's holds at 1.52 → 1.40.
+>
+> **Net effect: the DSR column below has Gold Mini and Silver Mini backwards.** Gold Mini's
+> "significant" 0.96 is largely currency plus a bull market; Silver Mini's "luck" 0.73 is the
+> one instrument here that genuinely beats buy-and-hold on return, Sharpe and drawdown at once.
+>
+> Also: the sweep's single `significant` result by DSR — Bollinger(20,2.5) on Zinc Mini —
+> closes **six** trades in its risk-managed form, under this repo's own 15-trade guardrail.
+
 **216 runs, 5 years of real Dhan daily data (2021-09-05 → 2026-09-05), 8 MCX commodities, 128
 passing the guardrails.** This supersedes every earlier table. Four things changed since the
 2026-09-04 version, and together they reorder the results and change which one you should trust:

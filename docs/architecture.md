@@ -68,6 +68,25 @@ flowchart LR
 - **Dashboard** (`dashboard/`): Next.js on Vercel, reads the shared Postgres schema, writes only to
   `bot_config` (enable/disable toggles). Does not yet read `live_positions`/`live_orders` or expose
   `bot_config.mode` — see docs/technical-debt.md.
+- **Strategy registry** (`bot/growmore_bot/strategies/registry.py`): the single name -> constructor
+  map. The scheduler, the backtest sweep and the walk-forward harness all resolve
+  `bot_config.strategies.name` through it, so a newly added strategy cannot work on one code path
+  and fail on another.
+- **Risk layer** (`bot/growmore_bot/risk/`): two composable wrappers, each of which *is* a
+  `Strategy` so it drops into every registration site unchanged. `RiskManagedStrategy` adds an
+  initial ATR stop, a Chandelier trail and an (unused, measured-as-a-no-op) time stop;
+  `VolFilteredStrategy` refuses to OPEN while realised volatility sits in the top slice of its own
+  trailing history. Exits are never suppressed by either. The authoritative stop level travels on
+  `Signal.risk_state` and back via `position_state["risk"]`; the engine, not the wrapper, decides
+  whether a stop was hit, testing it against the bar AFTER the one that set it.
+- **Research layer** (`bot/research/`): offline, database-free analysis. `dailydata/` caches the 5y
+  daily series to parquet and runs variants through the real `BacktestEngine` without touching
+  Neon or needing a live Dhan token, which is what makes every result below reproducible;
+  `validation/` holds the walk-forward harness (`walk_forward_run.py`) and the matched-pair
+  out-of-sample comparison (`oos_pairs.py`); `currency/` decomposes MCX bullion into metal and
+  rupee; `crosstrend/` and `intraday/` hold completed studies. Fold geometry and grid
+  fingerprinting live in `growmore_bot/backtest/walk_forward.py` so they are unit-tested with the
+  rest of the engine.
 - **Database**: Neon Postgres, shared schema, bot owns migrations (Alembic).
 
 ## Deployment

@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 #: The declared geometry. Changing these changes the experiment, and
 #: `grid_hash` plus these three numbers are what a stored run should record.
