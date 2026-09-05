@@ -1,106 +1,87 @@
-# Backtest Results — Strategy/Parameter Sweep (re-run 2026-09-05, cost-adjusted)
+# Backtest Results — Strategy/Parameter Sweep (definitive re-run, 2026-09-05)
 
-**144 runs, 5 years of real Dhan daily data (2021-09-05 → 2026-09-05), 8 MCX commodities.** This
-supersedes the 2026-09-04 table completely. Two things changed, and between them they reorder
-almost everything:
+**216 runs, 5 years of real Dhan daily data (2021-09-05 → 2026-09-05), 8 MCX commodities, 128
+passing the guardrails.** This supersedes every earlier table. Four things changed since the
+2026-09-04 version, and together they reorder the results and change which one you should trust:
 
-1. **Capital is now per-instrument, not one flat ₹5,00,000.** Each instrument's backtest is
-   capitalised at one lot's own notional (priced off the *first* bar — a later price would be
-   lookahead), so every result runs at exactly 1x leverage and the CAGR column finally measures
-   edge rather than contract size. Previously a Copper lot (~₹34 lakh) against ₹5 lakh was ~6.9x
-   leverage while a Crude Oil Mini lot (~₹0.86 lakh) was ~0.17x — a 40x spread.
-2. **Real MCX transaction costs and slippage are modelled** (`bot/growmore_bot/costs.py`):
-   brokerage min(₹20, 0.03%), exchange 0.0026%, CTT 0.01% sell-side, stamp 0.002% buy-side, SEBI
-   ₹20/crore, GST 18% on the service charges, plus 2 ticks of slippage per side. `cagr_pct` is now
-   **net**; `gross_cagr_pct` and `total_transaction_cost` are stored alongside it.
+1. **Capital is per-instrument.** Each backtest is capitalised at one lot's own notional (priced off
+   the *first* bar — a later price would be lookahead), so every result runs at 1x leverage. Under
+   the old flat ₹5,00,000 a Copper lot was ~6.9x leverage and a Crude Oil Mini lot ~0.17x, so the
+   CAGR column ranked contract size as much as edge.
+2. **Real MCX costs and slippage** are charged per leg (`bot/growmore_bot/costs.py`). `cagr_pct` is
+   net; `gross_cagr_pct` and `total_transaction_cost` sit beside it.
+3. **The price series is repaired.** Dhan's daily history contains unusable bars (`open=high=low=0`)
+   and, more seriously, **overlaps two contract months at every roll** — 43 repeated dates for Gold
+   Mini alone, mostly with different prices and volumes. Duplicates now resolve to the
+   higher-volume (liquid front-month) bar. Every number published before today sat on a series with
+   roughly a dozen fake ~1% gaps a year.
+4. **Two new strategy families**: an ATR stop/trail risk layer that wraps any strategy, and a
+   five-speed MACD ensemble.
 
-## Top 12, ranked by net CAGR at 1x leverage
+## Ranked by Sharpe, which is the leverage-invariant column
 
-Guardrails as before: ≥15 closed trades, max drawdown ≤50%. 73 of 144 runs pass.
-
-| # | Strategy | Instrument | Trades | Net CAGR | Sharpe | Max DD | PF | Cost drag |
+| # | Strategy | Instrument | Trades | Net CAGR | Sharpe | Max DD | PF | DSR |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | MACD (12,26,9) | Silver Mini | 43 | **33.1%** | 1.22 | 37.0% | 6.03 | 0.12pp |
-| 2 | MACD (5,13,5) | Silver Mini | 88 | 31.4% | 1.24 | 38.1% | 2.63 | 0.27pp |
-| 3 | Regime-Switch (ADX+MACD 12,26,9+VWAP/EMA) | Silver Mini | 16 | 28.5% | 1.09 | 45.2% | 8.02 | 0.06pp |
-| 4 | Regime-Switch (ADX+MACD 5,13,5+RSI) | Silver Mini | 51 | 28.0% | 1.07 | 41.3% | 2.45 | 0.19pp |
-| 5 | Regime-Switch (ADX+MACD 5,13,5+VWAP/EMA) | Silver Mini | 46 | 27.3% | 1.06 | 42.4% | 2.34 | 0.17pp |
-| 6 | Regime-Switch (ADX+MACD 12,26,9+RSI) | Silver Mini | 23 | 27.1% | 1.01 | 41.2% | 4.52 | 0.09pp |
-| 7 | RSI (7, 30/70) | Nickel | 44 | 22.9% | 0.51 | 21.9% | 2.75 | 0.13pp |
-| 8 | MACD (5,13,5) | Gold Mini | 92 | 22.5% | **1.45** | **18.6%** | 3.05 | 0.34pp |
-| 9 | RSI (7, 30/70) | Silver Mini | 39 | 21.1% | 0.99 | 37.1% | 2.70 | 0.17pp |
-| 10 | Donchian (10) | Gold Mini | 23 | 19.4% | 1.11 | 22.0% | 3.79 | 0.09pp |
-| 11 | Regime-Switch (ADX+MACD 5,13,5+VWAP/EMA) | Aluminium Mini | 32 | 18.5% | **1.53** | **6.8%** | 5.38 | 0.27pp |
-| 12 | SMA (5, 20) | Gold Mini | 38 | 18.4% | 1.04 | 24.9% | 3.31 | 0.16pp |
+| 1 | **Risk-managed ensemble** (5 MACD speeds, 2×ATR stop, 3×ATR trail) | Gold Mini | 47 | 22.2% | **1.79** | **10.0%** | 3.90 | **0.96** |
+| 2 | Risk-managed MACD (5,13,5) | Gold Mini | 86 | 22.3% | 1.70 | 8.8% | 2.97 | 0.92 |
+| 3 | Bollinger (20, 2.5) | Zinc Mini | 21 | 14.2% | 1.63 | 11.8% | — | 0.92 |
+| 4 | Risk-managed MACD (12,26,9) | Gold Mini | 45 | 19.2% | 1.56 | 10.3% | 3.40 | 0.88 |
+| 5 | MACD (5,13,5) — *the incumbent* | Gold Mini | 86 | 22.0% | 1.43 | 19.1% | 3.00 | 0.76 |
+| 6 | Risk-managed MACD (5,13,5) | Silver Mini | 88 | 32.6% | 1.33 | 28.4% | 2.57 | 0.73 |
+| 7 | Regime-Switch (5,13,5+VWAP/EMA) | Aluminium Mini | 38 | 16.2% | 1.29 | 7.4% | 4.21 | 0.71 |
+| 8 | MACD (5,13,5) | Silver Mini | 88 | 31.7% | 1.27 | 37.7% | 2.69 | 0.67 |
+| 9 | MACD (12,26,9) | Silver Mini | 42 | **33.4%** | 1.24 | 36.8% | 6.30 | 0.65 |
+| 10 | Ensemble (bare, no stops) | Silver Mini | 49 | 32.9% | 1.22 | 35.7% | 4.58 | 0.64 |
 
-### What actually changed, and why
+**DSR is the Deflated Sharpe Ratio** — the probability the result reflects real edge rather than
+being the luckiest of everything tried. 216 runs are only ~15 *effective* trials once you account
+for how correlated they are, and the luckiest of 15 would post Sharpe ~0.97 by chance. **Exactly one
+result clears the conventional 0.95 bar.**
 
-**Copper is gone from the top 12 entirely.** The old table's #2 (Regime-Switch/Copper, 27.1%) and #5
-(MACD 12,26,9/Copper, "the highest raw CAGR of the top 5" at 33.0%) were **leverage artifacts**. On
-equal risk those same two runs are 10.4% and 13.2%. Copper's best result anywhere in this sweep is
-now 13.2%. Nothing about Copper got worse — it was never as good as the table said.
+### The headline
 
-**Silver Mini takes all six top slots**, across three different strategy families. That is a much
-stronger cross-strategy signal than the old table's "MACD appears 4 of 5 times", which was partly an
-artefact of which contracts happened to be large.
+**Risk-managed ensemble on Gold Mini is the only statistically significant result in the sweep.**
+Sharpe 1.79, a 10.0% max drawdown, 22.2% CAGR at 1x leverage, 47 trades, DSR 0.96.
 
-**Regime-Switch is rehabilitated, and `docs/goldmini-regime-switch-results.md` is wrong at the
-universe level.** That document concluded regime-switch was "not recommended as built" — but it only
-ever tested **Gold Mini**, where the conclusion still holds. Across the universe, 4 of the top 6
-results are regime-switch variants on Silver Mini, and **Regime-Switch (5,13,5 + VWAP/EMA) on
-Aluminium Mini is the best risk-adjusted result in the entire sweep**: Sharpe 1.53 and a 6.8% max
-drawdown, less than half the drawdown of anything else near it, on 32 trades. Single-instrument
-negative results should not have been generalised.
+What makes it interesting is that **neither half is best alone**. The bare ensemble on Gold Mini is
+Sharpe 0.98 with a 29.2% drawdown — *worse* than the single luckiest MACD variant, exactly as
+expected, because an ensemble trades away the lucky tail. Bare MACD with stops reaches 1.70 but only
+DSR 0.92. The combination wins, and it wins on the measure that accounts for how much was tried.
 
-**Costs are immaterial for a daily book, exactly as predicted.** The drag is 0.06–0.34 percentage
-points of CAGR across the board — these strategies trade 15–90 times in *five years*. This was worth
-building for correctness and because it becomes load-bearing for any higher-turnover idea, but
-anyone hoping costs explained a disappointing result should stop looking here.
+The two ingredients each attack a different problem: **the ensemble removes the parameter choice**
+(no lookback selected, so no selection bias), and **the stops cut drawdown roughly in half**
+(19.1% → 8.8% on the same MACD entries). Note that ranking by CAGR would have picked #9, MACD
+(12,26,9) on Silver Mini at 33.4% — a real result, but with a 36.8% drawdown and DSR 0.65.
 
-**MACD (5,13,5) / Gold Mini remains the most trustworthy single pick** even though it is only 8th by
-CAGR: the best Sharpe of any high-sample result (1.45), the shallowest drawdown of the top 10
-(18.6%), and by far the largest sample (92 trades). Rank by confidence rather than by CAGR and it is
-at or near the top.
+### What else changed
 
-**Lead Mini and Crude Oil Mini are broadly unprofitable** across every strategy family — most of
-their runs are negative. Neither currently has an enabled config, and neither should get one.
+- **Copper's old #2 and #5 placings were leverage artifacts.** Its best result here is 13.1%. It is
+  perfectly tradeable, just never the standout the flat-capital table implied.
+- **Regime-Switch is partly rehabilitated.** `docs/goldmini-regime-switch-results.md` concluded "not
+  recommended" from Gold Mini alone, where that still holds — but on Aluminium Mini it posts the
+  second-shallowest drawdown in the table (7.4%) at Sharpe 1.29. A single-instrument negative result
+  should not have been generalised.
+- **Costs are immaterial for a daily book**: 0.06–0.34 percentage points of CAGR. Worth having for
+  correctness, and load-bearing for anything higher-turnover, but not the explanation for any
+  disappointing result.
+- **Lead Mini and Crude Oil Mini are broadly unprofitable** across every family. Neither has an
+  enabled config; neither should get one.
+- **Shorting was built and measured, and it is worse here.** Sharpe fell in all nine pairings tested
+  and the #1 result above collapses to Sharpe 0.15 with a 64% drawdown. 2021–2026 was a secular
+  precious-metals bull market. Left behind a default-off flag; see `docs/technical-debt.md`.
 
-## Currently-configured strategies, on the new basis
+## What *not* to conclude
 
-| Config (mode) | Strategy | Trades | Net CAGR | Sharpe | Max DD | PF |
-| --- | --- | --- | --- | --- | --- | --- |
-| SILVERM (paper) | MACD (12,26,9) | 43 | 33.1% | 1.22 | 37.0% | 6.03 |
-| SILVERM (paper) | MACD (5,13,5) | 88 | 31.4% | 1.24 | 38.1% | 2.63 |
-| SILVERM (paper) | Regime-Switch (12,26,9+VWAP/EMA) | 16 | 28.5% | 1.09 | 45.2% | 8.02 |
-| SILVERM (paper) | Regime-Switch (5,13,5+VWAP/EMA) | 46 | 27.3% | 1.06 | 42.4% | 2.34 |
-| GOLDM (paper) | MACD (5,13,5) | 92 | 22.5% | 1.45 | 18.6% | 3.05 |
-| GOLDM (paper) | Donchian (10) | 23 | 19.4% | 1.11 | 22.0% | 3.79 |
-| COPPER (paper) | MACD (12,26,9) | 50 | 13.2% | 0.98 | 12.6% | 2.99 |
-| COPPER (paper) | SMA (5,20) | 37 | 12.2% | 0.85 | 17.3% | 2.39 |
-| COPPER (paper) | MACD (5,13,5) | 93 | 11.5% | 0.83 | 16.1% | 1.88 |
-| COPPER (paper) | Regime-Switch (12,26,9+RSI) | 19 | 10.4% | 1.06 | 12.7% | 9.33 |
-| GOLDM (paper) | VWAP+CPR Session-Bounce | — | **never backtested** | — | — | — |
-
-The four Copper configs are the weakest of the enabled set on equal risk, though all four are
-comfortably profitable and none has an alarming drawdown — they are simply not the standouts the
-old table implied. `vwap_session_bounce` still has no backtest at all; see
-`docs/technical-debt.md` for why that is now fixable and how.
-
-## What *not* to conclude from this
-
-- **These are 1x-leverage numbers.** A 33.1% CAGR on Silver Mini means 33.1% on ~₹12 lakh of
-  capital, not on ₹2,50,000. `python -m research.capital.admission` prints what each instrument
-  actually needs; at a 2% risk-per-trade budget Silver Mini wants ~₹33 lakh and Copper ~₹40 lakh.
-- **144 combinations were tested and the top of the table was picked from them.** No walk-forward or
-  out-of-sample validation has been run yet, so selection bias is unquantified. A deflated Sharpe
-  calculation is the next item that addresses this.
-- **One five-year window, one regime** — a period containing an exceptional precious-metals bull
-  run, which is precisely where Silver Mini's dominance comes from. That is a reason to be careful
-  about extrapolating slots 1–6.
-- **Aluminium Mini's Sharpe 1.53 / 6.8% drawdown is one result out of 144.** It is the most
-  interesting thing here and the least proven.
-- **Still not modelled:** stop-losses of any kind, position sizing beyond 1 lot, short positions, and
-  the daily-loss/expiry force-close guards the live engines apply but the backtest does not.
+- **These are 1x-leverage numbers.** 22.2% on Gold Mini means 22.2% of ~₹15.3 lakh, not of ₹2.5
+  lakh. Run `python -m research.capital.admission` for what each instrument actually needs — at a 2%
+  risk-per-trade budget Gold Mini wants ~₹31 lakh behind one lot.
+- **One five-year window, one regime** — and a precious-metals bull run at that, which is where most
+  of the Silver Mini and Gold Mini performance comes from.
+- **DSR ≥ 0.95 is not proof.** It says one result survives a selection-bias correction on this data;
+  it says nothing about a different regime. Walk-forward validation is still not built.
+- **Still not modelled:** the daily-loss, expiry and end-of-day guards the live engines apply, and
+  per-instrument calibration of the stop multiple (2×ATR helps Gold Mini and Nickel, hurts Aluminium
+  Mini and Zinc Mini).
 
 ## Methodology
 
