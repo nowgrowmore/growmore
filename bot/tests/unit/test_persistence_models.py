@@ -64,7 +64,7 @@ def test_money_and_price_columns_are_numeric_not_float():
     )
     _money_columns("paper_orders", ["quantity", "simulated_fill_price"])
     _money_columns(
-        "bot_config", ["virtual_capital", "max_position_size", "daily_loss_limit"]
+        "bot_config", ["max_position_size", "daily_loss_limit"]
     )
 
 

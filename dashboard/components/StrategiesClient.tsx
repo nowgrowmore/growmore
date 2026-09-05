@@ -254,7 +254,6 @@ export function StrategiesClient({
                     configId={config.id}
                     maxPositionSize={toNumber(config.max_position_size)}
                     dailyLossLimit={toNumber(config.daily_loss_limit)}
-                    virtualCapital={toNumber(config.virtual_capital)}
                     dailyLossLimitEnabled={config.daily_loss_limit_enabled}
                     action={onSaveRiskParams}
                   />

@@ -37,9 +37,11 @@ from growmore_bot.persistence.db import session_scope
 from growmore_bot.persistence.models import BacktestRun, BacktestTrade, Instrument
 from growmore_bot.persistence.models import Strategy as StrategyRow
 from growmore_bot.risk.sizing import notional_per_lot
+from growmore_bot.risk.vol_filter import build_vol_filtered
 from growmore_bot.risk.wrapper import build_risk_managed
 from growmore_bot.strategies.base import Strategy
 from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
+from growmore_bot.strategies.buy_and_hold import BuyAndHoldStrategy
 from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
 from growmore_bot.strategies.ensemble_trend import EnsembleTrendStrategy
 from growmore_bot.strategies.macd_trend import MacdTrendStrategy
@@ -324,6 +326,44 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
         # either piece alone, that the evidence points at.
         ("ensemble_trend", {"min_agreement": 3}, 2.0, 3.0, "ensemble-agree3"),
     ]
+    # Buy and hold: the BENCHMARK, in the sweep, on every instrument. Out of
+    # sample it beats the trading system on five of eight contracts
+    # (docs/walk-forward-results.md), and a comparison that important should
+    # be a row in the same table -- measured by the same engine, the same cost
+    # model and the same rollover rules -- rather than a footnote computed
+    # elsewhere. Every ranking this sweep produces should be read against it.
+    grid.append((
+        "buy_and_hold", "1lot", {}, partial(BuyAndHoldStrategy),
+    ))
+
+    # Volatility-filtered variants: the same entry rules, the same ATR stops,
+    # but no new position while 20-day realised volatility sits in the top
+    # decile of its own trailing two years. This is the ONLY one of five
+    # candidate improvements that survived out-of-sample testing on both
+    # bullion contracts (+0.13 Sharpe on Gold Mini, +0.20 on Silver Mini --
+    # docs/phase4-oos-results.md).
+    vol_variants: list[tuple[str, dict, float, Optional[float], float, str]] = [
+        ("ensemble_trend", {"min_agreement": 3}, 2.0, 3.0, 0.90,
+         "ensemble_trend-agree3-stop2-trail3-vol90"),
+        ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5},
+         2.0, 3.0, 0.90, "macd_trend-5-13-5-stop2-trail3-vol90"),
+    ]
+    for inner_name, inner_params, stop_atr, trail, cap, tag in vol_variants:
+        params = {
+            "inner_strategy": "risk_managed",
+            "inner_params": {
+                "inner_strategy": inner_name,
+                "inner_params": inner_params,
+                "atr_period": 14,
+                "initial_stop_atr": stop_atr,
+                "trail_atr": trail,
+            },
+            "vol_window": 20,
+            "lookback": 504,
+            "percentile_cap": cap,
+        }
+        grid.append(("vol_filtered", tag, params, partial(build_vol_filtered, params)))
+
     for inner_name, inner_params, stop_atr, trail, tag in risk_variants:
         params = {
             "inner_strategy": inner_name,

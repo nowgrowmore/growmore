@@ -67,6 +67,12 @@ def _vwap_session(params: dict) -> Strategy:
     return VwapSessionBounceStrategy(**params)
 
 
+def _buy_and_hold(params: dict) -> Strategy:
+    from growmore_bot.strategies.buy_and_hold import BuyAndHoldStrategy
+
+    return BuyAndHoldStrategy(**params)
+
+
 def _always_flip(params: dict) -> Strategy:
     from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
 
@@ -100,6 +106,8 @@ STRATEGY_BUILDERS: dict[str, Callable[[dict], Any]] = {
     "bollinger_reversion": _bollinger,
     "regime_switch": _regime,
     "ema_trend": _ema_trend,
+    # The benchmark, as a runnable strategy -- see buy_and_hold.py.
+    "buy_and_hold": _buy_and_hold,
     "vwap_session_bounce": _vwap_session,
     # Any strategy above, plus ATR stops -- see growmore_bot.risk.wrapper.
     "risk_managed": _risk_managed,

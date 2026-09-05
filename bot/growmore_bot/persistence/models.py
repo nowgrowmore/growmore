@@ -231,19 +231,28 @@ class BotConfig(Base):
         UUID, ForeignKey("instruments.id"), nullable=False
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    virtual_capital: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # `virtual_capital` was dropped in migration 0020: nothing in the trading
+    # path ever read it, and displaying Rs 2.5 lakh against a Rs 15.2 lakh Gold
+    # Mini lot implied leverage the bot was not taking. Position size is
+    # `max_position_size`, in lots, which is the unit the exchange deals in.
     max_position_size: Mapped[float] = mapped_column(Numeric, nullable=False)
     daily_loss_limit: Mapped[float] = mapped_column(Numeric, nullable=False)
-    # Off by default only in the sense that a config can opt out -- the
-    # server_default is "true" (every existing config keeps today's
-    # always-on behavior). When false, cumulative daily P&L is never checked
-    # against daily_loss_limit at all: no auto-close, no auto-disable, purely
-    # the strategy's own BUY/SELL signals govern entries and exits. The
+    # RETIRED 2026-09-05 (migration 0019) -- server_default is now "false"
+    # and every existing row was set false, by the account owner's decision.
+    # The mechanism's failure mode was the problem: tripping it sets
+    # `enabled = False` permanently rather than pausing, and it compares
+    # REALISED P&L to a flat rupee figure that happened to be ~1% of one Gold
+    # Mini lot's notional -- so one ordinary 1% down day would switch a
+    # working config off for good. Loss control lives in the strategies' ATR
+    # stops instead, where it is visible and backtested.
+    # When false, cumulative daily P&L is never checked against
+    # daily_loss_limit at all: no auto-close, no auto-disable, purely the
+    # strategy's own BUY/SELL signals govern entries and exits. The
     # end-of-day-flatten and contract-expiry force-closes are position-
     # lifecycle safety nets, not P&L risk management, and stay active
     # regardless of this flag.
     daily_loss_limit_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="true"
+        Boolean, nullable=False, server_default="false"
     )
     # "paper" (default) or "live" -- a REAL order is only ever placed when
     # this is "live" AND Settings().live_trading_enabled is also True (see

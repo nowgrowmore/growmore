@@ -9,7 +9,6 @@ function makeConfig(overrides: Partial<BotConfig>): BotConfig {
     strategy_id: "s1",
     instrument_id: "i1",
     enabled: true,
-    virtual_capital: "250000",
     max_position_size: "1",
     daily_loss_limit: "15000",
     daily_loss_limit_enabled: true,

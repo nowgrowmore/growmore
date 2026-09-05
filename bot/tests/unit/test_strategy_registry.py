@@ -29,6 +29,7 @@ def test_every_registered_name_builds_a_strategy():
         },
         "vwap_session_bounce": {},
         "ema_trend": {"period": 112},
+        "buy_and_hold": {},
         "vol_filtered": {
             "inner_strategy": "macd_trend",
             "inner_params": {"fast_period": 5, "slow_period": 13, "signal_period": 5},

@@ -39,7 +39,6 @@ describe("saveRiskParams", () => {
     const formData = new FormData();
     formData.set("maxPositionSize", "10");
     formData.set("dailyLossLimit", "5000");
-    formData.set("virtualCapital", "100000");
     formData.set("dailyLossLimitEnabled", "on");
 
     await saveRiskParams("config-1", formData);
@@ -47,7 +46,6 @@ describe("saveRiskParams", () => {
     expect(updateBotConfigRiskParams).toHaveBeenCalledWith("config-1", {
       maxPositionSize: 10,
       dailyLossLimit: 5000,
-      virtualCapital: 100000,
       dailyLossLimitEnabled: true,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/strategies");
@@ -57,7 +55,6 @@ describe("saveRiskParams", () => {
     const formData = new FormData();
     formData.set("maxPositionSize", "10");
     formData.set("dailyLossLimit", "5000");
-    formData.set("virtualCapital", "100000");
     // No dailyLossLimitEnabled field set -- matches an unchecked checkbox.
 
     await saveRiskParams("config-1", formData);
@@ -72,7 +69,6 @@ describe("saveRiskParams", () => {
     const formData = new FormData();
     formData.set("maxPositionSize", "not-a-number");
     formData.set("dailyLossLimit", "5000");
-    formData.set("virtualCapital", "100000");
 
     await expect(saveRiskParams("config-1", formData)).rejects.toThrow();
     expect(updateBotConfigRiskParams).not.toHaveBeenCalled();

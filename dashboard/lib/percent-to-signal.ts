@@ -181,6 +181,13 @@ export function computePercentToSignal(
       return NONE;
     }
 
+    case "buy_and_hold": {
+      // It buys the moment it is flat, so no price move is required to reach
+      // its signal, and it never sells. 0 is the honest answer, not null --
+      // null would read as "unknown" when it is in fact exactly known.
+      return { toBuyPct: 0, toSellPct: null };
+    }
+
     case "vwap_session_bounce": {
       const vwap = n(ind.vwap);
       const cprBottom = n(ind.cpr_bottom);

@@ -47,12 +47,32 @@ const EXAMPLE_SCENARIOS: Record<
     strategy_params: { min_agreement: 3 },
     signal_indicators: { bullish_votes: 2, votes_cast: 5, votes_needed: 3, members: 5 },
   },
+  vol_filtered: {
+    strategy_params: {
+      inner_strategy: "risk_managed",
+      vol_window: 20,
+      lookback: 504,
+      percentile_cap: 0.9,
+    },
+    // Volatility above its own threshold: the state where new entries are
+    // being refused, which is the case worth illustrating.
+    signal_indicators: { realized_vol: 0.42, vol_threshold: 0.35 },
+    signal_ltp: "100",
+  },
   vwap_session_bounce: {
     strategy_params: {},
     signal_indicators: { cpr_bottom: 101.67, cpr_pivot: 103.33, cpr_top: 105, vwap: 104 },
     signal_ltp: "106",
   },
 };
+
+/** Strategies with genuinely nothing to gauge -- not omissions.
+ *
+ * A gauge shows how close a live reading is to a threshold. Buy & Hold has no
+ * threshold: it is long whenever it is flat, forever. Inventing a dial for it
+ * would be decoration pretending to be information.
+ */
+export const STRATEGIES_WITHOUT_GAUGES = new Set(["buy_and_hold"]);
 
 export function buildExampleGaugeConfig(strategyName: string): LevelGaugeProps | null {
   const scenario = EXAMPLE_SCENARIOS[strategyName];
@@ -62,7 +82,6 @@ export function buildExampleGaugeConfig(strategyName: string): LevelGaugeProps |
     strategy_id: "example",
     instrument_id: "example",
     enabled: true,
-    virtual_capital: "0",
     max_position_size: "0",
     daily_loss_limit: "0",
     mode: "paper",

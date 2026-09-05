@@ -341,6 +341,48 @@ function explainSignalBase(
       );
     }
 
+    case "vol_filtered": {
+      const vol = n(ind.realized_vol);
+      const threshold = n(ind.vol_threshold);
+      const cap = n(p.percentile_cap) ?? 0.9;
+      const inner = typeof p.inner_strategy === "string" ? p.inner_strategy : "the wrapped strategy";
+      const pctile = Math.round(cap * 100);
+      if (vol === null) {
+        return (
+          `Entries come from ${inner}. This layer also blocks new entries when the market is ` +
+          `unusually volatile, but there is not enough price history yet to measure that.`
+        );
+      }
+      if (threshold === null) {
+        return (
+          `Entries come from ${inner}. Realised volatility is ${(vol * 100).toFixed(1)}% ` +
+          `annualised, but there is not yet enough history to rank it against, so no entry is ` +
+          `being blocked.`
+        );
+      }
+      const blocked = vol > threshold;
+      return (
+        `Entries come from ${inner}; this layer only decides whether a new one is allowed. ` +
+        `Realised volatility is ${(vol * 100).toFixed(1)}% annualised against a ${pctile}th-percentile ` +
+        `threshold of ${(threshold * 100).toFixed(1)}% from its own trailing history. ` +
+        (blocked
+          ? "That is above the threshold, so no NEW position will be opened until it calms down. " +
+            "An existing position is unaffected -- exits are never blocked."
+          : "That is below the threshold, so entries are currently allowed.") +
+        " The threshold is the instrument's own history rather than a fixed number, which is what" +
+        " lets one setting work on both gold and silver despite their very different volatility."
+      );
+    }
+
+    case "buy_and_hold":
+      return (
+        "Holds one lot, always. It buys whenever it finds itself flat, which is what keeps it " +
+        "invested across contract rollovers -- MCX futures expire, so the scheduler force-closes " +
+        "before the delivery window and this re-enters on the new contract month. There is no " +
+        "signal to wait for and no stop: it exists as the benchmark every other strategy is " +
+        "measured against, and out-of-sample it beats the trading system on five of eight contracts."
+      );
+
     case "always_flip":
       return "Demo/test strategy, not a real trading signal -- it deliberately alternates BUY and SELL every single tick to prove the pipeline works end to end.";
 

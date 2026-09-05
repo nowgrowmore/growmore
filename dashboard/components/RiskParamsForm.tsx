@@ -6,7 +6,6 @@ interface RiskParamsFormProps {
   configId: string;
   maxPositionSize: number;
   dailyLossLimit: number;
-  virtualCapital: number;
   dailyLossLimitEnabled: boolean;
   action: (id: string, formData: FormData) => Promise<void>;
 }
@@ -16,7 +15,6 @@ export function RiskParamsForm({
   configId,
   maxPositionSize,
   dailyLossLimit,
-  virtualCapital,
   dailyLossLimitEnabled,
   action,
 }: RiskParamsFormProps) {
@@ -56,16 +54,6 @@ export function RiskParamsForm({
           step="any"
           name="dailyLossLimit"
           defaultValue={dailyLossLimit}
-          className="mt-1 w-32 rounded border border-[color:var(--border-hairline)] bg-transparent px-2 py-1 text-sm tabular-nums"
-        />
-      </label>
-      <label className="flex flex-col text-xs text-[color:var(--text-secondary)]">
-        Virtual capital
-        <input
-          type="number"
-          step="any"
-          name="virtualCapital"
-          defaultValue={virtualCapital}
           className="mt-1 w-32 rounded border border-[color:var(--border-hairline)] bg-transparent px-2 py-1 text-sm tabular-nums"
         />
       </label>

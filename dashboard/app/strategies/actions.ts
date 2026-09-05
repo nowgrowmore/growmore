@@ -15,18 +15,16 @@ export async function toggleBotConfigEnabled(id: string, enabled: boolean): Prom
 export async function saveRiskParams(id: string, formData: FormData): Promise<void> {
   const maxPositionSize = Number(formData.get("maxPositionSize"));
   const dailyLossLimit = Number(formData.get("dailyLossLimit"));
-  const virtualCapital = Number(formData.get("virtualCapital"));
   // A checkbox is only present in FormData at all when checked.
   const dailyLossLimitEnabled = formData.get("dailyLossLimitEnabled") === "on";
 
-  if (![maxPositionSize, dailyLossLimit, virtualCapital].every(Number.isFinite)) {
+  if (![maxPositionSize, dailyLossLimit].every(Number.isFinite)) {
     throw new Error("Risk params must be numbers");
   }
 
   await updateBotConfigRiskParams(id, {
     maxPositionSize,
     dailyLossLimit,
-    virtualCapital,
     dailyLossLimitEnabled,
   });
   revalidatePath("/strategies");

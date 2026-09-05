@@ -102,7 +102,6 @@ def test_bot_config_updated_at_defaults_and_bumps_on_update(migrated_engine):
             strategy_id=strategy_row.id,
             instrument_id=instrument.id,
             enabled=True,
-            virtual_capital=500_000,
             max_position_size=10,
             daily_loss_limit=5_000,
         )

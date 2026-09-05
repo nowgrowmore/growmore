@@ -92,9 +92,7 @@ function ConfigCard({
         <dd className="tabular-nums">
           {config.daily_loss_limit_enabled ? formatCurrency(toNumber(config.daily_loss_limit)) : "off"}
         </dd>
-        <dt className="text-[color:var(--text-muted)]">Virtual capital</dt>
-        <dd className="tabular-nums">{formatCurrency(toNumber(config.virtual_capital))}</dd>
-      </dl>
+              </dl>
 
       <div>
         <span className="rounded bg-[color:var(--gridline)] px-2 py-0.5 text-xs font-semibold uppercase text-[color:var(--text-secondary)]">

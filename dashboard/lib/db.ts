@@ -290,20 +290,18 @@ export async function setBotConfigEnabled(id: string, enabled: boolean): Promise
 export interface RiskParams {
   maxPositionSize: number;
   dailyLossLimit: number;
-  virtualCapital: number;
   dailyLossLimitEnabled: boolean;
 }
 
 export async function updateBotConfigRiskParams(id: string, params: RiskParams): Promise<void> {
   const sql = getClient();
-  const { maxPositionSize, dailyLossLimit, virtualCapital, dailyLossLimitEnabled } = params;
+  const { maxPositionSize, dailyLossLimit, dailyLossLimitEnabled } = params;
   await sql.transaction((tx) => [
     tx`
       update bot_config
       set
         max_position_size = ${maxPositionSize},
         daily_loss_limit = ${dailyLossLimit},
-        virtual_capital = ${virtualCapital},
         daily_loss_limit_enabled = ${dailyLossLimitEnabled},
         updated_at = now()
       where id = ${id}

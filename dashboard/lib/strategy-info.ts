@@ -75,7 +75,7 @@ export const STRATEGY_INFO: Record<string, StrategyInfo> = {
   risk_managed: {
     label: "Risk-Managed (ATR stop)",
     summary:
-      "Not a strategy of its own -- it wraps one of the others and adds the exits none of them have: a protective stop placed a fixed number of ATRs from entry, a Chandelier trailing stop that ratchets in your favour and never loosens, and an optional time stop. Measured across 13 same-strategy/same-instrument pairs it improved BOTH Sharpe and max drawdown in 8 and worsened both in 3 -- the gains are large where drawdown was worst (Gold Mini MACD: 19.1% -> 8.8%), the losses are on low-volatility contracts where a 2xATR stop sits inside normal noise. See docs/technical-debt.md.",
+      "Not a strategy of its own -- it wraps one of the others and adds the exits none of them have: a protective stop placed a fixed number of ATRs from entry, and a Chandelier trailing stop that ratchets in your favour and never loosens. Across all 51 same-strategy/same-instrument pairs it improved both Sharpe and max drawdown in 16 and worsened both in 20 -- an earlier \"8 of 13\" claim was a cherry-picked subset. It helps most on volatile contracts (Silver Mini) and hurts on quiet ones where a 2xATR stop sits inside ordinary noise. The time stop is implemented but does nothing: no trade here lasts long enough to hit it. See docs/technical-debt.md and docs/phase4-oos-results.md.",
     params: {
       inner_strategy: { label: "Wrapped strategy", explain: "Which strategy generates the entry signals. The risk layer only decides when to get out." },
       inner_params: { label: "Wrapped strategy's params", explain: "Passed straight through to the wrapped strategy, unchanged." },
@@ -88,10 +88,28 @@ export const STRATEGY_INFO: Record<string, StrategyInfo> = {
   ensemble_trend: {
     label: "Multi-Speed MACD Ensemble",
     summary:
-      "Runs 5 MACD speeds at once (5/13/5 through 26/52/18) and goes long only when at least min_agreement of them are bullish -- there's no single lookback to select, so there's no selection-luck bias in choosing one. Almost always scores worse in isolation than the single luckiest MACD variant in a backtest -- that's the intended trade-off, giving up the lucky tail for a result that isn't just the winner of many tries. Wrapped in the risk-managed ATR stop layer, this combination is the only result in the full sweep that clears the conventional statistical-significance bar (DSR >= 0.95) -- see docs/backtest-results.md.",
+      "Runs 5 MACD speeds at once (5/13/5 through 26/52/18) and goes long only when at least min_agreement of them are bullish -- there's no single lookback to select, so there's no selection-luck bias in choosing one. Almost always scores worse in isolation than the single luckiest MACD variant in a backtest -- that's the intended trade-off, giving up the lucky tail for a result that isn't just the winner of many tries. Wrapped in the ATR stop layer it was the only sweep result to clear DSR >= 0.95 on Gold Mini -- but that test corrects for how MANY things you tried, not for whether what you found was simply a rising market, and out-of-sample Gold Mini barely beats holding the contract. On Silver Mini the same combination genuinely does beat buy-and-hold on return, Sharpe and drawdown at once. See docs/walk-forward-results.md.",
     params: {
       min_agreement: { label: "Votes needed", explain: "How many of the 5 MACD members must agree (be bullish) for the ensemble to go long. Higher = more conservative, fewer but higher-conviction trades." },
     },
+  },
+  vol_filtered: {
+    label: "Volatility-Filtered",
+    summary:
+      "A second wrapper, applied on top of the risk-managed layer: it refuses to OPEN a new position while 20-day realised volatility sits in the top decile of its own trailing two years. Exits are never blocked -- a filter that could trap you during a volatility spike would be the opposite of a risk control. Deliberately binary (one lot, or none) because continuous volatility-targeted sizing is not expressible at this account size: the formula asks for ~0.3 of a Gold Mini lot. This is the ONLY one of five candidate improvements that survived out-of-sample testing on both bullion contracts (+0.13 Sharpe on Gold Mini, +0.20 on Silver Mini). See docs/phase4-oos-results.md.",
+    params: {
+      inner_strategy: { label: "Wrapped strategy", explain: "Which strategy generates the signals -- normally \"risk_managed\", so entries get both an ATR stop and this volatility gate." },
+      inner_params: { label: "Wrapped strategy's params", explain: "Passed straight through to the wrapped strategy, unchanged." },
+      vol_window: { label: "Volatility window (bars)", explain: "Bars of close-to-close returns used to measure current realised volatility. 20 is about a trading month." },
+      lookback: { label: "Comparison history (bars)", explain: "How much of the instrument's own past the current reading is ranked against. 504 is about two years. Ranking against the instrument's own history rather than an absolute number is what lets one setting work on both gold and silver, which differ threefold in typical volatility." },
+      percentile_cap: { label: "Refuse above percentile", explain: "New entries are blocked when volatility ranks above this fraction of its own history. 0.90 = skip the calmest-to-noisiest top decile. 1.0 turns the filter off entirely." },
+    },
+  },
+  buy_and_hold: {
+    label: "Buy & Hold (benchmark)",
+    summary:
+      "Buys one lot and holds it -- the benchmark, run as a real config so it is measured by the same engine, cost model and rollover machinery as everything it is compared against. This matters because out-of-sample it beats the trading system on five of eight MCX contracts, including Gold Mini (+161% vs +109%). On MCX holding is not passive: futures expire, the scheduler force-closes before the delivery window and repoints at the next contract month, so this re-enters whenever it finds itself flat. Rolling costs about 2.4bp a round trip -- roughly 1.5% over five years even at monthly rolls. Its daily-loss guard must stay off: holding through drawdowns is the definition of the strategy. See docs/walk-forward-results.md.",
+    params: {},
   },
   vwap_session_bounce: {
     label: "VWAP + CPR Session-Bounce",

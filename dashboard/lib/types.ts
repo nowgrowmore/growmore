@@ -160,7 +160,6 @@ export interface BotConfig {
   strategy_id: string;
   instrument_id: string;
   enabled: boolean;
-  virtual_capital: string;
   max_position_size: string;
   daily_loss_limit: string;
   daily_loss_limit_enabled: boolean;

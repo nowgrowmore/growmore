@@ -177,6 +177,35 @@ export function buildGaugeConfig(config: BotConfig): LevelGaugeProps | null {
       };
     }
 
+    case "vol_filtered": {
+      // The stop is still worth seeing, but it is the wrapped layer's number
+      // and already shown there. What THIS wrapper decides is a different
+      // question -- "would a new entry be allowed right now?" -- so the gauge
+      // is volatility against its own trailing threshold.
+      const vol = ind.realized_vol;
+      const threshold = ind.vol_threshold;
+      if (vol === undefined || vol === null) return null;
+      const volNum = Number(vol);
+      if (threshold === undefined || threshold === null) {
+        // Not enough history to rank against yet; entries are admitted.
+        return null;
+      }
+      const thresholdNum = Number(threshold);
+      const max = Math.max(volNum, thresholdNum) * 1.25;
+      return {
+        min: 0,
+        max,
+        zones: [{ from: thresholdNum, to: max, color: "var(--critical-text)" }],
+        referenceLines: [{ value: thresholdNum, label: "New entries blocked above" }],
+        markers: [{ value: volNum, label: "Realised vol", color: CURRENT_COLOR }],
+      };
+    }
+
+    case "buy_and_hold":
+      // Nothing to gauge: it is long whenever it is flat, by definition.
+      // There is no threshold to approach and no level to watch.
+      return null;
+
     case "vwap_session_bounce": {
       const cprBottom = ind.cpr_bottom;
       const cprPivot = ind.cpr_pivot;

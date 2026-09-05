@@ -69,7 +69,6 @@ def _bot_config(**overrides):
         instrument_id=uuid.uuid4(),
         enabled=True,
         mode="live",
-        virtual_capital=500_000,
         max_position_size=10,
         daily_loss_limit=5_000,
         daily_loss_limit_enabled=True,
