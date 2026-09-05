@@ -68,8 +68,17 @@ def run_variant(
     capital_mode: str = "notional",
     target_leverage: float = 1.0,
     meta: Optional[dict] = None,
+    evaluate_from: int = 0,
 ) -> RunResult:
-    """Backtest one (symbol, strategy, params) over the cached daily series."""
+    """Backtest one (symbol, strategy, params) over the cached daily series.
+
+    `evaluate_from` is the walk-forward hook. A streaming strategy needs warm
+    bars before its indicators mean anything, so an out-of-sample segment is
+    run as [warm-up bars] + [test bars] in one pass and only the tail is
+    scored. The strategy is allowed to SEE the warm-up bars (they are its own
+    past); what it must never see is a bar that was used to select it, which
+    is the caller's job to arrange. Setting this to 0 scores everything.
+    """
     meta = meta if meta is not None else load_meta()
     info = meta[symbol]
     if bars is None:
@@ -93,14 +102,28 @@ def run_variant(
     )
     result = engine.run(list(bars))
 
-    equity = [p.equity for p in result.equity_curve]
+    full_equity = [p.equity for p in result.equity_curve]
+    equity = full_equity[evaluate_from:]
     returns = [(b / a - 1) for a, b in zip(equity, equity[1:]) if a != 0]
-    closed = [t.pnl for t in result.trades if t.pnl is not None]
-    years = max((bars[-1].timestamp - bars[0].timestamp).days / 365.25, 0.0)
+
+    # A trade is scored in the window it was ENTERED in, so a position carried
+    # across the boundary belongs to the warm-up window, not this one.
+    scored_from = bars[evaluate_from].timestamp if evaluate_from < len(bars) else None
+    scored_trades = [
+        t for t in result.trades
+        if t.pnl is not None and (scored_from is None or t.entered_at >= scored_from)
+    ]
+    closed = [t.pnl for t in scored_trades]
+    span = bars[evaluate_from:] or bars
+    years = max((span[-1].timestamp - span[0].timestamp).days / 365.25, 0.0)
     pf = profit_factor(closed)
 
+    # The capital the SCORED window actually started with -- for a walk-forward
+    # segment that is the equity carried in, not the original stake.
+    base_capital = equity[0] if equity else initial_capital
+
     reasons: dict[str, int] = {}
-    for t in result.trades:
+    for t in scored_trades:
         if t.exit_price is not None:
             reasons[t.exit_reason or "none"] = reasons.get(t.exit_reason or "none", 0) + 1
 
@@ -108,13 +131,13 @@ def run_variant(
         symbol=symbol,
         label=label,
         trades=len(closed),
-        cagr_pct=cagr_pct(initial_capital, result.final_equity, years) if years else 0.0,
+        cagr_pct=cagr_pct(base_capital, result.final_equity, years) if years else 0.0,
         sharpe=sharpe_ratio(returns),
         max_drawdown_pct=max_drawdown_pct(equity),
         profit_factor=None if pf == float("inf") else pf,
         win_rate_pct=win_rate_pct(closed),
         final_equity=result.final_equity,
-        initial_capital=initial_capital,
+        initial_capital=base_capital,
         total_cost=result.total_transaction_cost,
         equity_curve=equity,
         returns=returns,
