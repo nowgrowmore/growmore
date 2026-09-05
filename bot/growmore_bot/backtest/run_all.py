@@ -41,6 +41,7 @@ from growmore_bot.risk.wrapper import build_risk_managed
 from growmore_bot.strategies.base import Strategy
 from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
 from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
+from growmore_bot.strategies.ensemble_trend import EnsembleTrendStrategy
 from growmore_bot.strategies.macd_trend import MacdTrendStrategy
 from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy
 from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
@@ -237,6 +238,21 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
                 ("regime_switch", version, params, partial(RegimeSwitchStrategy, **params))
             )
 
+    # Multi-lookback trend ensemble. Only TWO variants deliberately: the
+    # deflated-Sharpe result (docs/technical-debt.md) says every extra grid
+    # entry raises the bar the eventual winner has to clear, and the whole
+    # point of an ensemble is to stop choosing a lookback -- adding a dozen
+    # ensemble configurations would reintroduce the selection problem it
+    # exists to avoid.
+    for min_agreement in (3, 4):
+        params = {"min_agreement": min_agreement}
+        grid.append((
+            "ensemble_trend",
+            f"macd5-agree{min_agreement}",
+            params,
+            partial(EnsembleTrendStrategy, **params),
+        ))
+
     # Risk-managed variants: the SAME entry rules as above, plus an ATR stop
     # and a Chandelier trail. Donchian is the deliberate first subject --
     # a breakout system without a stop is the textbook case of a strategy
@@ -251,6 +267,19 @@ def build_strategy_grid() -> list[tuple[str, str, dict, Callable[[], Strategy]]]
         ("macd_trend", {"fast_period": 5, "slow_period": 13, "signal_period": 5}, 3.0, None),
         ("macd_trend", {"fast_period": 12, "slow_period": 26, "signal_period": 9}, 2.0, 3.0),
     ]
+    # The ensemble deserves the stops too -- it is the combination, not
+    # either piece alone, that the evidence so far points at.
+    ensemble_risk = {
+        "inner_strategy": "ensemble_trend",
+        "inner_params": {"min_agreement": 3},
+        "atr_period": 14,
+        "initial_stop_atr": 2.0,
+        "trail_atr": 3.0,
+    }
+    grid.append((
+        "risk_managed", "ensemble_trend-agree3-stop2-trail3",
+        ensemble_risk, partial(build_risk_managed, ensemble_risk),
+    ))
     for inner_name, inner_params, stop_atr, trail in risk_variants:
         params = {
             "inner_strategy": inner_name,

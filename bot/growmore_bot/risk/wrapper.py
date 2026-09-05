@@ -196,6 +196,9 @@ _INNER_BUILDERS = {
     "macd_trend": lambda p: __import__(
         "growmore_bot.strategies.macd_trend", fromlist=["x"]
     ).MacdTrendStrategy(**p),
+    "ensemble_trend": lambda p: __import__(
+        "growmore_bot.strategies.ensemble_trend", fromlist=["x"]
+    ).EnsembleTrendStrategy(**p),
     "bollinger_reversion": lambda p: __import__(
         "growmore_bot.strategies.bollinger_reversion", fromlist=["x"]
     ).BollingerReversionStrategy(**p),

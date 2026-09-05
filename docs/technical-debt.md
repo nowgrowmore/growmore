@@ -1,5 +1,29 @@
 # Technical Debt / Known Limitations
 
+- **(2026-09-05) The multi-lookback trend ensemble, WITH stops, is the only result in the sweep
+  that is statistically significant.** `EnsembleTrendStrategy` runs five MACD speeds (5/13/5 through
+  26/52/18) and acts on their majority vote, so there is no lookback to select and therefore no
+  selection to be biased by. Wrapped in the ATR risk layer on Gold Mini it posts **Sharpe 1.77, max
+  drawdown 10.1%, CAGR 22.0% over 49 trades — and DSR 0.95**, the only entry in a 216-run sweep to
+  clear the conventional significance bar.
+
+  What makes that interesting is that **neither half is best on its own**. The bare ensemble on Gold
+  Mini scores Sharpe 0.98 with a 29.2% drawdown — clearly *worse* than the single best MACD variant
+  (1.42 / 19.1%), exactly as expected: an ensemble trades away the lucky tail. Bare MACD with stops
+  reaches 1.68 / 8.8% but only DSR 0.92. It is the combination that wins, and it wins on the metric
+  that accounts for how many things were tried.
+
+  Two design details worth keeping. **Votes are read from each member's STATE (macd vs its signal
+  line), not from the BUY/SELL events it emits** — a first implementation used events and never
+  traded at all, because a MACD member only speaks on a crossing and in a smooth sustained trend it
+  crosses once before the ensemble is warm and then stays silent forever. And **the member speeds
+  must be well spread**: with clustered speeds (2/3/2, 3/5/2, 5/9/3) every member flips on the same
+  bar and the vote adds nothing, whereas the shipped speeds defect in sequence on a pullback (2 of 5
+  on the first down bar, majority on the second), which is the entire point.
+
+  Only two ensemble variants are in the grid, deliberately. Every additional variant raises the
+  selection-luck bar the eventual winner has to clear, and adding a dozen ensemble configurations
+  would reintroduce precisely the problem the ensemble exists to avoid.
 - **(2026-09-05) Deflated Sharpe: almost nothing in the sweep is statistically distinguishable from
   selection luck.** `research/validation/deflate_sweep.py` applies Bailey & Lopez de Prado's
   Deflated Sharpe Ratio to the stored runs. The sweep is now 24 variants x 8 instruments = **192

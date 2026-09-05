@@ -181,6 +181,7 @@ def run_all_enabled_configs(
     from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
     from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
     from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
+    from growmore_bot.strategies.ensemble_trend import EnsembleTrendStrategy
     from growmore_bot.strategies.macd_trend import MacdTrendStrategy
     from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy
     from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
@@ -194,6 +195,7 @@ def run_all_enabled_configs(
         "donchian_breakout": lambda params: DonchianBreakoutStrategy(**params),
         "rsi_mean_reversion": lambda params: RsiMeanReversionStrategy(**params),
         "macd_trend": lambda params: MacdTrendStrategy(**params),
+        "ensemble_trend": lambda params: EnsembleTrendStrategy(**params),
         "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
         "regime_switch": lambda params: RegimeSwitchStrategy(**params),
         "vwap_session_bounce": lambda params: VwapSessionBounceStrategy(**params),
