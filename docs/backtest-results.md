@@ -1,5 +1,38 @@
 # Backtest Results — Strategy/Parameter Sweep (corrected 2026-09-04)
 
+> **⚠️ The CAGR column below ranks LEVERAGE as much as edge — read this before acting on it
+> (found 2026-09-05).** The engine trades exactly 1 lot per signal against one flat ₹5,00,000 of
+> capital for every instrument, but MCX lot notionals span 44x: Crude Oil Mini is ₹0.78 lakh a lot
+> while Copper is ₹34.3 lakh. So this sweep silently ran **0.16x leverage on Crude Oil Mini and
+> 6.86x on Copper**. Dividing each result by its own leverage (run
+> `python -m research.capital.admission --from-db` for the current table) re-states the published
+> top five as return per unit of notional:
+>
+> | Published | Headline CAGR | Leverage | Per unit notional | Sharpe |
+> | --- | --- | --- | --- | --- |
+> | #1 MACD(5,13,5) / GOLDM | 21.9% | 3.06x | 7.2% | 1.38 |
+> | #2 Regime-Switch / COPPER | 27.1% | 6.86x | **4.0%** | 1.17 |
+> | #3 MACD(5,13,5) / SILVERM | 24.4% | 2.39x | 10.2% | 1.17 |
+> | #4 MACD(12,26,9) / SILVERM | 25.4% | 2.39x | **10.6%** | 1.15 |
+> | #5 MACD(12,26,9) / COPPER | 33.0% | 6.86x | **4.8%** | 0.99 |
+> | *(not in the top 5)* MACD(12,26,9) / ALUMINI | 6.8% | 0.70x | **9.7%** | 1.06 |
+>
+> So **#5's headline 33.0% — the highest raw growth in the table — is the WORST of the five on an
+> equal-risk basis**, and Aluminium Mini, dismissed below as "a notional-size effect", beats three
+> of the top five. Note that `sharpe_ratio` was the honest column all along: Sharpe is
+> leverage-invariant, CAGR is not, and the composite ranking mixed the two. Two results the
+> leverage-free view surfaces that this table buries entirely: `regime_switch
+> (adx14-macd5135-vwap_ema) / ALUMINI` at 13.6% per unit notional with **Sharpe 1.61 and a 3.4% max
+> drawdown** over 32 trades — the best risk-adjusted result anywhere in the sweep, and a direct
+> counterexample to `docs/goldmini-regime-switch-results.md`'s verdict, which tested Gold Mini only;
+> and RSI(7,30/70) / NICKEL at 22.9% per unit notional, though on a poor Sharpe of 0.51.
+>
+> Dividing CAGR by leverage is a first-order correction, not a substitute for the real fix: re-run
+> the sweep with `initial_capital` set per instrument to its own lot notional. Treat every CAGR
+> below as provisional until that lands. The multiple-comparisons caveat at the bottom of this doc
+> applies to the re-stated numbers exactly as it did to the originals.
+
+
 > **Re-run 2026-09-04 after fixing the bugs described in `docs/technical-debt.md`** — most
 > significantly, `run_all.py` sharing one stateful strategy instance across every instrument in a
 > sweep (corrupting every commodity after the first one processed in any prior run), plus the frozen

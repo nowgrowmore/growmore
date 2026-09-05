@@ -32,36 +32,23 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from growmore_bot.indicators import AtrCalculator
+from growmore_bot.indicators import WilderSmoother as _WilderSmoother
 from growmore_bot.strategies.base import Signal, Strategy
 from growmore_bot.strategies.macd_trend import MacdTrendStrategy
 from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
 from growmore_bot.strategies.vwap_ema_reversion import VwapEmaReversionStrategy
 
 
-class _WilderSmoother:
-    """`ewm(alpha=1/period, adjust=False)` recurrence: seeded with the first
-    value, then `value = alpha*x + (1-alpha)*value` from there. Returns
-    `None` (not a real number) until `period` values have been fed, mirroring
-    pandas' `min_periods=period` masking.
-    """
-
-    def __init__(self, period: int) -> None:
-        self._alpha = 1.0 / period
-        self._period = period
-        self._value: Optional[float] = None
-        self._count = 0
-
-    def update(self, x: float) -> Optional[float]:
-        self._count += 1
-        self._value = x if self._value is None else self._alpha * x + (1 - self._alpha) * self._value
-        return self._value if self._count >= self._period else None
-
-
 class _AdxCalculator:
     def __init__(self, period: int = 14) -> None:
         self._period = period
         self._prev_bar: Any = None
-        self._tr_smoother = _WilderSmoother(period)
+        # The smoothed True Range this needs for +DI/-DI *is* Wilder ATR --
+        # it used to be computed here and thrown away. Sharing one
+        # AtrCalculator means ADX and the ATR the risk layer sizes stops
+        # from can never drift apart.
+        self._atr = AtrCalculator(period)
         self._plus_dm_smoother = _WilderSmoother(period)
         self._minus_dm_smoother = _WilderSmoother(period)
         self._dx_smoother = _WilderSmoother(period)
@@ -69,21 +56,20 @@ class _AdxCalculator:
     def update(self, bar: Any) -> Optional[float]:
         prev = self._prev_bar
         if prev is None:
-            # First bar ever: no prior close/high/low to diff against.
-            # Matches the reference calc's NaN-skipping True range (only
-            # high-low survives) and NaN-comparisons-are-False +DM/-DM (0).
-            tr = bar.high - bar.low
+            # First bar ever: no prior high/low to diff against. Matches the
+            # reference calc's NaN-comparisons-are-False +DM/-DM (0); the
+            # True range's own first-bar convention lives in
+            # growmore_bot.indicators.true_range.
             plus_dm = 0.0
             minus_dm = 0.0
         else:
-            tr = max(bar.high - bar.low, abs(bar.high - prev.close), abs(bar.low - prev.close))
             up_move = bar.high - prev.high
             down_move = prev.low - bar.low
             plus_dm = up_move if (up_move > down_move and up_move > 0) else 0.0
             minus_dm = down_move if (down_move > up_move and down_move > 0) else 0.0
         self._prev_bar = bar
 
-        tr_smooth = self._tr_smoother.update(tr)
+        tr_smooth = self._atr.update(bar)
         plus_dm_smooth = self._plus_dm_smoother.update(plus_dm)
         minus_dm_smooth = self._minus_dm_smoother.update(minus_dm)
 
@@ -95,6 +81,14 @@ class _AdxCalculator:
         di_sum = plus_di + minus_di
         dx = 0.0 if di_sum == 0 else 100 * abs(plus_di - minus_di) / di_sum
         return self._dx_smoother.update(dx)
+
+    @property
+    def atr(self) -> Optional[float]:
+        """Wilder ATR, in price units -- the same smoothed True Range this
+        calculator already needs for +DI/-DI. Surfaced so the risk layer can
+        size stops off it without recomputing (or, worse, recomputing it with
+        a subtly different smoothing convention)."""
+        return self._atr.value
 
 
 _RANGING_STRATEGY_BUILDERS = {
@@ -146,6 +140,7 @@ class RegimeSwitchStrategy(Strategy):
     def debug_state(self) -> dict[str, Optional[float]]:
         return {
             "adx": self._last_adx,
+            "atr": self._adx.atr,
             "regime": self._regime,
             **self._macd.debug_state(),
             **self._ranging.debug_state(),
