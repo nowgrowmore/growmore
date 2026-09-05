@@ -1,0 +1,211 @@
+symbol,security_id,company_name,nse_industry,is_defence,fno_lot_size
+360ONE,13061,360 ONE WAM Ltd.,Financial Services,false,500
+ABB,13,ABB India Ltd.,Capital Goods,false,125
+ABCAPITAL,21614,Aditya Birla Capital Ltd.,Financial Services,false,3100
+ADANIENSOL,10217,Adani Energy Solutions Ltd.,Power,false,675
+ADANIENT,25,Adani Enterprises Ltd.,Metals & Mining,false,309
+ADANIGREEN,3563,Adani Green Energy Ltd.,Power,false,600
+ADANIPORTS,15083,Adani Ports and Special Economic Zone Ltd.,Services,false,475
+ADANIPOWER,17388,Adani Power Ltd.,Power,false,3550
+ALKEM,11703,Alkem Laboratories Ltd.,Healthcare,false,125
+AMBER,1185,Amber Enterprises India Ltd.,Consumer Durables,false,100
+AMBUJACEM,1270,Ambuja Cements Ltd.,Construction Materials,false,1200
+ANGELONE,324,Angel One Ltd.,Financial Services,false,2500
+APLAPOLLO,25780,APL Apollo Tubes Ltd.,Capital Goods,false,350
+APOLLOHOSP,157,Apollo Hospitals Enterprise Ltd.,Healthcare,false,125
+ASHOKLEY,212,Ashok Leyland Ltd.,Capital Goods,false,5000
+ASIANPAINT,236,Asian Paints Ltd.,Consumer Durables,false,250
+ASTRAL,14418,Astral Ltd.,Capital Goods,false,425
+ATHERENERG,757645,Ather Energy Ltd.,Automobile and Auto Components,false,375
+AUBANK,21238,AU Small Finance Bank Ltd.,Financial Services,false,1000
+AUROPHARMA,275,Aurobindo Pharma Ltd.,Healthcare,false,550
+AXISBANK,5900,Axis Bank Ltd.,Financial Services,false,625
+BAJAJ-AUTO,16669,Bajaj Auto Ltd.,Automobile and Auto Components,false,75
+BAJAJFINSV,16675,Bajaj Finserv Ltd.,Financial Services,false,300
+BAJAJHLDNG,305,Bajaj Holdings & Investment Ltd.,Financial Services,false,75
+BAJFINANCE,317,Bajaj Finance Ltd.,Financial Services,false,750
+BANDHANBNK,2263,Bandhan Bank Ltd.,Financial Services,false,3600
+BANKBARODA,4668,Bank of Baroda,Financial Services,false,2925
+BANKINDIA,4745,Bank of India,Financial Services,false,5200
+BDL,2144,Bharat Dynamics Ltd.,Capital Goods,true,425
+BEL,383,Bharat Electronics Ltd.,Capital Goods,true,1425
+BHARATFORG,422,Bharat Forge Ltd.,Automobile and Auto Components,true,500
+BHARTIARTL,10604,Bharti Airtel Ltd.,Telecommunication,false,475
+BHEL,438,Bharat Heavy Electricals Ltd.,Capital Goods,false,2625
+BIOCON,11373,Biocon Ltd.,Healthcare,false,2500
+BLUESTARCO,8311,Blue Star Ltd.,Consumer Durables,false,325
+BOSCHLTD,2181,Bosch Ltd.,Automobile and Auto Components,false,25
+BPCL,526,Bharat Petroleum Corporation Ltd.,Oil Gas & Consumable Fuels,false,1975
+BRITANNIA,547,Britannia Industries Ltd.,Fast Moving Consumer Goods,false,125
+BSE,19585,BSE Ltd.,Financial Services,false,200
+CAMS,342,Computer Age Management Services Ltd.,Financial Services,false,825
+CANBK,10794,Canara Bank,Financial Services,false,6750
+CDSL,21174,Central Depository Services (India) Ltd.,Financial Services,false,475
+CGPOWER,760,CG Power and Industrial Solutions Ltd.,Capital Goods,false,850
+CHOLAFIN,19257,Cholamandalam Investment and Finance Company Ltd.,Financial Services,false,625
+CIPLA,694,Cipla Ltd.,Healthcare,false,425
+COALINDIA,20374,Coal India Ltd.,Oil Gas & Consumable Fuels,false,1350
+COCHINSHIP,21508,Cochin Shipyard Ltd.,Capital Goods,true,400
+COFORGE,11543,Coforge Ltd.,Information Technology,false,475
+COLPAL,15141,Colgate Palmolive (India) Ltd.,Fast Moving Consumer Goods,false,275
+CONCOR,4749,Container Corporation of India Ltd.,Services,false,1250
+CROMPTON,17094,Crompton Greaves Consumer Electricals Ltd.,Consumer Durables,false,2150
+CUMMINSIND,1901,Cummins India Ltd.,Capital Goods,false,200
+DABUR,772,Dabur India Ltd.,Fast Moving Consumer Goods,false,1250
+DELHIVERY,9599,Delhivery Ltd.,Services,false,2075
+DIVISLAB,10940,Divi's Laboratories Ltd.,Healthcare,false,100
+DIXON,21690,Dixon Technologies (India) Ltd.,Consumer Durables,false,50
+DLF,14732,DLF Ltd.,Realty,false,950
+DMART,19913,Avenue Supermarts Ltd.,Consumer Services,false,150
+DRREDDY,881,Dr. Reddy's Laboratories Ltd.,Healthcare,false,625
+EICHERMOT,910,Eicher Motors Ltd.,Automobile and Auto Components,false,100
+ETERNAL,5097,Eternal Ltd.,Consumer Services,false,2425
+FEDERALBNK,1023,Federal Bank Ltd.,Financial Services,false,2500
+FORCEMOT,11573,Force Motors Ltd.,Automobile and Auto Components,false,25
+FORTIS,14592,Fortis Healthcare Ltd.,Healthcare,false,775
+GAIL,4717,GAIL (India) Ltd.,Oil Gas & Consumable Fuels,false,3550
+GLENMARK,7406,Glenmark Pharmaceuticals Ltd.,Healthcare,false,375
+GMRAIRPORT,13528,GMR Airports Ltd.,Services,false,6975
+GODFRYPHLP,1181,Godfrey Phillips India Ltd.,Fast Moving Consumer Goods,false,275
+GODREJCP,10099,Godrej Consumer Products Ltd.,Fast Moving Consumer Goods,false,500
+GODREJPROP,17875,Godrej Properties Ltd.,Realty,false,325
+GRASIM,1232,Grasim Industries Ltd.,Construction Materials,false,250
+GVT&D,16783,GE Vernova T&D India Ltd.,Capital Goods,false,125
+HAL,2303,Hindustan Aeronautics Ltd.,Capital Goods,true,150
+HAVELLS,9819,Havells India Ltd.,Consumer Durables,false,500
+HCLTECH,7229,HCL Technologies Ltd.,Information Technology,false,400
+HDFCAMC,4244,HDFC Asset Management Company Ltd.,Financial Services,false,300
+HDFCBANK,1333,HDFC Bank Ltd.,Financial Services,false,650
+HDFCLIFE,467,HDFC Life Insurance Company Ltd.,Financial Services,false,1100
+HEROMOTOCO,1348,Hero MotoCorp Ltd.,Automobile and Auto Components,false,150
+HINDALCO,1363,Hindalco Industries Ltd.,Metals & Mining,false,700
+HINDPETRO,1406,Hindustan Petroleum Corporation Ltd.,Oil Gas & Consumable Fuels,false,2025
+HINDUNILVR,1394,Hindustan Unilever Ltd.,Fast Moving Consumer Goods,false,300
+HINDZINC,1424,Hindustan Zinc Ltd.,Metals & Mining,false,1225
+HYUNDAI,25844,Hyundai Motor India Ltd.,Automobile and Auto Components,false,275
+ICICIBANK,4963,ICICI Bank Ltd.,Financial Services,false,700
+ICICIGI,21770,ICICI Lombard General Insurance Company Ltd.,Financial Services,false,325
+ICICIPRULI,18652,ICICI Prudential Life Insurance Company Ltd.,Financial Services,false,925
+IDEA,14366,Vodafone Idea Ltd.,Telecommunication,false,71475
+IDFCFIRSTB,11184,IDFC First Bank Ltd.,Financial Services,false,9275
+IEX,220,Indian Energy Exchange Ltd.,Financial Services,false,4350
+INDHOTEL,1512,Indian Hotels Co. Ltd.,Consumer Services,false,1000
+INDIANB,14309,Indian Bank,Financial Services,false,1000
+INDIGO,11195,InterGlobe Aviation Ltd.,Services,false,150
+INDUSINDBK,5258,IndusInd Bank Ltd.,Financial Services,false,700
+INDUSTOWER,29135,Indus Towers Ltd.,Telecommunication,false,1700
+INFY,1594,Infosys Ltd.,Information Technology,false,400
+INOXWIND,7852,Inox Wind Ltd.,Capital Goods,false,6400
+IOC,1624,Indian Oil Corporation Ltd.,Oil Gas & Consumable Fuels,false,4875
+IREDA,20261,Indian Renewable Energy Development Agency Ltd.,Financial Services,false,4525
+IRFC,2029,Indian Railway Finance Corporation Ltd.,Financial Services,false,5425
+ITC,1660,ITC Ltd.,Fast Moving Consumer Goods,false,1725
+JINDALSTEL,6733,Jindal Steel Ltd.,Metals & Mining,false,625
+JIOFIN,18143,Jio Financial Services Ltd.,Financial Services,false,2350
+JSWENERGY,17869,JSW Energy Ltd.,Power,false,1075
+JSWSTEEL,11723,JSW Steel Ltd.,Metals & Mining,false,675
+JUBLFOOD,18096,Jubilant Foodworks Ltd.,Consumer Services,false,1250
+KALYANKJIL,2955,Kalyan Jewellers India Ltd.,Consumer Durables,false,1350
+KAYNES,12092,Kaynes Technology India Ltd.,Capital Goods,false,150
+KEI,13310,KEI Industries Ltd.,Capital Goods,false,175
+KFINTECH,13359,Kfin Technologies Ltd.,Financial Services,false,575
+KOTAKBANK,1922,Kotak Mahindra Bank Ltd.,Financial Services,false,2000
+KPITTECH,9683,KPIT Technologies Ltd.,Information Technology,false,775
+LAURUSLABS,19234,Laurus Labs Ltd.,Healthcare,false,850
+LICHSGFIN,1997,LIC Housing Finance Ltd.,Financial Services,false,1000
+LICI,9480,Life Insurance Corporation of India,Financial Services,false,1400
+LODHA,3220,Lodha Developers Ltd.,Realty,false,625
+LT,11483,Larsen & Toubro Ltd.,Construction,false,175
+LTF,24948,L&T Finance Ltd.,Financial Services,false,2250
+LTM,17818,LTM Ltd.,Information Technology,false,150
+LUPIN,10440,Lupin Ltd.,Healthcare,false,425
+M&M,2031,Mahindra & Mahindra Ltd.,Automobile and Auto Components,false,200
+MAHABANK,11377,Bank of Maharashtra,Financial Services,false,6500
+MANAPPURAM,19061,Manappuram Finance Ltd.,Financial Services,false,3000
+MANKIND,15380,Mankind Pharma Ltd.,Healthcare,false,250
+MARICO,4067,Marico Ltd.,Fast Moving Consumer Goods,false,1200
+MARUTI,10999,Maruti Suzuki India Ltd.,Automobile and Auto Components,false,50
+MAXHEALTH,22377,Max Healthcare Institute Ltd.,Healthcare,false,525
+MAZDOCK,509,Mazagoan Dock Shipbuilders Ltd.,Capital Goods,true,225
+MCX,31181,Multi Commodity Exchange of India Ltd.,Financial Services,false,225
+MFSL,2142,Max Financial Services Ltd.,Financial Services,false,400
+MOTHERSON,25510,Samvardhana Motherson International Ltd.,Automobile and Auto Components,false,6150
+MOTILALOFS,14947,Motilal Oswal Financial Services Ltd.,Financial Services,false,775
+MPHASIS,4503,MphasiS Ltd.,Information Technology,false,275
+MUTHOOTFIN,23650,Muthoot Finance Ltd.,Financial Services,false,275
+NAM-INDIA,357,Nippon Life India Asset Management Ltd.,Financial Services,false,625
+NATIONALUM,6364,National Aluminium Co. Ltd.,Metals & Mining,false,1875
+NAUKRI,13751,Info Edge (India) Ltd.,Consumer Services,false,550
+NBCC,31415,NBCC (India) Ltd.,Construction,false,6500
+NESTLEIND,17963,Nestle India Ltd.,Fast Moving Consumer Goods,false,500
+NHPC,17400,NHPC Ltd.,Power,false,6950
+NMDC,15332,NMDC Ltd.,Metals & Mining,false,6750
+NTPC,11630,NTPC Ltd.,Power,false,1500
+NYKAA,6545,FSN E-Commerce Ventures Ltd.,Consumer Services,false,3125
+OBEROIRLTY,20242,Oberoi Realty Ltd.,Realty,false,350
+OFSS,10738,Oracle Financial Services Software Ltd.,Information Technology,false,100
+OIL,17438,Oil India Ltd.,Oil Gas & Consumable Fuels,false,1400
+ONGC,2475,Oil & Natural Gas Corporation Ltd.,Oil Gas & Consumable Fuels,false,2250
+PAGEIND,14413,Page Industries Ltd.,Textiles,false,20
+PATANJALI,17029,Patanjali Foods Ltd.,Fast Moving Consumer Goods,false,1075
+PAYTM,6705,One 97 Communications Ltd.,Financial Services,false,725
+PERSISTENT,18365,Persistent Systems Ltd.,Information Technology,false,125
+PETRONET,11351,Petronet LNG Ltd.,Oil Gas & Consumable Fuels,false,1900
+PFC,14299,Power Finance Corporation Ltd.,Financial Services,false,1300
+PGEL,25358,PG Electroplast Ltd.,Consumer Durables,false,950
+PHOENIXLTD,14552,Phoenix Mills Ltd.,Realty,false,350
+PIDILITIND,2664,Pidilite Industries Ltd.,Chemicals,false,500
+PIIND,24184,PI Industries Ltd.,Chemicals,false,175
+PNB,10666,Punjab National Bank,Financial Services,false,8000
+PNBHOUSING,18908,PNB Housing Finance Ltd.,Financial Services,false,650
+POLICYBZR,6656,PB Fintech Ltd.,Financial Services,false,350
+POLYCAB,9590,Polycab India Ltd.,Capital Goods,false,125
+POWERGRID,14977,Power Grid Corporation of India Ltd.,Power,false,1900
+POWERINDIA,18457,Hitachi Energy India Ltd.,Capital Goods,false,25
+PREMIERENE,25049,Premier Energies Ltd.,Capital Goods,false,650
+PRESTIGE,20302,Prestige Estates Projects Ltd.,Realty,false,450
+RADICO,10990,Radico Khaitan Ltd,Fast Moving Consumer Goods,false,150
+RBLBANK,18391,RBL Bank Ltd.,Financial Services,false,3175
+RECLTD,15355,REC Ltd.,Financial Services,false,1575
+RELIANCE,2885,Reliance Industries Ltd.,Oil Gas & Consumable Fuels,false,500
+RVNL,9552,Rail Vikas Nigam Ltd.,Construction,false,1925
+SAGILITY,27052,Sagility Ltd.,Information Technology,false,12000
+SAIL,2963,Steel Authority of India Ltd.,Metals & Mining,false,4700
+SBICARD,17971,SBI Cards and Payment Services Ltd.,Financial Services,false,800
+SBILIFE,21808,SBI Life Insurance Company Ltd.,Financial Services,false,375
+SBIN,3045,State Bank of India,Financial Services,false,750
+SHREECEM,3103,Shree Cement Ltd.,Construction Materials,false,25
+SHRIRAMFIN,4306,Shriram Finance Ltd.,Financial Services,false,825
+SIEMENS,3150,Siemens Ltd.,Capital Goods,false,175
+SOLARINDS,13332,Solar Industries India Ltd.,Chemicals,true,50
+SONACOMS,4684,Sona BLW Precision Forgings Ltd.,Automobile and Auto Components,false,1225
+SRF,3273,SRF Ltd.,Chemicals,false,200
+SUNPHARMA,3351,Sun Pharmaceutical Industries Ltd.,Healthcare,false,350
+SUPREMEIND,3363,Supreme Industries Ltd.,Capital Goods,false,175
+SUZLON,12018,Suzlon Energy Ltd.,Capital Goods,false,12700
+SWIGGY,27066,Swiggy Ltd.,Consumer Services,false,1825
+TATACONSUM,3432,Tata Consumer Products Ltd.,Fast Moving Consumer Goods,false,550
+TATAELXSI,3411,Tata Elxsi Ltd.,Information Technology,false,125
+TATAPOWER,3426,Tata Power Co. Ltd.,Power,false,1450
+TATASTEEL,3499,Tata Steel Ltd.,Metals & Mining,false,2750
+TCS,11536,Tata Consultancy Services Ltd.,Information Technology,false,225
+TECHM,13538,Tech Mahindra Ltd.,Information Technology,false,600
+TIINDIA,312,Tube Investments of India Ltd.,Automobile and Auto Components,false,200
+TITAN,3506,Titan Company Ltd.,Consumer Durables,false,175
+TMPV,3456,Tata Motors Passenger Vehicles Ltd.,Automobile and Auto Components,false,1600
+TORNTPHARM,3518,Torrent Pharmaceuticals Ltd.,Healthcare,false,125
+TRENT,1964,Trent Ltd.,Consumer Services,false,225
+TVSMOTOR,8479,TVS Motor Company Ltd.,Automobile and Auto Components,false,175
+ULTRACEMCO,11532,UltraTech Cement Ltd.,Construction Materials,false,50
+UNIONBANK,10753,Union Bank of India,Financial Services,false,4425
+UNITDSPR,10447,United Spirits Ltd.,Fast Moving Consumer Goods,false,400
+UNOMINDA,14154,UNO Minda Ltd.,Automobile and Auto Components,false,550
+UPL,11287,UPL Ltd.,Chemicals,false,1355
+VBL,18921,Varun Beverages Ltd.,Fast Moving Consumer Goods,false,1275
+VEDL,3063,Vedanta Ltd.,Metals & Mining,false,1150
+VMM,27969,Vishal Mega Mart Ltd.,Consumer Services,false,4850
+VOLTAS,3718,Voltas Ltd.,Consumer Durables,false,375
+WAAREEENER,25907,Waaree Energies Ltd.,Capital Goods,false,175
+WIPRO,3787,Wipro Ltd.,Information Technology,false,3000
+YESBANK,11915,Yes Bank Ltd.,Financial Services,false,31100
+ZYDUSLIFE,7929,Zydus Lifesciences Ltd.,Healthcare,false,900

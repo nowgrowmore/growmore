@@ -38,4 +38,51 @@ def leverage_at_1_lot(capital: float, price: float, lot_size: int) -> float:
     return notional_per_lot(price, lot_size) / float(capital)
 
 
-__all__ = ["notional_per_lot", "leverage_at_1_lot"]
+def shares_for_capital(price: float, capital: float) -> int:
+    """How many shares of a stock at `price` a `capital` budget buys.
+
+    The cash-equity analogue of a futures lot: `BacktestEngine` sizes as
+    `qty = (signal.size or 1) * lot_size`, so this count goes in as
+    `lot_size` and every stock then runs at ~1x leverage regardless of share
+    price -- which is what makes a CAGR column comparable across 210 names
+    priced from Rs 15 to Rs 1,50,000.
+
+    `price` must be the FIRST bar's close, never a later one: you capitalise
+    an account at the start of the period, and any later price is lookahead.
+    That is the same rule `growmore_bot.backtest.run_all.capital_for_run`
+    documents for MCX.
+
+    The `max(1, ...)` floor matters. A share costing more than the whole
+    budget (MRF trades near Rs 1,50,000) would otherwise round to zero and
+    drop out of the study, biasing the universe toward cheap stocks. One
+    share is still exactly 1x leverage -- just against a larger account.
+    """
+    if price <= 0:
+        raise ValueError("price must be positive")
+    if capital <= 0:
+        raise ValueError("capital must be positive")
+    return max(1, int(capital // price))
+
+
+def rounding_drag(price: float, shares: int, capital: float) -> float:
+    """Fraction of `capital` left idle because shares are indivisible.
+
+    This is the "1 lot regardless of capital" bias of
+    docs/technical-debt.md in its equity form, made measurable. It is
+    negligible for cheap stocks and real for expensive ones (3 shares of a
+    Rs 1,50,000 stock against a Rs 5,00,000 budget leaves 10% idle, which
+    understates that stock's CAGR by a tenth). Clamped at zero, because the
+    `max(1, ...)` floor can deploy MORE than the budget -- a bigger account,
+    not negative drag.
+    """
+    if capital <= 0:
+        raise ValueError("capital must be positive")
+    return max(0.0, 1.0 - (float(price) * shares) / float(capital))
+
+
+__all__ = [
+    "notional_per_lot",
+    "leverage_at_1_lot",
+    "shares_for_capital",
+    "rounding_drag",
+]

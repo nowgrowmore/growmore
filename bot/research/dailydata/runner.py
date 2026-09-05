@@ -25,7 +25,7 @@ from growmore_bot.backtest.metrics import (
     win_rate_pct,
 )
 from growmore_bot.backtest.run_all import capital_for_run
-from growmore_bot.costs import DEFAULT_COST_MODEL
+from growmore_bot.costs import DEFAULT_COST_MODEL, CostModel
 from growmore_bot.strategies.registry import build_strategy
 from research.dailydata import cache
 from research.dailydata.fetch import load_meta
@@ -69,6 +69,8 @@ def run_variant(
     target_leverage: float = 1.0,
     meta: Optional[dict] = None,
     evaluate_from: int = 0,
+    cost_model: Optional[CostModel] = DEFAULT_COST_MODEL,
+    allow_shorts: bool = False,
 ) -> RunResult:
     """Backtest one (symbol, strategy, params) over the cached daily series.
 
@@ -97,8 +99,9 @@ def run_variant(
         strategy=build_strategy(strategy_name, params),
         initial_capital=initial_capital,
         lot_size=info["lot_size"],
-        cost_model=DEFAULT_COST_MODEL if with_costs else None,
+        cost_model=cost_model if with_costs else None,
         tick_size=float(info["tick_size"] or 0.0),
+        allow_shorts=allow_shorts,
     )
     result = engine.run(list(bars))
 

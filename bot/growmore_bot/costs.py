@@ -54,6 +54,11 @@ class CostModel:
     brokerage_pct: float = 0.0003
     exchange_txn_pct: float = 0.000026
     ctt_sell_pct: float = 0.0001
+    #: Securities Transaction Tax, charged on BOTH legs -- unlike
+    #: `ctt_sell_pct`, which is sell-only. Default 0.0 so every MCX
+    #: number ever published here is unchanged to the decimal; only
+    #: NSE_EQUITY_DELIVERY_COST_MODEL sets it.
+    stt_both_pct: float = 0.0
     stamp_buy_pct: float = 0.00002
     sebi_pct: float = 0.000002
     gst_pct: float = 0.18
@@ -64,6 +69,39 @@ class CostModel:
 #: Shared default so callers don't each construct their own and drift.
 DEFAULT_COST_MODEL = CostModel()
 
+#: NSE cash-equity DELIVERY costs (Dhan, checked 2026-09-05). Used only by
+#: the F&O-universe research in bot/research/fno/ -- the bot itself trades
+#: MCX and must keep DEFAULT_COST_MODEL.
+#:
+#: The one line that matters: **STT is 0.1% on BOTH legs**, where MCX pays
+#: CTT 0.01% on the sell alone. That is ~20bps a round trip against ~1bp,
+#: and against a config closing ~20 trades a year it is roughly 4%/yr of
+#: drag. Reusing DEFAULT_COST_MODEL for equities would understate the true
+#: cost by an order of magnitude and flatter every result.
+#:
+#: Slippage stays in TICKS rather than basis points, and that is more
+#: correct here than it is on MCX, not less: a Rs 15 F&O name genuinely has
+#: a Rs 0.05 spread, so a bps assumption would price cheap stocks as if
+#: they were as tight as a Rs 3,000 one.
+#:
+#: NOT modelled: the depository's ~Rs 15 per-scrip debit on each sell. It is
+#: a flat per-scrip charge that `round_trip_cost` has nowhere to put, and at
+#: Rs 5 lakh a position it is 0.3bps -- two orders of magnitude below STT.
+#: Recorded here rather than silently dropped.
+NSE_EQUITY_DELIVERY_COST_MODEL = CostModel(
+    brokerage_per_order=0.0,   # Dhan charges nothing for delivery equity
+    brokerage_pct=0.0,
+    stt_both_pct=0.001,        # 0.1%, buy AND sell -- the dominant charge
+    exchange_txn_pct=0.0000297,  # NSE 0.00297% of turnover
+    ctt_sell_pct=0.0,          # CTT is commodities only
+    stamp_buy_pct=0.00015,     # 0.015%, buy side only
+    sebi_pct=0.000001,         # Rs 10 per crore
+    gst_pct=0.18,              # on brokerage + exchange + SEBI only
+    slippage_ticks=2.0,
+    stop_slippage_ticks=2.0,
+)
+
+
 #: A model that charges nothing -- the explicit way to reproduce the
 #: pre-cost behaviour of every existing backtest, rather than passing None
 #: around and branching on it.
@@ -72,6 +110,7 @@ FREE_COST_MODEL = CostModel(
     brokerage_pct=0.0,
     exchange_txn_pct=0.0,
     ctt_sell_pct=0.0,
+    stt_both_pct=0.0,
     stamp_buy_pct=0.0,
     sebi_pct=0.0,
     gst_pct=0.0,
@@ -112,7 +151,9 @@ def leg_cost(notional: float, side: Side, model: CostModel = DEFAULT_COST_MODEL)
     gst = model.gst_pct * (brokerage + exchange + sebi)
     ctt = notional * model.ctt_sell_pct if side == "sell" else 0.0
     stamp = notional * model.stamp_buy_pct if side == "buy" else 0.0
-    return brokerage + exchange + sebi + gst + ctt + stamp
+    # STT, like CTT and stamp, is a tax and carries no GST.
+    stt = notional * model.stt_both_pct
+    return brokerage + exchange + sebi + gst + ctt + stamp + stt
 
 
 def slippage_cost(

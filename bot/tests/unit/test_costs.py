@@ -111,3 +111,90 @@ class TestSlippagePrice:
         stopped = slippage_price(100.0, "sell", tick_size=0.05, is_stop=True)
         assert stopped < normal
         assert stopped == pytest.approx(99.80)  # 4 ticks rather than 2
+
+
+# --- NSE cash-equity delivery costs -------------------------------------
+#
+# The MCX model and the equity model differ by an order of magnitude on the
+# charge that dominates a multi-week holding strategy: MCX pays CTT 0.01% on
+# the SELL leg only, cash equity pays STT 0.1% on BOTH legs. That is 20bps a
+# round trip against 1bp, and against a config closing ~20 trades a year it
+# is ~4%/yr of drag -- enough on its own to decide whether a trend system
+# beats buy-and-hold.
+
+from growmore_bot.costs import (  # noqa: E402
+    DEFAULT_COST_MODEL,
+    NSE_EQUITY_DELIVERY_COST_MODEL,
+)
+
+
+def test_stt_is_charged_on_both_legs_unlike_ctt():
+    model = CostModel(
+        brokerage_per_order=0.0, brokerage_pct=0.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.0, stamp_buy_pct=0.0, sebi_pct=0.0, gst_pct=0.0,
+        stt_both_pct=0.001, slippage_ticks=0.0, stop_slippage_ticks=0.0,
+    )
+    # 0.1% of 1,00,000 = Rs 100, on the buy AND on the sell.
+    assert leg_cost(100_000.0, "buy", model) == pytest.approx(100.0)
+    assert leg_cost(100_000.0, "sell", model) == pytest.approx(100.0)
+
+
+def test_stt_is_not_subject_to_gst_any_more_than_ctt_is():
+    # GST applies to brokerage + exchange + SEBI only. A pure-STT model with
+    # an 18% GST rate must still charge exactly the STT.
+    model = CostModel(
+        brokerage_per_order=0.0, brokerage_pct=0.0, exchange_txn_pct=0.0,
+        ctt_sell_pct=0.0, stamp_buy_pct=0.0, sebi_pct=0.0, gst_pct=0.18,
+        stt_both_pct=0.001, slippage_ticks=0.0, stop_slippage_ticks=0.0,
+    )
+    assert leg_cost(100_000.0, "buy", model) == pytest.approx(100.0)
+
+
+def test_the_mcx_model_is_unchanged_to_the_decimal_by_the_new_field():
+    # The control, in the Phase 0 sense: adding stt_both_pct must not move a
+    # single published MCX number. Its default is 0.0 and DEFAULT_COST_MODEL
+    # never sets it.
+    assert DEFAULT_COST_MODEL.stt_both_pct == 0.0
+    # Hand-computed, same arithmetic as test_leg_cost_* above.
+    notional = 100_000.0
+    brokerage = min(20.0, notional * 0.0003)          # 20.0 (the cap binds)
+    exchange = notional * 0.000026                    # 2.6
+    sebi = notional * 0.000002                        # 0.2
+    gst = 0.18 * (brokerage + exchange + sebi)        # 4.104
+    expected_buy = brokerage + exchange + sebi + gst + notional * 0.00002
+    assert leg_cost(notional, "buy", DEFAULT_COST_MODEL) == pytest.approx(expected_buy)
+
+
+def test_a_hand_computed_equity_round_trip():
+    model = NSE_EQUITY_DELIVERY_COST_MODEL
+    notional = 500_000.0
+    # Buy leg: STT 0.1% + exchange 0.00297% + stamp 0.015% + SEBI + GST.
+    stt = 500.0
+    exchange = notional * 0.0000297                   # 14.85
+    sebi = notional * 0.000001                        # 0.5
+    gst = 0.18 * (0.0 + exchange + sebi)              # brokerage is zero
+    stamp = notional * 0.00015                        # 75.0
+    assert leg_cost(notional, "buy", model) == pytest.approx(stt + exchange + sebi + gst + stamp)
+    # Sell leg: same, minus stamp (buy-only), and STT again.
+    assert leg_cost(notional, "sell", model) == pytest.approx(stt + exchange + sebi + gst)
+
+
+def test_equity_round_trip_is_dominated_by_stt():
+    # The claim that motivates the whole model: >80% of the statutory cost of
+    # a round trip is STT, and the round trip costs roughly 20bps.
+    notional = 500_000.0
+    model = NSE_EQUITY_DELIVERY_COST_MODEL
+    statutory = leg_cost(notional, "buy", model) + leg_cost(notional, "sell", model)
+    assert statutory / notional == pytest.approx(0.00223, abs=0.0002)
+    assert (2 * notional * model.stt_both_pct) / statutory > 0.8
+
+
+def test_equity_costs_are_an_order_of_magnitude_above_mcx_on_the_same_notional():
+    notional = 500_000.0
+    equity = leg_cost(notional, "buy", NSE_EQUITY_DELIVERY_COST_MODEL) + leg_cost(
+        notional, "sell", NSE_EQUITY_DELIVERY_COST_MODEL
+    )
+    mcx = leg_cost(notional, "buy", DEFAULT_COST_MODEL) + leg_cost(
+        notional, "sell", DEFAULT_COST_MODEL
+    )
+    assert equity > 5 * mcx
