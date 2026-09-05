@@ -322,6 +322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "(default 1.0, i.e. one lot exactly equals the account).",
     )
     parser.add_argument(
+        "--allow-shorts",
+        action="store_true",
+        help="Let a SELL while flat open a short position. Off by default so results stay "
+        "comparable with every previously stored run.",
+    )
+    parser.add_argument(
         "--no-costs",
         action="store_true",
         help="Skip the MCX transaction-cost/slippage model (reproduces pre-2026-09 results).",
@@ -388,6 +394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     lot_size=instrument.lot_size,
                     cost_model=None if args.no_costs else DEFAULT_COST_MODEL,
                     tick_size=float(instrument.tick_size or 0.0),
+                    allow_shorts=args.allow_shorts,
                 )
                 run_row = engine.run_and_persist(
                     bars,

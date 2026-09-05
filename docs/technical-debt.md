@@ -1,5 +1,39 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-05) Dhan's 5-year daily series overlaps TWO CONTRACT MONTHS at every
+  roll, and the wrong one was being kept.** Repeated dates in a single `security_id`'s history are
+  not redundant copies: for Gold Mini, **41 of 43 repeated dates carry different OHLC and different
+  volume**. 2022-10-09 returns one bar on 5,603 lots and another on 15,000, about 1% apart in price
+  — the high-volume bar is the liquid front month, the other is the expiring contract nobody is
+  trading. Counts across the universe: GOLDM 43 repeated dates and 10 unusable bars out of 1,260;
+  COPPER 35 and 24 out of 1,252; SILVERM 3 and 3 out of 1,220. A first version of the bar validator
+  kept whichever bar arrived first, which picks the illiquid contract roughly half the time and
+  injects a fake ~1% gap at every roll — about 12 a year, in a series every strategy reads as
+  continuous prices. **Fixed:** duplicates now resolve to the higher-volume bar, and validity is
+  checked before the volume comparison so a corrupt zero-price bar with large volume cannot win.
+  This is the concrete form of the contract-continuity concern flagged earlier, and it means every
+  backtest number produced before 2026-09-05 sat on a series with roughly a dozen fake gaps a year.
+- **(2026-09-05) Shorting is built in the backtest and makes results WORSE here — do not enable
+  it.** `BacktestEngine(allow_shorts=True)` implements signed quantity (negative = short),
+  direction-aware stops, and reversal as two cost-paying legs. Measured on the same strategies and
+  data:
+
+  | Strategy / instrument | Long-only | Long + short |
+  | --- | --- | --- |
+  | Risk-managed ensemble / Gold Mini | 22.0% CAGR, Sharpe 1.77, 10% DD | **−0.0%, 0.15, 64% DD** |
+  | Ensemble / Gold Mini | 16.1%, 0.98, 29% | 0.6%, 0.25, 66% |
+  | MACD(5,13,5) / Gold Mini | 21.9%, 1.42, 19% | 16.5%, 0.72, 33% |
+  | MACD(5,13,5) / Silver Mini | 31.7%, 1.27, 38% | 33.6%, 1.08, 34% |
+  | Risk-managed ensemble / Copper | 13.1%, 1.16, 11% | 16.9%, 1.23, 14% |
+
+  **Sharpe falls in all nine pairings tested**, and the best result in the whole project
+  (risk-managed ensemble on Gold Mini) is destroyed outright. The reason is not subtle: 2021–2026
+  was a secular precious-metals bull market, and shorting gold through it is simply the wrong trade.
+  The external evidence that long/short roughly doubles Sharpe comes from diversified multi-asset
+  CTA portfolios over multi-decade horizons — it does not transfer to two precious metals in one
+  bull window. The capability stays available behind a default-off flag for when a bear regime
+  gives it something to work with; **it is not enabled anywhere, and the paper and live engines
+  remain long-only and untouched.**
 - **(2026-09-05) `vwap_session_bounce` finally has a backtest, and I was wrong about it.** It has
   been enabled in paper trading with no evidence at all, justified by "today's live session VWAP
   doesn't exist in historical bars". Dhan's intraday endpoint makes that false — 5-minute MCX

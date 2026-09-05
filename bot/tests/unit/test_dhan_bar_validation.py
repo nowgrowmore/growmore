@@ -106,3 +106,50 @@ def test_a_high_below_a_low_is_rejected_as_incoherent():
         _instrument(), from_date="2022-10-01", to_date="2022-10-31", interval="day"
     )
     assert len(bars) == 1
+
+
+def test_a_repeated_date_keeps_the_HIGHER_VOLUME_contract():
+    """Same-timestamp bars are not redundant copies. Dhan's 5-year daily
+    series for one security_id overlaps two CONTRACT MONTHS around every
+    roll -- 41 of 43 repeated GOLDM dates carry different OHLC and different
+    volume, e.g. 2022-10-09 returns one bar on 5,603 lots and another on
+    15,000, ~1% apart in price. The high-volume bar is the liquid front
+    month; the other is the expiring contract nobody is trading. Keeping
+    whichever arrived first picks the illiquid one roughly half the time and
+    injects a fake ~1% gap at every roll.
+    """
+    client = _client_returning(_payload([
+        (_epoch(2022, 10, 9), 51800.0, 51800.0, 50969.0, 51064.0, 5603.0),    # expiring
+        (_epoch(2022, 10, 9), 51453.0, 51453.0, 50763.0, 50871.0, 15000.0),   # front month
+    ]))
+    bars = client.get_historical_ohlc(
+        _instrument(), from_date="2022-10-01", to_date="2022-10-31", interval="day"
+    )
+    assert len(bars) == 1
+    assert bars[0].volume == pytest.approx(15000.0)
+    assert bars[0].close == pytest.approx(50871.0)
+
+
+def test_order_of_arrival_does_not_decide_which_contract_wins():
+    for rows in (
+        [(_epoch(2022, 10, 9), 1.0, 2.0, 0.5, 1.5, 100.0),
+         (_epoch(2022, 10, 9), 3.0, 4.0, 2.5, 3.5, 900.0)],
+        [(_epoch(2022, 10, 9), 3.0, 4.0, 2.5, 3.5, 900.0),
+         (_epoch(2022, 10, 9), 1.0, 2.0, 0.5, 1.5, 100.0)],
+    ):
+        bars = _client_returning(_payload(rows)).get_historical_ohlc(
+            _instrument(), from_date="2022-10-01", to_date="2022-10-31", interval="day"
+        )
+        assert len(bars) == 1 and bars[0].volume == pytest.approx(900.0)
+
+
+def test_an_unusable_bar_never_wins_a_duplicate_contest_on_volume():
+    """A corrupt zero-price bar with huge volume must not displace a real
+    one -- validity is checked before the volume comparison."""
+    bars = _client_returning(_payload([
+        (_epoch(2022, 10, 9), 51453.0, 51453.0, 50763.0, 50871.0, 100.0),
+        (_epoch(2022, 10, 9), 0.0, 0.0, 0.0, 50871.0, 99999.0),
+    ])).get_historical_ohlc(
+        _instrument(), from_date="2022-10-01", to_date="2022-10-31", interval="day"
+    )
+    assert len(bars) == 1 and bars[0].open == pytest.approx(51453.0)

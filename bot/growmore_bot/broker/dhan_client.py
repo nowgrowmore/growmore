@@ -153,29 +153,41 @@ def _validated_bars(bars: list[Bar], symbol: Any) -> list[Bar]:
     range-based indicator. Five missing days in five years is the smaller
     distortion, and it is a visible one.
     """
-    seen: set = set()
-    clean: list[Bar] = []
-    dropped_bad = 0
-    dropped_dupe = 0
-    for bar in bars:
-        if bar.timestamp in seen:
-            dropped_dupe += 1
-            continue
+    def _usable(bar: Bar) -> bool:
         if min(bar.open, bar.high, bar.low, bar.close) <= 0:
-            dropped_bad += 1
-            continue
+            return False
         if bar.high < bar.low or bar.high < bar.open or bar.high < bar.close:
-            dropped_bad += 1
+            return False
+        return not (bar.low > bar.open or bar.low > bar.close)
+
+    dropped_bad = sum(1 for bar in bars if not _usable(bar))
+    usable = [bar for bar in bars if _usable(bar)]
+
+    # Same-timestamp bars are NOT redundant copies. Dhan's "5-year" daily
+    # series for one security_id overlaps two CONTRACT MONTHS around every
+    # roll: for GOLDM, 41 of 43 repeated dates carry different OHLC and
+    # different volume -- e.g. 2022-10-09 returns one bar on 5,603 lots and
+    # another on 15,000, about 1% apart in price. The high-volume one is the
+    # liquid front month; the other is the expiring contract nobody is
+    # trading. Keeping whichever arrived first (an earlier version of this
+    # function did) silently picks the illiquid contract roughly half the
+    # time, injecting a fake ~1% gap at every roll.
+    by_timestamp: dict = {}
+    dropped_dupe = 0
+    for bar in usable:
+        existing = by_timestamp.get(bar.timestamp)
+        if existing is None:
+            by_timestamp[bar.timestamp] = bar
             continue
-        if bar.low > bar.open or bar.low > bar.close:
-            dropped_bad += 1
-            continue
-        seen.add(bar.timestamp)
-        clean.append(bar)
+        dropped_dupe += 1
+        if bar.volume > existing.volume:
+            by_timestamp[bar.timestamp] = bar
+    clean = sorted(by_timestamp.values(), key=lambda b: b.timestamp)
+
     if dropped_bad or dropped_dupe:
         logger.warning(
-            "%s: dropped %d unusable historical bar(s) and %d duplicate timestamp(s) "
-            "out of %d returned by Dhan",
+            "%s: dropped %d unusable historical bar(s) and resolved %d repeated timestamp(s) "
+            "to the higher-volume contract, out of %d returned by Dhan",
             symbol, dropped_bad, dropped_dupe, len(bars),
         )
     return clean

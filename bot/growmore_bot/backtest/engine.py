@@ -74,6 +74,7 @@ class BacktestEngine:
         lot_size: int = 1,
         cost_model: Optional[CostModel] = None,
         tick_size: float = 0.0,
+        allow_shorts: bool = False,
     ):
         """`lot_size` is the number of QUOTE UNITS per lot -- not raw grams/kg
         (e.g. Copper=2500 kg quoted per kg; Gold Mini is a 100g lot but MCX
@@ -99,6 +100,14 @@ class BacktestEngine:
         self.lot_size = lot_size
         self.cost_model = cost_model
         self.tick_size = tick_size
+        #: Commodity futures are symmetric and Dhan's order client already
+        #: accepts SELL, but every engine here was long-only, so the down
+        #: half of every trend went uncaptured. Defaults to False so every
+        #: previously stored result stays bit-for-bit reproducible.
+        #: Quantity is SIGNED when enabled (negative = short), which makes
+        #: each (exit - entry) * qty expression correct automatically rather
+        #: than threading a +/-1 through every P&L site.
+        self.allow_shorts = allow_shorts
 
     def run(self, bars: Sequence[Any]) -> BacktestResult:
         trades: list[Trade] = []
@@ -123,13 +132,25 @@ class BacktestEngine:
             # (1) A stop is a resting level known BEFORE this bar opens, so
             # unlike a close-derived signal it is checked against THIS bar's
             # own range rather than the next one's.
-            if position_qty > 0 and armed_stop is not None and open_trade is not None:
-                if float(bar.low) <= armed_stop:
+            if position_qty != 0 and armed_stop is not None and open_trade is not None:
+                direction = 1 if position_qty > 0 else -1
+                breached = (
+                    float(bar.low) <= armed_stop if direction == 1
+                    else float(bar.high) >= armed_stop
+                )
+                if breached:
                     # A bar that GAPS through the stop never traded at it --
                     # fill at the open. min() is the whole point: booking the
                     # stop level on a gap would invent a price that was never
                     # available. MCX metals gap overnight routinely.
-                    exit_price = min(float(bar.open), armed_stop)
+                    # A gap THROUGH the stop fills at the open. For a long
+                    # that is the lower of the two, for a short the higher --
+                    # in both cases the worse one, because the bar never
+                    # traded at the stop.
+                    exit_price = (
+                        min(float(bar.open), armed_stop) if direction == 1
+                        else max(float(bar.open), armed_stop)
+                    )
                     # Credit cash at the SLIPPED fill the trade actually
                     # recorded, not the pre-slippage level, or the equity
                     # curve and the trade log quietly disagree.
@@ -148,7 +169,59 @@ class BacktestEngine:
                 signal, pending_signal = pending_signal, None
                 reference_price = float(bar.open)
 
-                if signal.action == SignalAction.BUY and position_qty == 0:
+                # Reversal: an opposing signal while in a position closes it
+                # and opens the other way at the SAME open, paying two legs of
+                # cost. Treating it as one trade would understate the cost of
+                # turning a book around.
+                if (
+                    self.allow_shorts
+                    and position_qty != 0
+                    and open_trade is not None
+                    and position_entry_price is not None
+                    and (
+                        (position_qty > 0 and signal.action == SignalAction.SELL)
+                        or (position_qty < 0 and signal.action == SignalAction.BUY)
+                    )
+                    and not stop_fired
+                ):
+                    close_side: Side = "sell" if position_qty > 0 else "buy"
+                    close_price = self._fill_price(reference_price, close_side)
+                    close_cost = self._leg_cost(abs(close_price * position_qty), close_side)
+                    gross_pnl = (close_price - position_entry_price) * position_qty
+                    open_trade.exit_price = close_price
+                    open_trade.exited_at = bar.timestamp
+                    open_trade.gross_pnl = gross_pnl
+                    open_trade.transaction_cost += close_cost
+                    open_trade.pnl = gross_pnl - open_trade.transaction_cost
+                    open_trade.exit_reason = signal.exit_reason or "signal"
+                    cash += close_price * position_qty - close_cost
+                    total_cost += close_cost
+                    position_qty = 0.0
+                    position_entry_price = None
+                    open_trade = None
+                    armed_stop = None
+
+                opening_short = (
+                    self.allow_shorts
+                    and signal.action == SignalAction.SELL
+                    and position_qty == 0
+                    and not stop_fired
+                )
+                if opening_short:
+                    qty = -((signal.size or 1) * self.lot_size)
+                    fill_price = self._fill_price(reference_price, "sell")
+                    entry_cost = self._leg_cost(abs(fill_price * qty), "sell")
+                    position_qty = qty
+                    position_entry_price = fill_price
+                    open_trade = Trade(
+                        side="sell", entry_price=fill_price, entered_at=bar.timestamp,
+                        transaction_cost=entry_cost,
+                    )
+                    trades.append(open_trade)
+                    cash -= fill_price * qty + entry_cost
+                    total_cost += entry_cost
+                    armed_stop = signal.stop_price
+                elif signal.action == SignalAction.BUY and position_qty == 0:
                     qty = (signal.size or 1) * self.lot_size
                     fill_price = self._fill_price(reference_price, "buy")
                     entry_cost = self._leg_cost(fill_price * qty, "buy")
@@ -167,7 +240,7 @@ class BacktestEngine:
                     # You entered at this bar's open, so a stop below it
                     # genuinely was reachable within this same bar. Checking
                     # it is not lookahead -- skipping it would be optimism.
-                    if armed_stop is not None and float(bar.low) <= armed_stop:
+                    if armed_stop is not None and float(bar.low) <= armed_stop:  # long entry
                         filled, exit_cost = self._close_trade(
                             open_trade, armed_stop, qty, bar.timestamp, "stop"
                         )
@@ -180,15 +253,21 @@ class BacktestEngine:
                         armed_stop = None
                         stop_fired = True
                 elif (
-                    signal.action == SignalAction.SELL
+                    signal.action
+                    in (SignalAction.SELL, SignalAction.BUY)
                     and not stop_fired
-                    and position_qty > 0
+                    and position_qty != 0
+                    and (
+                        (position_qty > 0 and signal.action == SignalAction.SELL)
+                        or (position_qty < 0 and signal.action == SignalAction.BUY)
+                    )
                     and open_trade is not None
                     and position_entry_price is not None
                 ):
                     qty = position_qty
-                    fill_price = self._fill_price(reference_price, "sell")
-                    exit_cost = self._leg_cost(fill_price * qty, "sell")
+                    exit_side: Side = "sell" if qty > 0 else "buy"
+                    fill_price = self._fill_price(reference_price, exit_side)
+                    exit_cost = self._leg_cost(abs(fill_price * qty), exit_side)
                     # Slippage is already inside both fill prices, so the
                     # "gross" figure here is gross of CHARGES only -- never
                     # double-counted against the slipped prices.
@@ -207,6 +286,8 @@ class BacktestEngine:
                 # Any other combination (e.g. SELL with no open position, or a
                 # second BUY while already long) has no valid action -- ignored.
 
+            # Signed quantity makes this correct for a short with no special
+            # case: a negative position and a falling price raise equity.
             mark_to_market = position_qty * float(bar.close) if position_qty else 0.0
             equity_curve.append(EquityPoint(ts=bar.timestamp, equity=cash + mark_to_market))
 
@@ -237,15 +318,18 @@ class BacktestEngine:
     def _close_trade(
         self, trade: Trade, exit_price: float, qty: float, ts, reason: str
     ) -> tuple[float, float]:
+        """`qty` is signed; a short is closed by BUYING, so both the slippage
+        direction and the statutory leg flip with it."""
         """Book an exit at an already-decided price. Used by the stop paths,
         where the fill price is the stop level or the gapped open rather than
         the next bar's open."""
+        side: Side = "sell" if qty > 0 else "buy"
         slipped = exit_price
         if self.cost_model is not None:
             slipped = slippage_price(
-                exit_price, "sell", self.tick_size, self.cost_model, is_stop=True
+                exit_price, side, self.tick_size, self.cost_model, is_stop=True
             )
-        exit_cost = self._leg_cost(slipped * qty, "sell")
+        exit_cost = self._leg_cost(abs(slipped * qty), side)
         gross = (slipped - trade.entry_price) * qty
         trade.exit_price = slipped
         trade.exited_at = ts

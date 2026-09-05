@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from typing import Sequence
 
 from growmore_bot.broker.dhan_client import DhanClient
