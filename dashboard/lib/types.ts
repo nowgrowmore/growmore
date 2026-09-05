@@ -92,6 +92,9 @@ export interface PaperOrder {
   filled_at: string;
   // Realized P&L this fill locked in (lot-size-scaled); NULL for buy fills.
   pnl: string | null;
+  // Why a sell fired -- "strategy_signal", "expiry", "end_of_day", or
+  // "daily_loss_limit". NULL for buy fills and for rows predating this column.
+  close_reason: string | null;
   // Joined convenience fields (populated by getTradeLog()).
   strategy_name?: string;
   instrument_symbol?: string;
@@ -131,6 +134,8 @@ export interface LiveOrder {
   fill_price: string | null;
   filled_at: string;
   pnl: string | null;
+  // See PaperOrder.close_reason -- same values, same meaning.
+  close_reason: string | null;
   // Joined convenience fields (populated by getLiveTradeLog()).
   strategy_name?: string;
   instrument_symbol?: string;
@@ -148,6 +153,7 @@ export interface BotConfig {
   virtual_capital: string;
   max_position_size: string;
   daily_loss_limit: string;
+  daily_loss_limit_enabled: boolean;
   mode: "paper" | "live";
   updated_at: string;
   // Joined convenience fields.

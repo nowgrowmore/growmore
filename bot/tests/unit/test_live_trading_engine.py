@@ -55,6 +55,7 @@ def _bot_config(**overrides):
         virtual_capital=500_000,
         max_position_size=10,
         daily_loss_limit=5_000,
+        daily_loss_limit_enabled=True,
         updated_at=datetime.now(timezone.utc),
     )
     defaults.update(overrides)
@@ -351,12 +352,46 @@ def test_daily_loss_limit_trip_with_open_position_auto_closes_it():
     assert existing_position.status == "closed"
     assert float(existing_position.realized_pnl) == pytest.approx(500_000)
 
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert added_orders[0].close_reason == "daily_loss_limit"
+
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
     trip_entries = [e for e in audit_entries if e.event_type == "live_risk_guard_daily_loss_limit_tripped"]
     assert len(trip_entries) == 1
     assert trip_entries[0].payload["auto_close_attempted"] is True
     assert trip_entries[0].payload["auto_close_succeeded"] is True
+
+
+def test_daily_loss_limit_disabled_skips_the_guard_even_when_breached():
+    config = _bot_config(daily_loss_limit=1_000, daily_loss_limit_enabled=False)
+    instrument = _instrument(config, lot_size=100)
+    strategy = _FixedSignalStrategy(Signal(action=SignalAction.HOLD))
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=155000, open=155000, high=155000, low=155000, close=155000)
+    order_client = MagicMock()
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+    existing_position = SimpleNamespace(
+        id=uuid.uuid4(), quantity=1, avg_entry_price=150000, realized_pnl=0,
+        unrealized_pnl=0, status="open", closed_at=None,
+    )
+    session.get.return_value = existing_position
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=150000, live_position_id=existing_position.id,
+        cumulative_daily_pnl=-1_500,
+    )
+
+    assert config.enabled is True
+    order_client.place_market_order.assert_not_called()
+    assert existing_position.status == "open"
+    added = [c.args[0] for c in session.add.call_args_list]
+    audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
+    assert not any(e.event_type == "live_risk_guard_daily_loss_limit_tripped" for e in audit_entries)
 
 
 def test_daily_loss_limit_trip_auto_close_failure_is_logged_not_raised():
@@ -432,6 +467,10 @@ def test_retry_pending_auto_close_succeeds_and_clears_the_retry_state():
     assert config.auto_close_retry_count == 0
     assert config.auto_close_next_retry_at is None
     assert config.enabled is False  # never re-enabled by a successful retry
+
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert added_orders[0].close_reason == "daily_loss_limit"
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
@@ -533,6 +572,10 @@ def test_sell_closes_position_places_a_real_order_and_records_realized_pnl():
     assert float(existing_position.realized_pnl) == pytest.approx(500_000)
     assert existing_position.status == "closed"
 
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert added_orders[0].close_reason == "strategy_signal"
+
 
 def test_force_close_for_expiry_places_a_real_closing_order_and_records_pnl():
     config = _bot_config()
@@ -559,6 +602,10 @@ def test_force_close_for_expiry_places_a_real_closing_order_and_records_pnl():
     )
     assert float(existing_position.realized_pnl) == pytest.approx(500_000)
     assert existing_position.status == "closed"
+
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert added_orders[0].close_reason == "expiry"
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
@@ -591,6 +638,10 @@ def test_force_close_end_of_day_places_a_real_closing_order_with_its_own_audit_l
     )
     assert float(existing_position.realized_pnl) == pytest.approx(500_000)
     assert existing_position.status == "closed"
+
+    added_orders = [c.args[0] for c in session.add.call_args_list if _looks_like_order(c.args[0])]
+    assert len(added_orders) == 1
+    assert added_orders[0].close_reason == "end_of_day"
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]

@@ -189,6 +189,7 @@ export function StrategiesClient({
                     maxPositionSize={toNumber(config.max_position_size)}
                     dailyLossLimit={toNumber(config.daily_loss_limit)}
                     virtualCapital={toNumber(config.virtual_capital)}
+                    dailyLossLimitEnabled={config.daily_loss_limit_enabled}
                     action={onSaveRiskParams}
                   />
                 </div>
@@ -243,7 +244,12 @@ export function StrategiesClient({
                   })()}
                 </div>
 
-                {(() => {
+                {!config.daily_loss_limit_enabled ? (
+                  <p className="text-xs text-[color:var(--text-muted)]">
+                    Daily loss limit guard is off — relying on the strategy&apos;s own signals only.
+                  </p>
+                ) : (
+                  (() => {
                   const progress = computeDailyLossProgress(
                     config.signal_daily_pnl,
                     config.daily_loss_limit
@@ -267,7 +273,8 @@ export function StrategiesClient({
                       </div>
                     </div>
                   );
-                })()}
+                  })()
+                )}
               </div>
             );
           })}

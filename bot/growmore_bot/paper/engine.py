@@ -126,7 +126,7 @@ class PaperTradingEngine:
 
         now = datetime.now(timezone.utc)
 
-        if cumulative_daily_pnl <= -float(config.daily_loss_limit):
+        if config.daily_loss_limit_enabled and cumulative_daily_pnl <= -float(config.daily_loss_limit):
             self._trip_daily_loss_guard(
                 config,
                 instrument,
@@ -271,6 +271,7 @@ class PaperTradingEngine:
             event_type="contract_expiry_close_out",
             log_reason_phrase="EXPIRY CLOSE-OUT (contract nearing MCX Tender Period -- Dhan does "
             "not permit physical delivery for retail clients)",
+            close_reason="expiry",
         )
 
     def force_close_end_of_day(
@@ -298,6 +299,7 @@ class PaperTradingEngine:
             label=label,
             event_type="position_force_closed_end_of_day",
             log_reason_phrase="END-OF-DAY FLATTEN (single-day strategy)",
+            close_reason="end_of_day",
         )
 
     def _force_close(
@@ -310,6 +312,7 @@ class PaperTradingEngine:
         label: str,
         event_type: str,
         log_reason_phrase: str,
+        close_reason: str,
     ) -> None:
         if current_position_qty <= 0 or paper_position_id is None or avg_entry_price is None:
             return
@@ -344,6 +347,7 @@ class PaperTradingEngine:
                 simulated_fill_price=quote.ltp,
                 filled_at=now,
                 pnl=pnl,
+                close_reason=close_reason,
             )
         )
         self.session.add(
@@ -404,6 +408,7 @@ class PaperTradingEngine:
                         simulated_fill_price=quote.ltp,
                         filled_at=now,
                         pnl=close_pnl,
+                        close_reason="daily_loss_limit",
                     )
                 )
                 auto_close_succeeded = True
@@ -582,6 +587,7 @@ class PaperTradingEngine:
                 simulated_fill_price=quote.ltp,
                 filled_at=now,
                 pnl=pnl,
+                close_reason="strategy_signal",
             )
         )
 

@@ -30,6 +30,7 @@ export interface UnifiedTradeRow {
   instrument_lot_size?: number | string;
   fill_price: string;
   pnl: string | null;
+  close_reason?: string | null;
   position_status?: "open" | "closed";
   broker_order_id?: string;
   order_status?: string;
@@ -38,6 +39,19 @@ export interface UnifiedTradeRow {
 function formatExpiry(expiry: string | null | undefined): string {
   if (!expiry) return "—";
   return new Date(expiry).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
+const CLOSE_REASON_LABELS: Record<string, string> = {
+  strategy_signal: "Strategy signal",
+  end_of_day: "End of day flatten",
+  expiry: "Contract expiry",
+  daily_loss_limit: "Daily loss limit",
+};
+
+function formatCloseReason(side: "buy" | "sell", reason: string | null | undefined): string {
+  if (side !== "sell") return "—";
+  if (!reason) return "—";
+  return CLOSE_REASON_LABELS[reason] ?? reason;
 }
 
 export function TradesClient({
@@ -81,6 +95,7 @@ export function TradesClient({
     { header: "Lot size", value: (r) => r.instrument_lot_size },
     { header: "Fill price", value: (r) => r.fill_price },
     { header: "Realized P&L", value: (r) => r.pnl },
+    { header: "Close reason", value: (r) => formatCloseReason(r.side, r.close_reason) },
     { header: "Position status", value: (r) => r.position_status },
     { header: "Broker order ID", value: (r) => r.broker_order_id },
     { header: "Broker order status", value: (r) => r.order_status },
@@ -128,6 +143,7 @@ export function TradesClient({
                 <th className="px-3 py-2 font-medium text-right">Fill price</th>
                 <th className="px-3 py-2 font-medium text-right">Notional value</th>
                 <th className="px-3 py-2 font-medium text-right">Realized P&amp;L</th>
+                <th className="px-3 py-2 font-medium">Close reason</th>
                 <th className="px-3 py-2 font-medium">Position</th>
               </tr>
             </thead>
@@ -193,6 +209,9 @@ export function TradesClient({
                       }`}
                     >
                       {pnl === null ? "—" : formatCurrency(pnl, { signDisplay: true })}
+                    </td>
+                    <td className="px-3 py-2 text-[color:var(--text-secondary)]">
+                      {formatCloseReason(order.side, order.close_reason)}
                     </td>
                     <td className="px-3 py-2 text-[color:var(--text-secondary)]">
                       {order.position_status}

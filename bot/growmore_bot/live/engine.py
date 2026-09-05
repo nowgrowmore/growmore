@@ -125,7 +125,7 @@ class LiveTradingEngine:
 
         now = datetime.now(timezone.utc)
 
-        if cumulative_daily_pnl <= -float(config.daily_loss_limit):
+        if config.daily_loss_limit_enabled and cumulative_daily_pnl <= -float(config.daily_loss_limit):
             self._trip_daily_loss_guard(
                 config,
                 instrument,
@@ -297,6 +297,7 @@ class LiveTradingEngine:
                 fill_price=quote.ltp,
                 filled_at=now,
                 pnl=pnl,
+                close_reason=reason,
             )
         )
         self.session.add(
@@ -477,6 +478,7 @@ class LiveTradingEngine:
                 fill_price=quote.ltp,
                 filled_at=now,
                 pnl=close_pnl,
+                close_reason="daily_loss_limit",
             )
         )
 
@@ -696,6 +698,7 @@ class LiveTradingEngine:
                         fill_price=quote.ltp,
                         filled_at=now,
                         pnl=close_pnl,
+                        close_reason="daily_loss_limit",
                     )
                 )
                 auto_close_succeeded = True
@@ -915,6 +918,7 @@ class LiveTradingEngine:
                 fill_price=quote.ltp,
                 filled_at=now,
                 pnl=pnl,
+                close_reason="strategy_signal",
             )
         )
 

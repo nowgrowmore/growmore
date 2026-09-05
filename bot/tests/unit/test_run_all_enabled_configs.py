@@ -62,7 +62,7 @@ def _make_strategy_instrument_config(session, strategy_name, params, enabled=Tru
     config = BotConfig(
         id=uuid.uuid4(), strategy_id=strategy.id, instrument_id=instrument.id,
         enabled=enabled, virtual_capital=250_000, max_position_size=10, daily_loss_limit=5_000,
-        mode=mode,
+        daily_loss_limit_enabled=True, mode=mode,
     )
     session.add_all([strategy, instrument, config])
     session.commit()

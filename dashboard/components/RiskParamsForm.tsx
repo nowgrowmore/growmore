@@ -7,6 +7,7 @@ interface RiskParamsFormProps {
   maxPositionSize: number;
   dailyLossLimit: number;
   virtualCapital: number;
+  dailyLossLimitEnabled: boolean;
   action: (id: string, formData: FormData) => Promise<void>;
 }
 
@@ -16,6 +17,7 @@ export function RiskParamsForm({
   maxPositionSize,
   dailyLossLimit,
   virtualCapital,
+  dailyLossLimitEnabled,
   action,
 }: RiskParamsFormProps) {
   const [isPending, startTransition] = useTransition();
@@ -66,6 +68,15 @@ export function RiskParamsForm({
           defaultValue={virtualCapital}
           className="mt-1 w-32 rounded border border-[color:var(--border-hairline)] bg-transparent px-2 py-1 text-sm tabular-nums"
         />
+      </label>
+      <label className="flex items-center gap-1.5 pb-1.5 text-xs text-[color:var(--text-secondary)]">
+        <input
+          type="checkbox"
+          name="dailyLossLimitEnabled"
+          defaultChecked={dailyLossLimitEnabled}
+          className="h-3.5 w-3.5 rounded border-[color:var(--border-hairline)]"
+        />
+        Daily loss limit guard
       </label>
       <button
         type="submit"

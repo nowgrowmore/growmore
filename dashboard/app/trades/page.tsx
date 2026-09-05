@@ -20,6 +20,7 @@ function toUnifiedRow(order: PaperOrder | LiveOrder, tradeType: "paper" | "live"
     instrument_lot_size: order.instrument_lot_size,
     fill_price: isLive ? (order as LiveOrder).fill_price ?? "0" : (order as PaperOrder).simulated_fill_price,
     pnl: order.pnl,
+    close_reason: order.close_reason,
     position_status: order.position_status,
     broker_order_id: isLive ? (order as LiveOrder).broker_order_id : undefined,
     order_status: isLive ? (order as LiveOrder).order_status : undefined,

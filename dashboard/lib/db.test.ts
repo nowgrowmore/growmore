@@ -153,6 +153,7 @@ describe("updateBotConfigRiskParams", () => {
       maxPositionSize: 10,
       dailyLossLimit: 5000,
       virtualCapital: 100000,
+      dailyLossLimitEnabled: true,
     });
 
     expect(fakeSql.transaction).toHaveBeenCalledTimes(1);

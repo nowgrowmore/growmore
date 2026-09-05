@@ -11,6 +11,7 @@ function makeConfig(overrides: Partial<BotConfig>): BotConfig {
     virtual_capital: "250000",
     max_position_size: "1",
     daily_loss_limit: "15000",
+    daily_loss_limit_enabled: true,
     mode: "paper",
     updated_at: "2026-01-01T00:00:00Z",
     strategy_name: "rsi_mean_reversion",

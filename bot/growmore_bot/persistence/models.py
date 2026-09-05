@@ -172,6 +172,12 @@ class PaperOrder(Base):
     # *daily* P&L for the daily_loss_limit risk guard -- PaperPosition only
     # tracks cumulative-ever realized_pnl, not a per-day breakdown.
     pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Why this sell fired -- "strategy_signal" (the ordinary case), "expiry"
+    # or "end_of_day" (a force-close, same string _force_close already used
+    # for audit-log labeling), or "daily_loss_limit" (the risk guard tripped
+    # and auto-closed). NULL for buy fills (not applicable) and for any
+    # historical row predating this column.
+    close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     paper_position: Mapped["PaperPosition"] = relationship(back_populates="orders")
 
@@ -190,6 +196,17 @@ class BotConfig(Base):
     virtual_capital: Mapped[float] = mapped_column(Numeric, nullable=False)
     max_position_size: Mapped[float] = mapped_column(Numeric, nullable=False)
     daily_loss_limit: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # Off by default only in the sense that a config can opt out -- the
+    # server_default is "true" (every existing config keeps today's
+    # always-on behavior). When false, cumulative daily P&L is never checked
+    # against daily_loss_limit at all: no auto-close, no auto-disable, purely
+    # the strategy's own BUY/SELL signals govern entries and exits. The
+    # end-of-day-flatten and contract-expiry force-closes are position-
+    # lifecycle safety nets, not P&L risk management, and stay active
+    # regardless of this flag.
+    daily_loss_limit_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
     # "paper" (default) or "live" -- a REAL order is only ever placed when
     # this is "live" AND Settings().live_trading_enabled is also True (see
     # CLAUDE.md non-negotiables and growmore_bot/scheduler/run.py). Two
@@ -317,6 +334,8 @@ class LiveOrder(Base):
     fill_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # See PaperOrder.close_reason -- same values, same meaning.
+    close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     live_position: Mapped["LivePosition"] = relationship(back_populates="orders")
 
