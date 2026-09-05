@@ -20,6 +20,7 @@ class _FakeClient:
     def __init__(self, quote_ltp, bars):
         self._quote_ltp = quote_ltp
         self._bars = bars
+        self.history_calls = 0
 
     def get_quote(self, instrument):
         if self._quote_ltp is None:
@@ -27,6 +28,7 @@ class _FakeClient:
         return SimpleNamespace(ltp=self._quote_ltp)
 
     def get_historical_ohlc(self, instrument, from_date, to_date, interval):
+        self.history_calls += 1
         return self._bars
 
 
@@ -65,6 +67,17 @@ def test_falls_back_to_the_last_daily_close_when_the_quote_fails():
     row = build_admission(client, GOLDM)
     assert row.price == pytest.approx(15_500.0)
     assert row.price_source == "last_daily_bar"
+
+
+def test_one_instrument_costs_exactly_one_history_call():
+    """Dhan's historical endpoint runs at ~1 req/sec in practice. Fetching
+    the same bars twice per instrument (once for the price fallback, once
+    for ATR) silently rate-limited the back half of the universe out of the
+    table -- four of eight rows came back empty on the first real run.
+    """
+    client = _FakeClient(quote_ltp=15_767.0, bars=_flat_bars(15_767.0))
+    build_admission(client, GOLDM)
+    assert client.history_calls == 1
 
 
 def test_returns_none_when_neither_a_quote_nor_any_bar_is_available():

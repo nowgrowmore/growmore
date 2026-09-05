@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional, Sequence
@@ -54,6 +55,12 @@ ATR_PERIOD = 14
 # rupee figure it implies per lot is what a risk budget actually has to cover.
 STOP_ATR_MULTIPLE = 2.0
 
+# Dhan's historical endpoint is ~1 req/sec in practice regardless of the
+# advertised limit -- the same figure research/smallcap_momentum/price_data.py
+# already paces against. Without this, the back half of an 8-instrument sweep
+# silently comes back empty and the table quietly loses rows.
+REQUEST_DELAY_SECONDS = 1.2
+
 
 @dataclass(frozen=True)
 class InstrumentAdmission:
@@ -66,18 +73,20 @@ class InstrumentAdmission:
     risk_per_lot: Optional[float]  # rupees at risk if stopped out at STOP_ATR_MULTIPLE x ATR
 
 
-def _price_for(client: DhanClient, instrument) -> tuple[Optional[float], str]:
+def _price_for(client: DhanClient, instrument, bars: list) -> tuple[Optional[float], str]:
     """Live LTP when the market is open, else the most recent daily close.
 
     Falling back matters: this is a planning tool that has to be runnable
     outside MCX hours, and a stale close is perfectly adequate for a notional
-    that only needs to be right to a few percent.
+    that only needs to be right to a few percent. `bars` is passed in rather
+    than fetched here so one instrument costs one history call, not two.
     """
     try:
-        return float(client.get_quote(instrument).ltp), "quote"
+        price = float(client.get_quote(instrument).ltp)
+        if price > 0:
+            return price, "quote"
     except Exception:
         pass
-    bars = _recent_bars(client, instrument)
     if bars:
         return float(bars[-1].close), "last_daily_bar"
     return None, "unavailable"
@@ -97,19 +106,20 @@ def _recent_bars(client: DhanClient, instrument) -> list:
         return []
 
 
-def _atr_for(client: DhanClient, instrument) -> Optional[float]:
+def _atr_from(bars: list) -> Optional[float]:
     calc = AtrCalculator(period=ATR_PERIOD)
     value = None
-    for bar in _recent_bars(client, instrument):
+    for bar in bars:
         value = calc.update(bar) or value
     return value
 
 
 def build_admission(client: DhanClient, instrument) -> Optional[InstrumentAdmission]:
-    price, source = _price_for(client, instrument)
+    bars = _recent_bars(client, instrument)
+    price, source = _price_for(client, instrument, bars)
     if price is None:
         return None
-    atr = _atr_for(client, instrument)
+    atr = _atr_from(bars)
     risk = (
         atr * STOP_ATR_MULTIPLE * instrument.lot_size if atr is not None else None
     )
@@ -197,6 +207,20 @@ def render(rows: Sequence[InstrumentAdmission], capitals: Sequence[float]) -> st
                 line += f"{r.risk_per_lot / capital * 100:>11.1f}%"
         lines.append(line)
 
+    lines.append("")
+    lines.append("Minimum capital for one lot to sit inside a sane risk-per-trade budget:")
+    min_header = f"{'symbol':<11}{'risk/lot':>11}{'@2%':>14}{'@1%':>14}"
+    lines.append(min_header)
+    lines.append("-" * len(min_header))
+    for r in rows:
+        if r.risk_per_lot is None:
+            lines.append(f"{r.symbol:<11}{'n/a':>11}{'n/a':>14}{'n/a':>14}")
+            continue
+        lines.append(
+            f"{r.symbol:<11}{r.risk_per_lot:>11,.0f}"
+            f"{r.risk_per_lot / 0.02:>14,.0f}{r.risk_per_lot / 0.01:>14,.0f}"
+        )
+
     sources = {r.price_source for r in rows}
     if sources != {"quote"}:
         lines.append("")
@@ -243,7 +267,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     client.refresh_access_token_if_needed()
 
     rows: list[InstrumentAdmission] = []
-    for instrument in DEFAULT_COMMODITY_UNIVERSE:
+    for i, instrument in enumerate(DEFAULT_COMMODITY_UNIVERSE):
+        if i:
+            time.sleep(REQUEST_DELAY_SECONDS)
         row = build_admission(client, instrument)
         if row is None:
             print(f"No price available for {instrument.symbol} -- skipped", file=sys.stderr)
