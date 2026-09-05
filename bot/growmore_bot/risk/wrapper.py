@@ -208,6 +208,9 @@ class RiskManagedStrategy(Strategy):
 #: leg -- so adding stops to a strategy costs one grid entry, not a whole new
 #: strategy file plus four dashboard cases.
 _INNER_BUILDERS = {
+    "ema_trend": lambda p: __import__(
+        "growmore_bot.strategies.ema_trend", fromlist=["x"]
+    ).EmaTrendStrategy(**p),
     "sma_crossover": lambda p: __import__(
         "growmore_bot.strategies.sma_crossover", fromlist=["x"]
     ).SmaCrossoverStrategy(**p),

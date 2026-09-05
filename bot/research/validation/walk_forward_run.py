@@ -85,6 +85,53 @@ BASE_GRID: list[tuple[str, str, dict]] = [
      risk_managed("rsi_mean_reversion", {"period": 14, "oversold": 30, "overbought": 70}, 2.0, None)),
     ("rm-boll20-2.5", "risk_managed",
      risk_managed("bollinger_reversion", {"period": 20, "num_std": 2.5}, 2.0, None)),
+    # --- Phase 4 additions. Each is measured ONLY here, never added to the
+    # in-sample sweep, so they cannot inflate the effective-trials count that
+    # the published DSR figures are discounted by.
+    # 4a slow trend: the untested region of the spectrum (arXiv 2504.10914).
+    ("ema80", "ema_trend", {"period": 80}),
+    ("ema112", "ema_trend", {"period": 112}),
+    ("ema150", "ema_trend", {"period": 150}),
+    ("rm-ema112", "risk_managed", risk_managed("ema_trend", {"period": 112}, 2.0, 3.0)),
+    # 4b no-trade buffer: theta=0 is the existing rm-macd5-13-5 exactly.
+    ("rm-macd5-13-5-buf0.1", "risk_managed",
+     risk_managed("macd_trend", dict(MACD_FAST, buffer_atr=0.1), 2.0, 3.0)),
+    ("rm-macd5-13-5-buf0.25", "risk_managed",
+     risk_managed("macd_trend", dict(MACD_FAST, buffer_atr=0.25), 2.0, 3.0)),
+    ("rm-macd12-26-9-buf0.25", "risk_managed",
+     risk_managed("macd_trend", dict(MACD_SLOW, buffer_atr=0.25), 2.0, 3.0)),
+    # 4c volatility admission: RealizedVolCalculator had never been used.
+    ("vol90-rm-macd5-13-5", "vol_filtered", {
+        "inner_strategy": "risk_managed",
+        "inner_params": risk_managed("macd_trend", MACD_FAST, 2.0, 3.0),
+        "vol_window": 20, "lookback": 504, "percentile_cap": 0.90}),
+    ("vol80-rm-macd5-13-5", "vol_filtered", {
+        "inner_strategy": "risk_managed",
+        "inner_params": risk_managed("macd_trend", MACD_FAST, 2.0, 3.0),
+        "vol_window": 20, "lookback": 504, "percentile_cap": 0.80}),
+    ("vol90-rm-ensemble", "vol_filtered", {
+        "inner_strategy": "risk_managed",
+        "inner_params": risk_managed("ensemble_trend", {"min_agreement": 3}, 2.0, 3.0),
+        "vol_window": 20, "lookback": 504, "percentile_cap": 0.90}),
+    # 4d the time stop: implemented and tested since Phase 3 of the risk
+    # layer, and never once set by any sweep -- dead code until now.
+    ("rm-macd5-13-5-time30", "risk_managed",
+     risk_managed("macd_trend", MACD_FAST, 2.0, 3.0, max_bars=30)),
+    ("rm-macd5-13-5-time60", "risk_managed",
+     risk_managed("macd_trend", MACD_FAST, 2.0, 3.0, max_bars=60)),
+    ("rm-ensemble-time60", "risk_managed",
+     risk_managed("ensemble_trend", {"min_agreement": 3}, 2.0, 3.0, max_bars=60)),
+    # 4e stop calibration: every variant above uses 2.0/3.0, implicitly tuned
+    # on gold. Silver's ATR is proportionally much larger.
+    ("rm-macd5-13-5-stop1.5-trail2", "risk_managed",
+     risk_managed("macd_trend", MACD_FAST, 1.5, 2.0)),
+    ("rm-macd5-13-5-stop3-trail4", "risk_managed",
+     risk_managed("macd_trend", MACD_FAST, 3.0, 4.0)),
+    ("rm-ensemble-stop1.5-trail2", "risk_managed",
+     risk_managed("ensemble_trend", {"min_agreement": 3}, 1.5, 2.0)),
+    ("rm-ensemble-stop3-trail4", "risk_managed",
+     risk_managed("ensemble_trend", {"min_agreement": 3}, 3.0, 4.0)),
+
     ("macd5-13-5", "macd_trend", MACD_FAST),
     ("macd12-26-9", "macd_trend", MACD_SLOW),
     ("ensemble-agree3", "ensemble_trend", {"min_agreement": 3}),

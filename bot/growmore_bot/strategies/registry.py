@@ -79,6 +79,18 @@ def _risk_managed(params: dict) -> Strategy:
     return build_risk_managed(params)
 
 
+def _ema_trend(params: dict) -> Strategy:
+    from growmore_bot.strategies.ema_trend import EmaTrendStrategy
+
+    return EmaTrendStrategy(**params)
+
+
+def _vol_filtered(params: dict) -> Strategy:
+    from growmore_bot.risk.vol_filter import build_vol_filtered
+
+    return build_vol_filtered(params)
+
+
 STRATEGY_BUILDERS: dict[str, Callable[[dict], Any]] = {
     "sma_crossover": _sma,
     "donchian_breakout": _donchian,
@@ -87,9 +99,13 @@ STRATEGY_BUILDERS: dict[str, Callable[[dict], Any]] = {
     "ensemble_trend": _ensemble,
     "bollinger_reversion": _bollinger,
     "regime_switch": _regime,
+    "ema_trend": _ema_trend,
     "vwap_session_bounce": _vwap_session,
     # Any strategy above, plus ATR stops -- see growmore_bot.risk.wrapper.
     "risk_managed": _risk_managed,
+    # Any strategy above, minus entries in the top slice of trailing realised
+    # volatility -- see growmore_bot.risk.vol_filter.
+    "vol_filtered": _vol_filtered,
     # Demo-only, not a real trading strategy -- see always_flip.py.
     "always_flip": _always_flip,
 }

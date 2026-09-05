@@ -12,20 +12,38 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from growmore_bot.indicators import AtrCalculator
 from growmore_bot.strategies.base import Signal, SignalAction, Strategy
 
 
 class MacdTrendStrategy(Strategy):
-    def __init__(self, fast_period: int, slow_period: int, signal_period: int) -> None:
+    def __init__(
+        self,
+        fast_period: int,
+        slow_period: int,
+        signal_period: int,
+        buffer_atr: float = 0.0,
+        atr_period: int = 14,
+    ) -> None:
         if fast_period < 1 or slow_period < 1:
             raise ValueError("periods must be positive")
         if fast_period >= slow_period:
             raise ValueError("fast_period must be less than slow_period")
         if signal_period < 1:
             raise ValueError("signal_period must be positive")
+        if buffer_atr < 0:
+            raise ValueError("buffer_atr must not be negative")
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.signal_period = signal_period
+        #: A no-trade band around the crossover, in ATRs. A crossing counts
+        #: only once |macd - signal| exceeds `buffer_atr` x ATR, which drops
+        #: the marginal touch-and-reverse trades that a raw crossover pays the
+        #: spread on. The trend literature's turnover-reduction result says
+        #: that is where slow-trend Sharpe advantage actually comes from.
+        #: 0.0 is the default and reproduces the raw crossover exactly.
+        self.buffer_atr = float(buffer_atr)
+        self._atr = AtrCalculator(period=atr_period) if buffer_atr else None
 
         self._closes_seed: list[float] = []
         self._fast_ema: Optional[float] = None
@@ -37,6 +55,7 @@ class MacdTrendStrategy(Strategy):
     def on_bar(self, bar: Any, position_state: Any) -> Signal:
         close = float(bar.close)
         self._closes_seed.append(close)
+        atr = self._atr.update(bar) if self._atr is not None else None
 
         k_fast = 2.0 / (self.fast_period + 1)
         k_slow = 2.0 / (self.slow_period + 1)
@@ -69,6 +88,15 @@ class MacdTrendStrategy(Strategy):
             self._signal = macd * k_signal + self._signal * (1 - k_signal)
 
         macd_above_signal = macd > self._signal
+
+        # The no-trade band. Inside it the stance is treated as UNCHANGED
+        # rather than flipped, so a marginal touch neither trades nor arms a
+        # trade for the bar after -- otherwise the band would only delay every
+        # whipsaw by one bar instead of suppressing it.
+        if self.buffer_atr and self._prev_macd_above_signal is not None:
+            if atr is None or abs(macd - self._signal) < self.buffer_atr * atr:
+                return Signal(action=SignalAction.HOLD)
+
         prev = self._prev_macd_above_signal
         self._prev_macd_above_signal = macd_above_signal
 
