@@ -88,12 +88,26 @@ class RiskManagedStrategy(Strategy):
             return inner_signal
 
         direction = 1 if float(position_state.get("quantity") or 0) > 0 else -1
+
+        # The level that was actually LIVE for this bar, captured before the
+        # ratchet moves it. Testing the post-ratchet level against this same
+        # bar would be lookahead -- see _exit_reason.
+        live_stop = risk.get("stop_price")
         updated = self._advance(risk, bar, close, atr, direction)
 
-        exit_reason = self._exit_reason(updated, bar, direction)
+        exit_reason = self._exit_reason(updated, bar, direction, live_stop)
         if exit_reason is not None:
             action = SignalAction.SELL if direction == 1 else SignalAction.BUY
-            return Signal(action=action, exit_reason=exit_reason, risk_state=updated)
+            return Signal(
+                action=action,
+                # Carry the ratcheted level even on the way out: the engine
+                # fills a signal exit at the NEXT bar's open, and if that bar
+                # gaps through the stop first the engine's own intrabar check
+                # (backtest/engine.py:132-166) should get the better fill.
+                stop_price=updated.get("stop_price"),
+                exit_reason=exit_reason,
+                risk_state=updated,
+            )
 
         # No protective exit fired -- defer to the inner strategy, but keep
         # carrying the updated stop so the engine can persist it.
@@ -151,10 +165,20 @@ class RiskManagedStrategy(Strategy):
             "direction": direction,
         }
 
-    def _exit_reason(self, risk: dict, bar: Any, direction: int) -> Optional[str]:
+    def _exit_reason(
+        self, risk: dict, bar: Any, direction: int, live_stop: Optional[float]
+    ) -> Optional[str]:
+        """Decide whether this bar took the position out.
+
+        `risk` is the POST-ratchet state (used for the bar count), but the
+        breach is tested against `live_stop` -- the level as it stood entering
+        the bar. A chandelier computed from this bar's own high only becomes
+        live for the next bar; OHLC cannot tell you the high came before the
+        low, so applying it retroactively to this bar's low invents exits.
+        """
         if time_stop_hit(int(risk.get("bars_held", 0)), self.max_bars_held):
             return "time"
-        stop = risk.get("stop_price")
+        stop = live_stop
         if stop is None:
             return None
         low = float(getattr(bar, "low", getattr(bar, "close", 0.0)))

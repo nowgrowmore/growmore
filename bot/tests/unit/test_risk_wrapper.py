@@ -102,6 +102,56 @@ def test_the_trailing_stop_ratchets_up_and_never_loosens():
     assert second.risk_state["high_water"] == pytest.approx(130.0)
 
 
+def test_a_stop_ratcheted_by_this_bars_high_is_not_tested_against_this_bars_low():
+    """The crux of the trailing stop's honesty.
+
+    OHLC cannot tell you whether the high came before the low, so a chandelier
+    level computed from bar B's own high must NOT be used to decide whether
+    bar B's own low took it out -- that level only becomes live for B+1. The
+    engine already implements the honest version (`armed_stop` is set from a
+    closed bar and tested against the NEXT bar's range,
+    backtest/engine.py:132-166); the wrapper's job is to hand it the level,
+    not to second-guess it a bar early.
+
+    Numbers: ATR is 10 entering the bar, prior stop 80, high-water 100. The
+    bar (130/94/95) drags ATR to ~11.86 and the chandelier to ~94.43, which
+    this bar's low of 94 pierces -- but the stop that was actually live for
+    this bar was 80, and 94 never came near it.
+    """
+    inner = _Scripted([])
+    s = RiskManagedStrategy(inner, atr_period=14, initial_stop_atr=2.0, trail_atr=3.0)
+    _warm(s)
+
+    signal = s.on_bar(
+        _bar(130, 94, 95),
+        _long(risk={"stop_price": 80.0, "high_water": 100.0, "bars_held": 1, "direction": 1}),
+    )
+
+    assert signal.action == SignalAction.HOLD, "exited on a level this bar created"
+    assert signal.exit_reason is None
+    # The ratchet itself is unaffected -- the level is still computed and
+    # handed onward so the engine can arm it for the next bar.
+    assert signal.risk_state["stop_price"] == pytest.approx(94.43, abs=0.05)
+    assert signal.stop_price == pytest.approx(94.43, abs=0.05)
+
+
+def test_a_stop_live_at_the_open_still_exits_on_this_bars_low():
+    """The mirror of the test above: the pre-existing level IS live for this
+    bar, so a low that pierces it must exit. Removing the lookahead must not
+    turn the stop off."""
+    inner = _Scripted([])
+    s = RiskManagedStrategy(inner, atr_period=14, initial_stop_atr=2.0, trail_atr=3.0)
+    _warm(s)
+
+    signal = s.on_bar(
+        _bar(130, 79, 95),
+        _long(risk={"stop_price": 80.0, "high_water": 100.0, "bars_held": 1, "direction": 1}),
+    )
+
+    assert signal.action == SignalAction.SELL
+    assert signal.exit_reason == "trail"
+
+
 def test_the_time_stop_fires_regardless_of_price():
     inner = _Scripted([])
     s = RiskManagedStrategy(inner, atr_period=14, trail_atr=None, max_bars_held=3)

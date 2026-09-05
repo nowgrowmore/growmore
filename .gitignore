@@ -39,3 +39,6 @@ bot/bot.log
 # meant to be committed (see bot/research/smallcap_momentum/).
 bot/research/.cache/
 bot/research/.output/
+# Same for the per-module caches: intraday 5-minute bars and the 5y
+# daily series. Both are hundreds of MB and re-fetchable from Dhan.
+bot/research/*/.cache/

@@ -1,5 +1,52 @@
 # Technical Debt / Known Limitations
 
+- **(Found + fixed 2026-09-05) The trailing stop tested a level it built from the SAME bar --
+  lookahead, and it was flattering Gold Mini while badly hurting Silver Mini.**
+  `risk/wrapper.py:_advance` ratcheted the chandelier stop using bar B's own high, and
+  `_exit_reason` then tested bar B's own low against that just-ratcheted level. OHLC cannot tell
+  you whether the high came before the low, so a level built from B only becomes live for B+1.
+  It was also redundant: `backtest/engine.py:132-166` already implements the honest version
+  (`armed_stop` set from a closed bar, tested against the NEXT bar's range, filled at
+  `min(bar.open, stop)` so a gap-through fills at the open). Fixed by testing the breach against
+  the stop as it stood ENTERING the bar; the ratchet still runs and still arms the engine for the
+  next bar. Two smaller things fixed alongside: the engine armed `armed_stop` only when
+  `position_qty > 0`, so a short was never protected by the engine-level check; and the wrapper's
+  exit signal carried no `stop_price`, so a stale level stayed armed for that bar.
+
+  Measured on the identical cached series (`research/dailydata/`, so the only variable is the code
+  change). The bare, non-risk-managed variants and the `notrail` variant are unchanged to the
+  decimal, which is the control -- the fix touches trailing stops and nothing else. The pre-fix
+  column reproduces `docs/backtest-results.md` exactly:
+
+  | Instrument | Variant | CAGR | Sharpe | MaxDD |
+  |---|---|---|---|---|
+  | GOLDM | rm ensemble-agree3 | 22.2% -> 20.6% | 1.79 -> **1.62** | 10.0% -> 12.3% |
+  | GOLDM | rm macd5-13-5 | 22.3% -> 21.1% | 1.70 -> **1.57** | 8.8% -> 11.7% |
+  | GOLDM | rm macd12-26-9 | 19.2% -> 20.5% | 1.56 -> 1.55 | 10.3% -> 10.8% |
+  | SILVERM | rm macd5-13-5 | 32.6% -> 35.9% | 1.33 -> **1.49** | 28.4% -> 20.5% |
+  | SILVERM | rm macd12-26-9 | 21.6% -> 36.3% | 1.00 -> **1.41** | 22.4% -> 17.5% |
+  | SILVERM | rm ensemble-agree3 | 26.2% -> 39.3% | 1.19 -> **1.52** | 22.0% -> 16.3% |
+  | GOLDM | macd5-13-5 (bare) | 22.0% -> 22.0% | 1.43 -> 1.43 | 19.1% -> 19.1% |
+  | ZINCMINI | rm boll20-2.5-notrail | 15.3% -> 15.3% | 1.89 -> 1.89 | 6.5% -> 6.5% |
+
+  The direction was not predicted and is worth understanding. The bug forced an exit one bar early
+  whenever a bar's own high dragged the chandelier above its own low. On Gold Mini -- a smooth
+  trend with shallow pullbacks -- those premature exits happened to dodge noise, so removing them
+  costs 0.13-0.17 Sharpe. On Silver Mini -- violent, wide-range bars -- the same rule fired
+  constantly and cut winners short; removing it is worth +0.16 to +0.41 Sharpe and takes 5-8
+  points off the drawdown. **The single best Silver Mini result in the book is now
+  `risk_managed ensemble-agree3` at 39.3% CAGR / 1.52 Sharpe / 16.3% DD**, and it arrived from a
+  correctness fix rather than a new variant, so it costs nothing against the trials budget.
+  Every `risk_managed` figure published before 2026-09-05 evening is wrong in one direction or the
+  other and should not be quoted.
+
+- **(Noted 2026-09-05) The sweep's most "significant" result is a 6-trade result.**
+  `risk_managed boll20-2.5-notrail` on ZINCMINI -- Sharpe 1.89, DSR 0.97, the only entry the
+  deflated-Sharpe run called `significant` -- closes **6** trades in three and a half years, well
+  under `run_all.py`'s own `DEFAULT_MIN_TRADE_COUNT = 15`. Its profit factor of 18.0 is the tell.
+  The guardrail flags low trade counts but never drops them, and the DSR calculation does not look
+  at trade count at all, so a six-observation fluke ranked above everything. Do not act on it.
+
 - **(Found + fixed 2026-09-05) Dhan's 5-year daily series overlaps TWO CONTRACT MONTHS at every
   roll, and the wrong one was being kept.** Repeated dates in a single `security_id`'s history are
   not redundant copies: for Gold Mini, **41 of 43 repeated dates carry different OHLC and different

@@ -302,7 +302,10 @@ class BacktestEngine:
             )
             new_signal = self.strategy.on_bar(bar, position_state)
             risk_state = new_signal.risk_state or ({} if position_qty == 0 else risk_state)
-            if position_qty > 0 and new_signal.stop_price is not None:
+            # Signed: a short arms a stop ABOVE the position just as a long
+            # arms one below. Gating this on `> 0` left every short
+            # unprotected by the engine-level check.
+            if position_qty != 0 and new_signal.stop_price is not None:
                 armed_stop = new_signal.stop_price
             if new_signal.action != SignalAction.HOLD:
                 pending_signal = new_signal

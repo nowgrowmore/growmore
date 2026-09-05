@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from typing import Any, Callable, Optional
 
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
@@ -177,32 +178,18 @@ def run_all_enabled_configs(
         PaperPosition,
         Strategy,
     )
-    from growmore_bot.risk.wrapper import build_risk_managed
-    from growmore_bot.strategies.always_flip import AlwaysFlipStrategy
-    from growmore_bot.strategies.bollinger_reversion import BollingerReversionStrategy
-    from growmore_bot.strategies.donchian_breakout import DonchianBreakoutStrategy
-    from growmore_bot.strategies.ensemble_trend import EnsembleTrendStrategy
-    from growmore_bot.strategies.macd_trend import MacdTrendStrategy
-    from growmore_bot.strategies.regime_switch import RegimeSwitchStrategy
-    from growmore_bot.strategies.rsi_mean_reversion import RsiMeanReversionStrategy
-    from growmore_bot.strategies.sma_crossover import SmaCrossoverStrategy
-    from growmore_bot.strategies.vwap_session_bounce import VwapSessionBounceStrategy
+    from growmore_bot.strategies.registry import STRATEGY_BUILDERS
 
     now = now or datetime.now(MCX_TIMEZONE)
 
+    # The name -> constructor map lives in strategies/registry.py so the
+    # scheduler, the backtest sweep and the walk-forward harness cannot drift
+    # apart over which strategies exist. `build_strategy` copies the params
+    # dict before the builder sees it (build_risk_managed pops from it).
+    from growmore_bot.strategies.registry import build_strategy
+
     strategy_builders: dict[str, Callable[[dict], Any]] = {
-        "sma_crossover": lambda params: SmaCrossoverStrategy(**params),
-        "donchian_breakout": lambda params: DonchianBreakoutStrategy(**params),
-        "rsi_mean_reversion": lambda params: RsiMeanReversionStrategy(**params),
-        "macd_trend": lambda params: MacdTrendStrategy(**params),
-        "ensemble_trend": lambda params: EnsembleTrendStrategy(**params),
-        "bollinger_reversion": lambda params: BollingerReversionStrategy(**params),
-        "regime_switch": lambda params: RegimeSwitchStrategy(**params),
-        "vwap_session_bounce": lambda params: VwapSessionBounceStrategy(**params),
-        # Any strategy above, plus ATR stops -- see growmore_bot.risk.wrapper.
-        "risk_managed": lambda params: build_risk_managed(params),
-        # Demo-only, not a real trading strategy -- see always_flip.py.
-        "always_flip": lambda params: AlwaysFlipStrategy(**params),
+        name: partial(build_strategy, name) for name in STRATEGY_BUILDERS
     }
 
     paper_engine = PaperTradingEngine(dhan_client=dhan_client, session=session)
