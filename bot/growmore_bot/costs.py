@@ -59,6 +59,13 @@ class CostModel:
     #: number ever published here is unchanged to the decimal; only
     #: NSE_EQUITY_DELIVERY_COST_MODEL sets it.
     stt_both_pct: float = 0.0
+    #: STT on the SELL leg only, as a fraction of that leg's turnover.
+    #: Options are taxed this way -- 0.1% of PREMIUM when you write the
+    #: contract, nothing when you buy it back. Distinct from
+    #: `ctt_sell_pct`, which is the commodities equivalent and is
+    #: documented as commodities-only; reusing that field here would be a
+    #: semantic lie in a file people read to check the arithmetic.
+    stt_sell_pct: float = 0.0
     stamp_buy_pct: float = 0.00002
     sebi_pct: float = 0.000002
     gst_pct: float = 0.18
@@ -102,6 +109,42 @@ NSE_EQUITY_DELIVERY_COST_MODEL = CostModel(
 )
 
 
+#: NSE STOCK OPTION costs (Dhan, checked 2026-09-06). Charged against
+#: PREMIUM turnover -- `premium * lot_size * lots` -- never against
+#: `strike * lot_size`. Nothing in `leg_cost`'s signature enforces that, and
+#: getting it wrong inflates every charge by roughly 60x on a 5% OTM monthly,
+#: so the caller passing the wrong base is the likeliest silent error in any
+#: options work built on this file.
+#:
+#: STT is 0.1% of premium on the SELL leg only (raised from 0.0625% in
+#: October 2024 -- earlier cycles in a long backtest were cheaper, which is
+#: recorded here rather than modelled, since it flatters the recent period
+#: and the study's conclusions do not turn on it).
+#:
+#: Brokerage is a FLAT Rs 20 per order, not whichever-is-lower. The
+#: percentage limb is set to 1.0 purely so `min()` always selects the flat
+#: fee; it is not a real rate.
+#:
+#: ASSIGNMENT IS NOT PRICED HERE. Since October 2019 an ITM stock option is
+#: physically settled, and NSE charges that leg as an equity delivery on
+#: `strike * qty` -- which is exactly `NSE_EQUITY_DELIVERY_COST_MODEL`. So a
+#: wheel pays option rates to write and equity-delivery rates to be assigned,
+#: and the second is an order of magnitude larger than the first.
+NSE_OPTION_COST_MODEL = CostModel(
+    brokerage_per_order=20.0,
+    brokerage_pct=1.0,          # see note above -- forces the flat fee
+    stt_sell_pct=0.001,         # 0.1% of premium, sell side only
+    stt_both_pct=0.0,
+    exchange_txn_pct=0.0005,    # NSE ~0.05% of premium
+    ctt_sell_pct=0.0,
+    stamp_buy_pct=0.00003,      # 0.003%, buy side only
+    sebi_pct=0.000001,
+    gst_pct=0.18,
+    slippage_ticks=0.0,         # options slip on premium, not ticks -- the
+    stop_slippage_ticks=0.0,    # engine applies a percentage of premium
+)
+
+
 #: A model that charges nothing -- the explicit way to reproduce the
 #: pre-cost behaviour of every existing backtest, rather than passing None
 #: around and branching on it.
@@ -111,6 +154,7 @@ FREE_COST_MODEL = CostModel(
     exchange_txn_pct=0.0,
     ctt_sell_pct=0.0,
     stt_both_pct=0.0,
+    stt_sell_pct=0.0,
     stamp_buy_pct=0.0,
     sebi_pct=0.0,
     gst_pct=0.0,
@@ -153,6 +197,8 @@ def leg_cost(notional: float, side: Side, model: CostModel = DEFAULT_COST_MODEL)
     stamp = notional * model.stamp_buy_pct if side == "buy" else 0.0
     # STT, like CTT and stamp, is a tax and carries no GST.
     stt = notional * model.stt_both_pct
+    if side == "sell":
+        stt += notional * model.stt_sell_pct
     return brokerage + exchange + sebi + gst + ctt + stamp + stt
 
 
