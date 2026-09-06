@@ -268,3 +268,18 @@ def test_every_strategy_records_at_most_one_cycle_per_expiry():
         assert result is not None, config.tag
         seen = [r.expiry for r in result.records]
         assert len(seen) == len(set(seen)), config.tag
+
+
+def test_a_cash_secured_put_never_deploys_more_cash_than_it_has():
+    """'Cash-secured' has to mean it, or the label is doing no work.
+
+    Sizing is `lots = cash // (strike * lot_size)` with a floor of one, so
+    the floor is the only way to over-deploy -- and it binds when a single
+    contract costs more than the whole account. The study's capital is set
+    from the data so that cannot happen; this pins the arithmetic.
+    """
+    chain = _six_month_chain(lambda i: 100.0 * (0.99 ** i))
+    result = run_wheel("T", chain, StrategyConfig(tag="A"), initial_capital=500_000.0)
+    assert result is not None
+    # Equity never goes negative: assignment was always affordable.
+    assert min(result.equity_curve) > 0

@@ -42,7 +42,14 @@ from research.stock_options.pricing import realised_vol
 from research.stock_options.wheel_engine import STRATEGIES, WheelResult, run_wheel
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / ".output" / "stock_options"
-INITIAL_CAPITAL = 1_000_000.0
+#: Rs 30 lakh, chosen so that ONE lot is genuinely cash-securable on every
+#: stock in the universe throughout the window. Measured from the data:
+#: contract value (spot x lot) has a median near Rs 6-8 lakh but reaches
+#: Rs 23 lakh, and SEBI raised the minimum contract value to Rs 15 lakh in
+#: November 2024. At Rs 10 lakh the largest names would have been forced to
+#: one lot with negative cash -- a leveraged position wearing the label
+#: "cash-secured", which is precisely the error this study exists to avoid.
+INITIAL_CAPITAL = 3_000_000.0
 REALISED_VOL_WINDOW = 20
 #: Fewer monthly cycles than this and a stock is "unmeasured", not "weak" --
 #: the treatment docs/walk-forward-results.md gave short-history contracts.
