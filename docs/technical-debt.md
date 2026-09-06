@@ -21,10 +21,18 @@
   the working one in turn. The deeper fix is to stop the two hosts competing for a single session:
   have the VPS own token generation exclusively, and have the Mac read from it.
 
-  Fix is small and worth doing before any live phase: treat a `DH-906` response as an expiry
-  signal, not just a transport error — one forced `refresh_if_needed(..., force=True)` on the
-  first `DH-906`, rate-limited so a genuinely broken credential cannot spin. Until then a dead
-  token is a silent, indefinite outage. Tracked for the owner in `docs/pending-actions.md`.
+  **Correction, 2026-09-06: the outage was self-healing, and this entry originally overstated it.**
+  The bot recovered on its own at 00:04 IST without intervention. `scheduler/run.py:440` calls
+  `refresh_if_needed(..., force=is_new_trading_day(...))`, so the daily session reset forces a
+  refresh regardless of the `exp` claim — the log shows the known "Invalid TOTP" timing flake on
+  attempt 1/3, then a success, and zero `DH-906` since. So the failure mode is **delayed recovery,
+  not indefinite outage**: a token invalidated mid-session stays dead until the next trading day's
+  reset. Here that was roughly eleven hours, 13:00 IST to 00:04 IST.
+
+  Fix is still worth doing, at lower priority than first written: treat a `DH-906` response as an
+  expiry signal rather than a transport error — one forced refresh on the first `DH-906`,
+  rate-limited so a genuinely broken credential cannot spin. That turns an eleven-hour hole into a
+  five-minute one. The reactive-refresh gap is real; the "silent, indefinite" framing was not.
 
 - **(OPEN, found 2026-09-05) The NSE equity price cache stores dates one day early.**
   `research/smallcap_momentum/price_data._save_bars` builds its `date` column with

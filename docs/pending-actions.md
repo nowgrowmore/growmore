@@ -2,44 +2,37 @@
 
 Plain-language list of things only you can do or decide. Updated as the project progresses.
 
-## URGENT — added 2026-09-05 evening
+## RESOLVED 2026-09-06 — the bot fixed itself, no action needed
 
-- [ ] **The live bot is down, and the fix is a one-line copy — no new token needed.**
-  `growmore-bot.service` on the VPS is logging `DH-906 Invalid Token` on every 5-minute tick.
+- [x] **The DH-906 outage is over, and it self-healed.** The VPS regenerated its own token at
+  18:35 UTC (00:04 IST) through the daily session reset, and it is working — verified live on
+  2026-09-06 with a real `get_fund_limits` call, valid another 16.8 hours. Zero `DH-906` in the
+  last 200 log lines; the scheduler is ticking normally every five minutes.
 
-  **Cause, confirmed:** Dhan allows one active access token per account. The VPS's token was
-  written at 08:14 today; **your Mac's token was generated at 08:17**, three minutes later, and
-  that is what invalidated the VPS's. The Mac's token is live and working right now (verified
-  against a real 3,968-bar `NSE_EQ` fetch); the VPS's is dead. This is the same failure mode
-  `docs/technical-debt.md` recorded on 2026-09-04 — the one whose lesson was "never generate a
-  fresh Dhan access token from any machine other than the one currently live-trading."
+  **Do not copy a token from the Mac to the VPS now.** That was the right fix while the VPS's token
+  was dead; it is the wrong one now. Dhan allows one active token per account, so writing a
+  different token to the VPS would invalidate the working one and re-create the outage. The Mac's
+  token is now the dead one (it expired 08:17 UTC and was superseded by the VPS's refresh) — which
+  is the correct end state, since the VPS is the machine that should own the session.
 
-  **The fix is to copy the Mac's working token onto the VPS.** Do NOT generate a new one — that
-  would invalidate the working token and put you back where you started:
+  Only copy a token from the Mac to the VPS when the VPS's own token is confirmed dead **and** the
+  Mac's is confirmed working. Both checks, in that order, every time.
 
-  ```
-  # on your Mac, read the live token
-  grep '^DHAN_ACCESS_TOKEN=' ~/code/src/growmore/.env.local
+  What this cost: roughly eleven hours of no MCX polling, 13:00 IST to 00:04 IST on 2026-09-05.
+  Paper trading only, so no money was at risk — but a live phase would not tolerate an
+  eleven-hour hole, which is the real lesson.
 
-  # on the VPS, back up and replace that one line, then restart
-  ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81
-  cp ~/growmore/.env.local ~/growmore/.env.local.bak
-  #   ...edit ~/growmore/.env.local, replacing the DHAN_ACCESS_TOKEN= line...
-  sudo systemctl restart growmore-bot
-  journalctl -u growmore-bot -f      # confirm DH-906 stops
-  ```
+- [ ] **Optional, and lower priority than it first looked: make the recovery prompt rather than
+  daily.** The bot recovers at the next trading day's session reset, because that is the only place
+  a forced refresh happens. Treating a `DH-906` response as an expiry signal — one forced refresh on
+  the first one, rate-limited — would turn an eleven-hour hole into a five-minute one. Detail in
+  `docs/technical-debt.md`.
 
-  I could not do this myself: writing a credential to the live trading host is blocked for me by
-  the permission layer, and rightly so. Note the token expires **2026-09-06 08:17 UTC**, after
-  which the VPS's own TOTP refresh takes over again — so if you would rather wait, the bot will
-  most likely heal itself at the next refresh. It will not heal before then, for the reason below.
-
-- [ ] **Consider making the bot able to recover from this at all.**
-  `refresh_access_token_if_needed` decides everything from the JWT `exp` claim, and a server-side
-  invalidation does not change it — so the bot sees a valid token, never refreshes, and stays down
-  indefinitely. Treating a `DH-906` response as an expiry signal (one forced refresh, rate-limited)
-  would have turned tonight's outage into a five-minute blip. Worth doing before any live phase.
-  Detail in `docs/technical-debt.md`.
+- [ ] **Research fetches now need the token copied the other way.** The F&O study is complete and its
+  data is cached locally, so nothing is blocked. But any *future* local research fetch needs a
+  working token on the Mac, and taking one invalidates the VPS's. The durable fix is to have the VPS
+  own generation exclusively and read the token from it for research, rather than the two hosts
+  competing. Worth doing before the next study.
 
 ## Decisions waiting on you — added 2026-09-05 after out-of-sample validation
 
