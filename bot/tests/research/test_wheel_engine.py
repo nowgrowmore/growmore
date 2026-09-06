@@ -337,3 +337,179 @@ def test_the_spread_caps_the_loss_at_its_width_however_far_the_stock_falls():
     # for the spread, and the spread must beat the uncapped wheel outright.
     assert spread_severe.max_drawdown_pct < bare_severe.max_drawdown_pct
     assert spread_severe.final_equity > bare_severe.final_equity
+
+
+def _oscillating_chain():
+    start = date(2024, 1, 1)
+    expiries = [start + timedelta(days=30 * (i + 1)) for i in range(7)]
+    prices = {start + timedelta(days=i): 100.0 * (1 + 0.05 * math.sin(i / 7.0))
+              for i in range(210)}
+    return _chain(prices, expiries)
+
+
+def test_a_call_too_cheap_to_justify_the_capped_upside_is_not_written():
+    """The enhancement aimed squarely at the frozen-position defect.
+
+    Under the no-loss rule the position sits below its basis most of the
+    time, and a call struck at or above basis is then deep out of the money:
+    it pays almost nothing while still capping the recovery that would end
+    the predicament. Above a premium floor the call earns its keep; below it,
+    holding uncovered is strictly better.
+    """
+    # A drift down to ~27% below the assignment basis: far enough that a call
+    # struck at basis is nearly worthless, but not so far that it stops being
+    # quoted at all (at which point there is no decision left to make).
+    chain = _six_month_chain(lambda i: 100.0 * (0.9985 ** i))
+    plain = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="G", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True),
+        initial_capital=500_000.0,
+    )
+    floored = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="H", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True,
+                       min_call_premium_pct=0.02),
+        initial_capital=500_000.0,
+    )
+    # The threshold is 2% of spot here rather than the 0.5% the real config
+    # uses: this fixture's pricer leaves far-out-of-the-money calls richer
+    # than real ones, so a realistic floor would never bind on it. What is
+    # being tested is the mechanism, not the calibration.
+    assert plain is not None and floored is not None
+    assert any(r.action == "sell_call" for r in plain.records)
+    assert any(r.action == "hold_uncovered" for r in floored.records)
+    assert not any(r.action == "hold_uncovered" for r in plain.records)
+
+
+def test_the_premium_floor_never_binds_when_calls_are_richly_priced():
+    # Otherwise the floor would be silently suppressing good trades rather
+    # than only the worthless ones.
+    chain = _oscillating_chain()
+    plain = run_wheel("T", chain, StrategyConfig(tag="G", put_otm=0.0, call_otm=0.0),
+                      initial_capital=500_000.0)
+    floored = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="H", put_otm=0.0, call_otm=0.0, min_call_premium_pct=1e-6),
+        initial_capital=500_000.0,
+    )
+    assert plain is not None and floored is not None
+    assert plain.final_equity == pytest.approx(floored.final_equity)
+
+
+def test_an_atm_put_is_assigned_far_more_often_than_a_five_percent_otm_one():
+    # The defining property of the ATM variant: much more premium, much more
+    # delivery. If assignment rates matched, the strike rule is not applying.
+    chain = _oscillating_chain()
+    otm = run_wheel("T", chain, StrategyConfig(tag="A", put_otm=0.05),
+                    initial_capital=500_000.0)
+    atm = run_wheel("T", chain, StrategyConfig(tag="G", put_otm=0.0, call_otm=0.0),
+                    initial_capital=500_000.0)
+    assert otm is not None and atm is not None
+    assert atm.assignment_rate_pct > otm.assignment_rate_pct
+
+
+def _assigned_then_recovering_chain(strikes=(80, 90, 95, 96, 97, 98, 99, 100, 101,
+                                              102, 103, 104, 105, 110, 120)):
+    """Falls hard enough to assign at a clean strike, then drifts back up to
+    just above that basis -- the exact moment the no-loss floor starts to
+    bind, which is the only moment an above-basis buffer can matter.
+    """
+    start = date(2024, 1, 1)
+    expiries = [start + timedelta(days=30 * (i + 1)) for i in range(7)]
+    prices = {}
+    for i in range(210):
+        if i < 90:
+            prices[start + timedelta(days=i)] = 100.0 * (0.997 ** i)
+        else:
+            # Basis is assigned around ~77 (100 * 0.997**90); climb slowly
+            # back toward and just past it.
+            prices[start + timedelta(days=i)] = 75.0 * (1.0015 ** (i - 90))
+    return _chain(prices, expiries, strikes=strikes)
+
+
+def test_the_rsi_scaled_buffer_matches_plain_g_when_rsi_is_weak():
+    """Negative control: the tier table must fall back to G's own rule.
+
+    With RSI held below every tier threshold, the RSI-scaled buffer strategy
+    must pick exactly the same strikes G does -- proving the fallback works,
+    not just that *some* buffer is being applied somewhere.
+    """
+    chain = _assigned_then_recovering_chain()
+    days = sorted({d for d in pd.to_datetime(chain["trade_date"]).unique()})
+    weak_rsi = {pd.Timestamp(d): 20.0 for d in days}
+
+    plain = run_wheel(
+        "T", chain, StrategyConfig(tag="G", put_otm=0.0, call_otm=0.0,
+                                    call_at_or_above_basis=True),
+        initial_capital=500_000.0,
+    )
+    scaled = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="L", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True,
+                       call_basis_buffer_rsi_scaled=True),
+        initial_capital=500_000.0, rsi_by_day=weak_rsi,
+    )
+    assert plain is not None and scaled is not None
+    plain_strikes = [r.strike for r in plain.records if r.action == "sell_call"]
+    scaled_strikes = [r.strike for r in scaled.records if r.action == "sell_call"]
+    assert plain_strikes == scaled_strikes
+
+
+def test_the_rsi_scaled_buffer_strikes_higher_when_momentum_is_real():
+    """With RSI held high throughout, every covered call after assignment
+    should be struck strictly above the basis G would use -- the buffer
+    actually raising the floor when momentum justifies it.
+    """
+    chain = _assigned_then_recovering_chain()
+    days = sorted({d for d in pd.to_datetime(chain["trade_date"]).unique()})
+    hot_rsi = {pd.Timestamp(d): 75.0 for d in days}
+
+    plain = run_wheel(
+        "T", chain, StrategyConfig(tag="G", put_otm=0.0, call_otm=0.0,
+                                    call_at_or_above_basis=True),
+        initial_capital=500_000.0,
+    )
+    scaled = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="L", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True,
+                       call_basis_buffer_rsi_scaled=True),
+        initial_capital=500_000.0, rsi_by_day=hot_rsi,
+    )
+    assert plain is not None and scaled is not None
+    plain_by_expiry = {r.expiry: r.strike for r in plain.records if r.action == "sell_call"}
+    scaled_by_expiry = {r.expiry: r.strike for r in scaled.records if r.action == "sell_call"}
+    shared = set(plain_by_expiry) & set(scaled_by_expiry)
+    assert shared, "both strategies must have written at least one call"
+    assert all(scaled_by_expiry[e] >= plain_by_expiry[e] for e in shared)
+    assert any(scaled_by_expiry[e] > plain_by_expiry[e] for e in shared)
+
+
+def test_the_rsi_tiers_are_ordered_not_just_present_or_absent():
+    """Momentum in the neutral band (40-60) must buy a smaller buffer than
+    momentum in the hot band (60+) -- the tiers must be graded, not a single
+    on/off switch wearing three names.
+    """
+    chain = _assigned_then_recovering_chain()
+    days = sorted({d for d in pd.to_datetime(chain["trade_date"]).unique()})
+    neutral_rsi = {pd.Timestamp(d): 50.0 for d in days}
+    hot_rsi = {pd.Timestamp(d): 75.0 for d in days}
+
+    neutral = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="L", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True,
+                       call_basis_buffer_rsi_scaled=True),
+        initial_capital=500_000.0, rsi_by_day=neutral_rsi,
+    )
+    hot = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="L", put_otm=0.0, call_otm=0.0, call_at_or_above_basis=True,
+                       call_basis_buffer_rsi_scaled=True),
+        initial_capital=500_000.0, rsi_by_day=hot_rsi,
+    )
+    assert neutral is not None and hot is not None
+    neutral_by_expiry = {r.expiry: r.strike for r in neutral.records if r.action == "sell_call"}
+    hot_by_expiry = {r.expiry: r.strike for r in hot.records if r.action == "sell_call"}
+    shared = set(neutral_by_expiry) & set(hot_by_expiry)
+    assert shared
+    assert all(hot_by_expiry[e] >= neutral_by_expiry[e] for e in shared)
+    assert any(hot_by_expiry[e] > neutral_by_expiry[e] for e in shared)

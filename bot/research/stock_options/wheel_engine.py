@@ -92,12 +92,31 @@ class StrategyConfig:
     long_put_otm: Optional[float] = None
     #: Choose the strike by richest IV-vs-realised-vol instead of fixed OTM.
     dynamic_strike: bool = False
+    #: Refuse to write a call whose premium is below this fraction of spot.
+    #:
+    #: Targets the defect the first run exposed: with the no-loss rule the
+    #: position sits below its basis a median 53% of all days, and a call
+    #: struck at or above basis is then far out of the money and pays almost
+    #: nothing -- while still capping the recovery that would end the
+    #: predicament. Writing it trades all of the upside for none of the
+    #: income. Above this floor the call is worth having; below it, holding
+    #: uncovered is strictly better.
+    min_call_premium_pct: float = 0.0
     #: Skip writing the call while the trend rule says the stock is running.
     #: The F&O equity study found trend rules only helped on stocks where
     #: holding LOST money; a covered call has the same shape, since it costs
     #: you exactly when the stock runs. So the signal that failed as a
     #: directional rule is tested here as a filter on where to sell upside.
     trend_conditioned: bool = False
+    #: Raise the no-loss floor to basis * (1 + this), instead of exactly
+    #: basis. A fixed override; ignored when `call_basis_buffer_rsi_scaled`.
+    call_basis_buffer_pct: float = 0.0
+    #: Size the basis buffer off the stock's own RSI at the moment the call
+    #: is written (see RSI_BASIS_BUFFER_TIERS) instead of a flat percentage.
+    #: Only as large as the stock's current momentum justifies; falls back to
+    #: exactly G's rule (0% buffer) when RSI shows no real strength, rather
+    #: than chasing upside that is not there.
+    call_basis_buffer_rsi_scaled: bool = False
 
 
 @dataclass
@@ -189,6 +208,27 @@ def select_strike(
 #: largest. It is a risk cap, not a tuned parameter.
 MAX_SHORT_DELTA = 0.35
 
+#: RSI(14) -> how far above the assignment basis to raise the no-loss floor.
+#: Checked in descending order, first threshold the RSI clears wins. Real
+#: momentum (>=60) earns the full "couple of percent" buffer headroom to
+#: capture more of a genuine recovery; neutral readings get a token buffer;
+#: below 40 there is no shown strength to justify giving up any premium for,
+#: so it falls back to exactly G's basis-floor rule.
+RSI_BASIS_BUFFER_TIERS: tuple[tuple[float, float], ...] = (
+    (60.0, 0.05),
+    (40.0, 0.02),
+    (0.0, 0.0),
+)
+
+
+def _rsi_scaled_basis_buffer(rsi: Optional[float]) -> float:
+    if rsi is None:
+        return 0.0
+    for threshold, pct in RSI_BASIS_BUFFER_TIERS:
+        if rsi >= threshold:
+            return pct
+    return 0.0
+
 
 def select_strike_by_iv_richness(
     day_chain: pd.DataFrame,
@@ -253,6 +293,7 @@ def run_wheel(
     initial_capital: float = 1_000_000.0,
     realised_vol_by_day: Optional[dict] = None,
     trend_bullish_by_day: Optional[dict] = None,
+    rsi_by_day: Optional[dict] = None,
 ) -> Optional[WheelResult]:
     """Walk one stock's monthly option history through the state machine.
 
@@ -363,9 +404,13 @@ def run_wheel(
                     bullish = False
                     if trend_bullish_by_day is not None:
                         bullish = bool(trend_bullish_by_day.get(day, False))
+                    rsi = None
+                    if rsi_by_day is not None:
+                        rsi = rsi_by_day.get(day)
                     opened = _open_position(
                         config, nxt, nxt_chain, spot, cash, shares, basis,
                         lot_size, realised_vol=rv, today=day, trend_bullish=bullish,
+                        rsi=rsi,
                     )
                     if opened is not None:
                         # A None short is a deliberate skip, not a failure;
@@ -439,6 +484,7 @@ def _open_position(
     realised_vol: float = 0.0,
     today: Optional[pd.Timestamp] = None,
     trend_bullish: bool = False,
+    rsi: Optional[float] = None,
 ) -> Optional[dict]:
     """Write the next month's option, sizing to CURRENT equity.
 
@@ -483,7 +529,14 @@ def _open_position(
         return skip
 
     if holding or config.always_long:
-        floor = basis if (config.call_at_or_above_basis and basis is not None) else None
+        buffer_pct = (
+            _rsi_scaled_basis_buffer(rsi) if config.call_basis_buffer_rsi_scaled
+            else config.call_basis_buffer_pct
+        )
+        floor = (
+            basis * (1 + buffer_pct)
+            if (config.call_at_or_above_basis and basis is not None) else None
+        )
         if config.dynamic_strike and realised_vol > 0:
             row = select_strike_by_iv_richness(
                 day_chain, "CE", spot, years, realised_vol, floor_strike=floor
@@ -497,6 +550,20 @@ def _open_position(
             return None
         if row is None:
             return None
+        if config.min_call_premium_pct > 0 and spot > 0 and (
+            float(row["settle"]) < config.min_call_premium_pct * spot
+        ):
+            # Too cheap to be worth the upside it forfeits. Hold the stock
+            # uncovered this month rather than capping a recovery in exchange
+            # for a premium that rounds to nothing.
+            return {
+                "short": None, "cash_delta": 0.0, "cost": 0.0,
+                "record": CycleRecord(
+                    expiry=expiry.date(), action="hold_uncovered", strike=None,
+                    premium=0.0, lots=max(1, shares // lot_size), assigned=False,
+                    called_away=False, pnl=0.0,
+                ),
+            }
         # Buy-write starting flat sizes its stock purchase to equity; a
         # covered call on an existing holding is sized by the holding.
         lots = (
@@ -610,7 +677,7 @@ __all__ = [
     "monthly_expiries", "select_strike", "select_strike_by_iv_richness",
     "run_wheel", "STRATEGIES", "MAX_SHORT_DELTA", "PREMIUM_SLIPPAGE_PCT",
     "MIN_STRIKE_VOLUME", "cagr_pct", "max_drawdown_pct", "profit_factor",
-    "sharpe_ratio", "win_rate_pct",
+    "sharpe_ratio", "win_rate_pct", "RSI_BASIS_BUFFER_TIERS",
 ]
 
 
@@ -627,4 +694,20 @@ STRATEGIES: list[StrategyConfig] = [
                    always_long=True, trend_conditioned=True),
     StrategyConfig(tag="F-put-credit-spread", call_at_or_above_basis=False,
                    long_put_otm=0.10),
+
+    # --- ATM family. G is the owner's own manually-traded strategy: sell the
+    # at-the-money put for the coming month, and if assigned write calls at or
+    # above the assignment price. H and I each differ from G by exactly ONE
+    # decision, so whatever they gain or lose is attributable.
+    StrategyConfig(tag="G-atm-wheel", put_otm=0.0, call_otm=0.0,
+                   call_at_or_above_basis=True),
+    StrategyConfig(tag="H-atm-wheel-min-premium", put_otm=0.0, call_otm=0.0,
+                   call_at_or_above_basis=True, min_call_premium_pct=0.005),
+    StrategyConfig(tag="I-atm-wheel-trend-skip", put_otm=0.0, call_otm=0.0,
+                   call_at_or_above_basis=True, trend_conditioned=True),
+    # L differs from G by exactly one decision too: how far above basis the
+    # post-assignment call is struck, sized by the stock's own RSI rather
+    # than a flat percentage (see RSI_BASIS_BUFFER_TIERS).
+    StrategyConfig(tag="L-atm-wheel-rsi-buffer", put_otm=0.0, call_otm=0.0,
+                   call_at_or_above_basis=True, call_basis_buffer_rsi_scaled=True),
 ]

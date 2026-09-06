@@ -38,8 +38,14 @@ from growmore_bot.strategies.registry import build_strategy
 from research.fno import bar_cache as cash_bars
 from research.fno.manifest import load_manifest
 from research.stock_options import chain_cache
-from research.stock_options.pricing import realised_vol
-from research.stock_options.wheel_engine import STRATEGIES, WheelResult, run_wheel
+from research.stock_options.pricing import implied_vol, realised_vol
+from research.stock_options.wheel_engine import (
+    STRATEGIES,
+    WheelResult,
+    monthly_expiries,
+    run_wheel,
+    select_strike,
+)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / ".output" / "stock_options"
 #: Rs 30 lakh, chosen so that ONE lot is genuinely cash-securable on every
@@ -148,6 +154,85 @@ def trend_bullish_by_day(chain: pd.DataFrame) -> dict:
     return out
 
 
+def rsi_by_day(chain: pd.DataFrame, period: int = 14) -> dict:
+    """RSI(`period`) of the underlying, one reading per trading day.
+
+    Reuses the shared strategy registry rather than reimplementing the
+    indicator, exactly like `trend_bullish_by_day` does for MACD -- so this
+    cannot drift from what the bot itself would compute.
+    """
+    spot = chain.groupby("trade_date")["underlying"].first().sort_index()
+    strategy = build_strategy("rsi_mean_reversion", {"period": period})
+    out = {}
+    for day, price in spot.items():
+        bar = SimpleNamespace(
+            timestamp=day, open=price, high=price, low=price, close=price, volume=0.0
+        )
+        strategy.on_bar(bar, None)
+        rsi = strategy.debug_state().get("rsi")
+        if rsi is not None:
+            out[pd.Timestamp(day)] = float(rsi)
+    return out
+
+
+def cycle_open_days(chain: pd.DataFrame) -> list:
+    """The first trading day of each monthly cycle: the day after the
+    previous expiry (or the start of the chain, for the first cycle).
+
+    Used to sample `atm_iv_by_cycle` at the same cadence every strategy
+    already trades at, rather than a full daily pass over the option chain.
+    """
+    expiries = monthly_expiries(chain)
+    days = sorted(pd.to_datetime(chain["trade_date"]).unique())
+    opens = []
+    prev_expiry = None
+    for expiry in expiries:
+        candidates = [
+            d for d in days
+            if (prev_expiry is None or d > prev_expiry) and d <= expiry
+        ]
+        if candidates:
+            opens.append(pd.Timestamp(candidates[0]))
+        prev_expiry = expiry
+    return opens
+
+
+def atm_iv_by_cycle(chain: pd.DataFrame, cycle_days: list) -> dict:
+    """ATM implied vol of the near-month call, sampled once per monthly cycle.
+
+    Not a daily series like `realised_vol_by_day` -- IV is only needed as a
+    per-stock ranking input for the IV-rich-quintile experiment
+    (docs/stock-options-results.md Sec 6), so it is sampled at the same
+    cycle-open days every strategy already walks (~12/year/stock), not a full
+    44M-row daily pass.
+    """
+    spot_by_day = chain.groupby("trade_date")["underlying"].first()
+    expiries = monthly_expiries(chain)
+    out = {}
+    for day in cycle_days:
+        day = pd.Timestamp(day)
+        if day not in spot_by_day.index:
+            continue
+        spot = float(spot_by_day.loc[day])
+        if spot <= 0:
+            continue
+        future = [e for e in expiries if e > day]
+        if not future:
+            continue
+        expiry = future[0]
+        day_chain = chain[
+            (chain["trade_date"] == day) & (chain["expiry"] == expiry)
+        ]
+        row = select_strike(day_chain, "CE", spot, target_otm=0.0)
+        if row is None:
+            continue
+        years = max((expiry - day).days, 0) / 365.25
+        iv = implied_vol(float(row["settle"]), spot, float(row["strike"]), years, "CE")
+        if iv is not None:
+            out[day] = iv
+    return out
+
+
 def run_symbol(
     symbol: str,
     from_date: Optional[pd.Timestamp] = None,
@@ -178,6 +263,7 @@ def run_symbol(
 
     rv = realised_vol_by_day(chain)
     trend = trend_bullish_by_day(chain)
+    rsi = rsi_by_day(chain)
     days = pd.to_datetime(chain["trade_date"])
     control = buy_and_hold(symbol, days.min(), days.max())
 
@@ -187,7 +273,7 @@ def run_symbol(
             result = run_wheel(
                 symbol, chain, config,
                 initial_capital=INITIAL_CAPITAL, realised_vol_by_day=rv,
-                trend_bullish_by_day=trend,
+                trend_bullish_by_day=trend, rsi_by_day=rsi,
             )
         except Exception as exc:  # noqa: BLE001 -- one stock must not lose the run
             print(f"  {symbol} {config.tag}: FAILED {str(exc)[:70]}", file=sys.stderr)
