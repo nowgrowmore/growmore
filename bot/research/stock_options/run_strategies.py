@@ -31,11 +31,13 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import pandas as pd
+from types import SimpleNamespace
 
 from growmore_bot.backtest.metrics import cagr_pct, max_drawdown_pct, sharpe_ratio
 from research.fno import bar_cache as cash_bars
 from research.fno.manifest import load_manifest
 from research.stock_options import chain_cache
+from growmore_bot.strategies.registry import build_strategy
 from research.stock_options.pricing import realised_vol
 from research.stock_options.wheel_engine import STRATEGIES, WheelResult, run_wheel
 
@@ -113,6 +115,32 @@ def realised_vol_by_day(chain: pd.DataFrame) -> dict:
     return out
 
 
+def trend_bullish_by_day(chain: pd.DataFrame) -> dict:
+    """Is the stock in an uptrend on each day, by MACD(5,13,5) stance?
+
+    Reuses the shared strategy registry rather than reimplementing the
+    indicator, so this cannot drift from what the bot itself would compute.
+    The stance -- MACD above its own signal line -- is the same quantity
+    `ensemble_trend` votes on, not the BUY/SELL event, because what matters
+    here is "is it running now", not "did it just turn".
+    """
+    spot = chain.groupby("trade_date")["underlying"].first().sort_index()
+    strategy = build_strategy("macd_trend", {"fast_period": 5, "slow_period": 13,
+                                             "signal_period": 5})
+    out = {}
+    for day, price in spot.items():
+        bar = SimpleNamespace(
+            timestamp=day, open=price, high=price, low=price, close=price, volume=0.0
+        )
+        strategy.on_bar(bar, None)
+        state = strategy.debug_state()
+        macd, signal = state.get("macd"), state.get("signal")
+        out[pd.Timestamp(day)] = bool(
+            macd is not None and signal is not None and macd > signal
+        )
+    return out
+
+
 def run_symbol(
     symbol: str,
     from_date: Optional[pd.Timestamp] = None,
@@ -142,6 +170,7 @@ def run_symbol(
         return [], None
 
     rv = realised_vol_by_day(chain)
+    trend = trend_bullish_by_day(chain)
     days = pd.to_datetime(chain["trade_date"])
     control = buy_and_hold(symbol, days.min(), days.max())
 
@@ -151,6 +180,7 @@ def run_symbol(
             result = run_wheel(
                 symbol, chain, config,
                 initial_capital=INITIAL_CAPITAL, realised_vol_by_day=rv,
+                trend_bullish_by_day=trend,
             )
         except Exception as exc:  # noqa: BLE001 -- one stock must not lose the run
             print(f"  {symbol} {config.tag}: FAILED {str(exc)[:70]}", file=sys.stderr)

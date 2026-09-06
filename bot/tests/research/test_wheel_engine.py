@@ -199,3 +199,33 @@ def test_the_constrained_and_unconstrained_wheels_differ_on_a_falling_stock():
                   initial_capital=500_000.0)
     assert a is not None and b is not None
     assert a.final_equity != pytest.approx(b.final_equity)
+
+
+def test_the_trend_filter_makes_strategy_e_differ_from_plain_buy_write():
+    """E must actually skip calls, or it is a duplicate of C wearing a label.
+
+    On a stock that trends up throughout, a trend-conditioned buy-write should
+    forgo most of its calls and keep the upside, where a plain buy-write caps
+    it. If the two come back identical the filter is not wired in.
+    """
+    chain = _six_month_chain(lambda i: 100.0 * (1.004 ** i))
+    days = sorted({d for d in pd.to_datetime(chain["trade_date"]).unique()})
+    always_bullish = {pd.Timestamp(d): True for d in days}
+
+    plain = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="C", always_long=True, call_at_or_above_basis=False),
+        initial_capital=500_000.0,
+    )
+    filtered = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="E", always_long=True, call_at_or_above_basis=False,
+                       trend_conditioned=True),
+        initial_capital=500_000.0,
+        trend_bullish_by_day=always_bullish,
+    )
+    assert plain is not None and filtered is not None
+    assert any(r.action == "hold_uncovered" for r in filtered.records)
+    assert not any(r.action == "hold_uncovered" for r in plain.records)
+    # Uncapped upside on a rising stock must beat the capped version.
+    assert filtered.final_equity > plain.final_equity

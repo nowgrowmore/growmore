@@ -92,6 +92,12 @@ class StrategyConfig:
     long_put_otm: Optional[float] = None
     #: Choose the strike by richest IV-vs-realised-vol instead of fixed OTM.
     dynamic_strike: bool = False
+    #: Skip writing the call while the trend rule says the stock is running.
+    #: The F&O equity study found trend rules only helped on stocks where
+    #: holding LOST money; a covered call has the same shape, since it costs
+    #: you exactly when the stock runs. So the signal that failed as a
+    #: directional rule is tested here as a filter on where to sell upside.
+    trend_conditioned: bool = False
 
 
 @dataclass
@@ -246,6 +252,7 @@ def run_wheel(
     config: StrategyConfig,
     initial_capital: float = 1_000_000.0,
     realised_vol_by_day: Optional[dict] = None,
+    trend_bullish_by_day: Optional[dict] = None,
 ) -> Optional[WheelResult]:
     """Walk one stock's monthly option history through the state machine.
 
@@ -344,12 +351,15 @@ def run_wheel(
                     rv = 0.0
                     if realised_vol_by_day is not None:
                         rv = float(realised_vol_by_day.get(day, 0.0))
+                    bullish = False
+                    if trend_bullish_by_day is not None:
+                        bullish = bool(trend_bullish_by_day.get(day, False))
                     opened = _open_position(
                         config, nxt, nxt_chain, spot, cash, shares, basis,
-                        lot_size, realised_vol=rv, today=day,
+                        lot_size, realised_vol=rv, today=day, trend_bullish=bullish,
                     )
                     if opened is not None:
-                        short = opened["short"]
+                        short = opened["short"]  # may be None: a deliberate skip
                         long_put = opened.get("long_put")
                         cash += opened["cash_delta"]
                         total_cost += opened["cost"]
@@ -412,6 +422,7 @@ def _open_position(
     lot_size: int,
     realised_vol: float = 0.0,
     today: Optional[pd.Timestamp] = None,
+    trend_bullish: bool = False,
 ) -> Optional[dict]:
     """Write the next month's option, sizing to CURRENT equity.
 
@@ -427,6 +438,33 @@ def _open_position(
     years = 0.0
     if today is not None:
         years = max((expiry - today).days, 0) / 365.25
+
+    if (holding or config.always_long) and config.trend_conditioned and trend_bullish:
+        # The stock is running. Writing a call here caps exactly the move the
+        # position exists to capture, so hold it uncovered this month and
+        # forgo the premium. Recorded as a real decision, not a skipped cycle.
+        #
+        # The filter suppresses the CALL, never the stock: a buy-write that
+        # skipped its first purchase because the trend was up would sit in
+        # cash forever and measure nothing.
+        skip = {
+            "short": None, "cash_delta": 0.0, "cost": 0.0,
+            "record": CycleRecord(
+                expiry=expiry.date(), action="hold_uncovered", strike=None,
+                premium=0.0, lots=max(1, shares // lot_size), assigned=False,
+                called_away=False, pnl=0.0,
+            ),
+        }
+        if config.always_long and shares == 0:
+            lots = max(1, int(cash // (spot * lot_size)))
+            buy_qty = lots * lot_size
+            buy_cost = _delivery_cost(spot * buy_qty, "buy")
+            skip["cash_delta"] = -(spot * buy_qty + buy_cost)
+            skip["cost"] = buy_cost
+            skip["bought_shares"] = buy_qty
+            skip["basis"] = spot
+            skip["record"].lots = lots
+        return skip
 
     if holding or config.always_long:
         floor = basis if (config.call_at_or_above_basis and basis is not None) else None
@@ -545,7 +583,8 @@ STRATEGIES: list[StrategyConfig] = [
     StrategyConfig(tag="C-buy-write", always_long=True, call_at_or_above_basis=False),
     StrategyConfig(tag="D-iv-rich-dynamic", call_at_or_above_basis=False,
                    dynamic_strike=True),
-    StrategyConfig(tag="E-trend-conditioned-calls", call_at_or_above_basis=False),
+    StrategyConfig(tag="E-trend-conditioned-calls", call_at_or_above_basis=False,
+                   always_long=True, trend_conditioned=True),
     StrategyConfig(tag="F-put-credit-spread", call_at_or_above_basis=False,
                    long_put_otm=0.10),
 ]
