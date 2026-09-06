@@ -40,6 +40,15 @@ _ALLOWED_SDK_METHODS = frozenset(
         # mutates anything. Added 2026-09-04 for the dashboard's fund
         # balance display; still no order-placement capability whatsoever.
         "get_fund_limits",
+        # Real-time option chain (POST /optionchain, /optionchain/expirylist)
+        # -- read-only Data API, added for the wheel-basket paper-trading
+        # strategy's live IV ranking (docs/stock-options-results.md Sec 7).
+        # Dhan computes IV itself per strike, so no local bisection is
+        # needed the way the offline backtest required. Response shape is
+        # parsed per Dhan's public v2 docs but NOT yet verified against a
+        # real call from this codebase -- see docs/pending-actions.md.
+        "option_chain",
+        "expiry_list",
     }
 )
 
@@ -92,6 +101,26 @@ class Bar:
     low: float
     close: float
     volume: float
+
+
+@dataclass(frozen=True)
+class OptionChainRow:
+    strike: float
+    opt_type: str  # "CE" | "PE"
+    ltp: float
+    #: A FRACTION (0.30 means 30%), not Dhan's raw percentage number --
+    #: converted at parse time so it's directly comparable to
+    #: growmore_bot's own realised_vol. None when Dhan has no IV for this
+    #: strike (illiquid/no trades), never fabricated as 0.0.
+    iv: Optional[float]
+    oi: float
+    volume: float
+
+
+@dataclass(frozen=True)
+class OptionChainSnapshot:
+    spot: float
+    rows: list[OptionChainRow]
 
 
 logger = logging.getLogger(__name__)
@@ -307,6 +336,54 @@ class DhanClient:
             withdrawable_balance=float(data["withdrawableBalance"]),
         )
 
+    def get_option_chain(self, instrument: Any, expiry: str) -> OptionChainSnapshot:
+        """Real-time option chain for one underlying/expiry.
+
+        Response shape parsed per Dhan's public v2 API docs (a `last_price`
+        alongside an `oc` dict keyed by strike, each holding `ce`/`pe` legs
+        with `last_price`/`implied_volatility`/`oi`/`volume`) -- NOT yet
+        verified against a real call from this codebase. Missing IV is
+        parsed as None (a real "no quote" outcome), never fabricated as 0.0.
+        """
+        response = self._sdk.option_chain(
+            under_security_id=int(instrument.security_id),
+            under_exchange_segment=instrument.exchange_segment,
+            expiry=expiry,
+        )
+        self._raise_if_failed(response)
+        body = response["data"] if "data" in response else response
+        payload = body.get("data", body) if isinstance(body, dict) else body
+        rows: list[OptionChainRow] = []
+        for strike_str, legs in payload.get("oc", {}).items():
+            strike = float(strike_str)
+            for opt_type, key in (("CE", "ce"), ("PE", "pe")):
+                leg = legs.get(key)
+                if not leg:
+                    continue
+                raw_iv = leg.get("implied_volatility")
+                rows.append(
+                    OptionChainRow(
+                        strike=strike,
+                        opt_type=opt_type,
+                        ltp=float(leg.get("last_price", 0) or 0),
+                        iv=(float(raw_iv) / 100.0) if raw_iv else None,
+                        oi=float(leg.get("oi", 0) or 0),
+                        volume=float(leg.get("volume", 0) or 0),
+                    )
+                )
+        return OptionChainSnapshot(spot=float(payload["last_price"]), rows=rows)
+
+    def get_expiry_list(self, instrument: Any) -> list[str]:
+        """Every expiry Dhan currently lists for this underlying."""
+        response = self._sdk.expiry_list(
+            under_security_id=int(instrument.security_id),
+            under_exchange_segment=instrument.exchange_segment,
+        )
+        self._raise_if_failed(response)
+        body = response["data"] if "data" in response else response
+        payload = body.get("data", body) if isinstance(body, dict) else body
+        return list(payload)
+
     @staticmethod
     def _raise_if_failed(response: dict) -> None:
         # Real dhanhq responses use {"status": "success"/"failure", "data":...,
@@ -322,4 +399,7 @@ class DhanClient:
             )
 
 
-__all__ = ["DhanClient", "DhanApiError", "DhanTokenExpiredError", "Quote", "Bar", "FundLimits"]
+__all__ = [
+    "DhanClient", "DhanApiError", "DhanTokenExpiredError", "Quote", "Bar", "FundLimits",
+    "OptionChainRow", "OptionChainSnapshot",
+]

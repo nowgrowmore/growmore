@@ -30,6 +30,10 @@ EXPECTED_TABLES = {
     "portfolio_backtest_runs",
     "portfolio_equity_curve_points",
     "portfolio_rebalance_holdings",
+    "wheel_basket_configs",
+    "wheel_basket_positions",
+    "wheel_basket_legs",
+    "wheel_basket_selections",
 }
 
 
@@ -66,6 +70,18 @@ def test_money_and_price_columns_are_numeric_not_float():
     _money_columns(
         "bot_config", ["max_position_size", "daily_loss_limit"]
     )
+    _money_columns(
+        "wheel_basket_configs",
+        ["total_virtual_capital", "top_iv_frac", "rotation_hysteresis_pct"],
+    )
+    _money_columns(
+        "wheel_basket_positions",
+        ["basis", "shares", "lots", "realized_pnl", "unrealized_pnl"],
+    )
+    _money_columns("wheel_basket_legs", ["strike", "premium", "lots", "pnl"])
+    _money_columns(
+        "wheel_basket_selections", ["avg_iv", "iv_percentile", "rsi", "score"]
+    )
 
 
 def test_foreign_keys_match_er_diagram():
@@ -76,6 +92,10 @@ def test_foreign_keys_match_er_diagram():
         "paper_positions": {"strategy_id": "strategies.id", "instrument_id": "instruments.id"},
         "paper_orders": {"paper_position_id": "paper_positions.id"},
         "bot_config": {"strategy_id": "strategies.id", "instrument_id": "instruments.id"},
+        "wheel_basket_configs": {"strategy_id": "strategies.id"},
+        "wheel_basket_positions": {"config_id": "wheel_basket_configs.id"},
+        "wheel_basket_legs": {"position_id": "wheel_basket_positions.id"},
+        "wheel_basket_selections": {"config_id": "wheel_basket_configs.id"},
     }
     for table_name, cols in fks.items():
         table = Base.metadata.tables[table_name]
@@ -97,6 +117,10 @@ def test_timestamp_columns_are_timezone_aware():
         "paper_orders": ["filled_at"],
         "bot_config": ["updated_at"],
         "audit_log": ["ts"],
+        "wheel_basket_configs": ["updated_at"],
+        "wheel_basket_positions": ["opened_at", "closed_at"],
+        "wheel_basket_legs": ["opened_at", "settled_at"],
+        "wheel_basket_selections": ["created_at"],
     }
     for table_name, cols in checks.items():
         table = Base.metadata.tables[table_name]

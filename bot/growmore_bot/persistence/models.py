@@ -520,6 +520,150 @@ class PortfolioRebalanceHolding(Base):
     portfolio_backtest_run: Mapped["PortfolioBacktestRun"] = relationship(back_populates="holdings")
 
 
+class WheelBasketConfig(Base):
+    """One row per basket-strategy instance -- mirrors BotConfig's gate role
+    (enabled/mode), but for a strategy that manages a ROTATING BASKET of many
+    stocks rather than one (strategy_id, instrument_id) pair. See
+    docs/stock-options-results.md for the backtested strategy this runs
+    live: an ATM put wheel (RSI-scaled basis buffer on the covered call),
+    restricted each cycle to a real per-stock IV ranking -- not any
+    strategy's own trailing return, which the backtest's cross-experiment
+    showed loses to the field at every cutoff.
+    """
+
+    __tablename__ = "wheel_basket_configs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    strategy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("strategies.id"), nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "paper" (default) or "live" -- same two-gate meaning as BotConfig.mode.
+    # A live options order-placement path does not exist yet (see
+    # docs/pending-actions.md); this stays "paper" until one is built and
+    # separately verified.
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="paper")
+    total_virtual_capital: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # Fraction of that cycle's measurable universe, ranked by IV, eligible to
+    # be selected. Defaults to the backtest's best risk/robustness trade-off
+    # (docs/stock-options-results.md Sec 7.1): 0.20 showed the biggest edge
+    # but lost a year in the sweep (5/6) on the thinnest universe; 0.50 was
+    # the most robust (6/6) at a smaller edge; 0.33 keeps the same 6/6
+    # win-rate while capturing most of 0.20's extra edge.
+    top_iv_frac: Mapped[float] = mapped_column(Numeric, nullable=False, server_default="0.33")
+    # On a no-assignment expiry, only rotate out of the current stock if
+    # another candidate's score beats it by more than this fraction (the
+    # user's "stay unless clearly better" decision) -- avoids churning on
+    # noise in a per-stock ranking the backtest's own rank-stability work
+    # found largely unstable.
+    rotation_hysteresis_pct: Mapped[float] = mapped_column(
+        Numeric, nullable=False, server_default="0.10"
+    )
+    # Defaults to RSI_BASIS_BUFFER_TIERS (growmore_bot.options.strike_selection):
+    # [[60.0, 0.05], [40.0, 0.02], [0.0, 0.0]]. Kept as data, not a hardcoded
+    # constant, so it can be revisited once the basket has its own live
+    # track record -- same reasoning as top_iv_frac above.
+    call_basis_buffer_tiers: Mapped[list] = mapped_column(JSONType, nullable=False, default=list)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    strategy: Mapped["Strategy"] = relationship()
+    positions: Mapped[list["WheelBasketPosition"]] = relationship(back_populates="config")
+    selections: Mapped[list["WheelBasketSelection"]] = relationship(back_populates="config")
+
+
+class WheelBasketPosition(Base):
+    """One row per (config, symbol) position lifecycle -- FLAT/HOLDING state
+    is `state`, not a separate table, since a stock position only ever has
+    one open leg cycle at a time (see WheelBasketLeg). Mirrors PaperPosition
+    in spirit (status open/closed, realized/unrealized P&L) but keyed on
+    `symbol` directly rather than `instrument_id`: NSE F&O stock options have
+    no existing `instruments` row (that table is MCX/Dhan-security-id
+    shaped) and adding 210 placeholder rows for a paper-only strategy would
+    be schema noise for no benefit.
+    """
+
+    __tablename__ = "wheel_basket_positions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("wheel_basket_configs.id"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")  # open|closed
+    # short_put (waiting on expiry) | holding_shares (assigned, no call written
+    # yet) | short_call (assigned, covered call written).
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    basis: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    shares: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    lots: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    realized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+
+    config: Mapped["WheelBasketConfig"] = relationship(back_populates="positions")
+    legs: Mapped[list["WheelBasketLeg"]] = relationship(
+        back_populates="position", cascade="all, delete-orphan"
+    )
+
+
+class WheelBasketLeg(Base):
+    """One row per option leg written and settled -- mirrors PaperOrder, but
+    carries the option-specific fields (strike/expiry/type) a plain equity
+    fill has no use for.
+    """
+
+    __tablename__ = "wheel_basket_legs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    position_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("wheel_basket_positions.id"), nullable=False
+    )
+    cycle_expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    opt_type: Mapped[str] = mapped_column(Text, nullable=False)  # PE|CE
+    strike: Mapped[float] = mapped_column(Numeric, nullable=False)
+    premium: Mapped[float] = mapped_column(Numeric, nullable=False)
+    lots: Mapped[float] = mapped_column(Numeric, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # sell_put|sell_call
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    called_away: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    position: Mapped["WheelBasketPosition"] = relationship(back_populates="legs")
+
+
+class WheelBasketSelection(Base):
+    """The "why" record -- every candidate CONSIDERED each cycle, not just
+    the one picked, so a rejection is as visible on the dashboard as a pick.
+    One cycle_date can have many rows (one per candidate screened that day).
+    """
+
+    __tablename__ = "wheel_basket_selections"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("wheel_basket_configs.id"), nullable=False
+    )
+    cycle_date: Mapped[date] = mapped_column(Date, nullable=False)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    avg_iv: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    iv_percentile: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    rsi: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    macd_bullish: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    config: Mapped["WheelBasketConfig"] = relationship(back_populates="selections")
+
+
 __all__ = [
     "Base",
     "Instrument",
@@ -533,9 +677,14 @@ __all__ = [
     "LiveOrder",
     "BotConfig",
     "BotSignalState",
+    "SignalHistory",
     "AuditLog",
     "BotStatus",
     "PortfolioBacktestRun",
     "PortfolioEquityCurvePoint",
     "PortfolioRebalanceHolding",
+    "WheelBasketConfig",
+    "WheelBasketPosition",
+    "WheelBasketLeg",
+    "WheelBasketSelection",
 ]

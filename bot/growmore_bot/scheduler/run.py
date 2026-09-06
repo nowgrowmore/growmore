@@ -417,6 +417,7 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
     itself a reasonable proxy for "start of a fresh session" too.
     """
     from apscheduler.schedulers.blocking import BlockingScheduler
+    from apscheduler.triggers.cron import CronTrigger
 
     from growmore_bot.broker.dhan_client import DhanClient
     from growmore_bot.broker.token_refresh import (
@@ -497,8 +498,30 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
                 )
             )
 
+    def _wheel_basket_job() -> None:
+        # Separate from _job's 5-minute MCX tick loop: an options wheel is
+        # decided at expiry, once a day, not intraday -- see
+        # growmore_bot.wheel_basket.wheel_basket_engine's module docstring.
+        from growmore_bot.scheduler.nse_equity_hours import is_nse_trading_day
+        from growmore_bot.wheel_basket.scheduler_job import run_wheel_basket_configs
+
+        now = datetime.now(MCX_TIMEZONE)
+        if not is_nse_trading_day(now):
+            return
+
+        settings = Settings()
+        dhan_client = DhanClient(
+            client_id=settings.dhan_client_id, access_token=settings.dhan_access_token
+        )
+        dhan_client.refresh_access_token_if_needed()
+        with session_scope() as session:
+            run_wheel_basket_configs(session, dhan_client, today=now.date())
+
     scheduler = BlockingScheduler(timezone=MCX_TIMEZONE)
     scheduler.add_job(_job, "interval", seconds=interval, next_run_time=datetime.now(MCX_TIMEZONE))
+    # After NSE equity close (~15:30 IST) so the day's closing/settlement
+    # quality prices are available for expiry-day assignment decisions.
+    scheduler.add_job(_wheel_basket_job, CronTrigger(hour=15, minute=45, timezone=MCX_TIMEZONE))
     logger.info("Starting scheduler, polling every %s seconds", interval)
     scheduler.start()
 

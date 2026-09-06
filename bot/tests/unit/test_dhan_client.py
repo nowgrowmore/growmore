@@ -274,6 +274,104 @@ def test_get_historical_ohlc_intraday_interval_calls_intraday_endpoint(instrumen
     assert sent["interval"] == 5
 
 
+@responses.activate
+def test_get_option_chain_parses_strikes_across_both_legs(instrument):
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain",
+        json={
+            "status": "success",
+            "data": {
+                "last_price": 100.0,
+                "oc": {
+                    "95.000000": {
+                        "ce": {"last_price": 7.5, "implied_volatility": 32.0, "oi": 1200,
+                               "volume": 400},
+                        "pe": {"last_price": 1.2, "implied_volatility": 40.0, "oi": 800,
+                               "volume": 150},
+                    },
+                    "100.000000": {
+                        "ce": {"last_price": 3.0, "implied_volatility": 30.0, "oi": 5000,
+                               "volume": 900},
+                        "pe": {"last_price": 3.1, "implied_volatility": 31.0, "oi": 4800,
+                               "volume": 870},
+                    },
+                },
+            },
+        },
+        status=200,
+    )
+    client = _make_client()
+    chain = client.get_option_chain(instrument, expiry="2026-09-24")
+
+    assert chain.spot == pytest.approx(100.0)
+    assert len(chain.rows) == 4
+    atm_call = next(r for r in chain.rows if r.strike == 100.0 and r.opt_type == "CE")
+    assert atm_call.ltp == pytest.approx(3.0)
+    # Dhan reports IV as a percentage number (32.0 meaning 32%); parsed into
+    # a fraction so it's directly comparable to growmore_bot's realised_vol.
+    assert atm_call.iv == pytest.approx(0.30)
+    assert atm_call.oi == pytest.approx(5000)
+    assert atm_call.volume == pytest.approx(900)
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["UnderlyingScrip"] == 999999
+    assert sent["UnderlyingSeg"] == "MCX_COMM"
+    assert sent["Expiry"] == "2026-09-24"
+
+
+@responses.activate
+def test_get_option_chain_treats_a_missing_iv_as_unavailable_not_zero():
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain",
+        json={
+            "status": "success",
+            "data": {
+                "last_price": 100.0,
+                "oc": {
+                    "100.000000": {
+                        "ce": {"last_price": 3.0, "oi": 10, "volume": 5},
+                    },
+                },
+            },
+        },
+        status=200,
+    )
+    client = _make_client()
+    from types import SimpleNamespace
+    instrument = SimpleNamespace(exchange_segment="MCX_COMM", security_id="999999")
+    chain = client.get_option_chain(instrument, expiry="2026-09-24")
+    assert chain.rows[0].iv is None
+
+
+@responses.activate
+def test_get_option_chain_raises_on_api_failure_status(instrument):
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain",
+        json={"errorCode": "DH-905", "errorMessage": "Invalid token"},
+        status=401,
+    )
+    client = _make_client()
+    from growmore_bot.broker.dhan_client import DhanApiError
+    with pytest.raises(DhanApiError):
+        client.get_option_chain(instrument, expiry="2026-09-24")
+
+
+@responses.activate
+def test_get_expiry_list_returns_the_dates(instrument):
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain/expirylist",
+        json={"status": "success", "data": ["2026-09-24", "2026-10-29"]},
+        status=200,
+    )
+    client = _make_client()
+    dates = client.get_expiry_list(instrument)
+    assert dates == ["2026-09-24", "2026-10-29"]
+
+
 def test_dhan_client_never_exposes_order_placement_methods():
     client = _make_client()
     for forbidden in ("place_order", "place_slice_order", "modify_order", "cancel_order"):

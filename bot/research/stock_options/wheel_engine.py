@@ -58,17 +58,20 @@ from growmore_bot.costs import (
     NSE_OPTION_COST_MODEL,
     leg_cost,
 )
+from growmore_bot.options.strike_selection import (
+    MIN_STRIKE_VOLUME,
+    RSI_BASIS_BUFFER_TIERS,
+    select_strike,
+)
+from growmore_bot.options.strike_selection import (
+    rsi_scaled_basis_buffer as _rsi_scaled_basis_buffer,
+)
 from research.stock_options.pricing import implied_vol, option_delta
 
 #: Fraction of the premium given up to the spread on entry. Options slip on
 #: premium, not in ticks: Rs 0.10 of tick slip is 5bps on a Rs 200 premium and
 #: 6.7% on a Rs 1.50 one, so the commodity tick model ranks strikes backwards.
 PREMIUM_SLIPPAGE_PCT = 0.02
-
-#: A strike must have actually printed to be sellable. Bhavcopy lists every
-#: strike the exchange offered, including ones that never traded, and selling
-#: those is fiction.
-MIN_STRIKE_VOLUME = 1
 
 
 @dataclass(frozen=True)
@@ -174,60 +177,10 @@ def monthly_expiries(chain: pd.DataFrame) -> list[pd.Timestamp]:
     return sorted(pd.to_datetime(chain["expiry"]).unique())
 
 
-def select_strike(
-    day_chain: pd.DataFrame,
-    opt_type: str,
-    spot: float,
-    target_otm: float,
-    floor_strike: Optional[float] = None,
-) -> Optional[pd.Series]:
-    """The tradeable strike closest to `target_otm` away from spot.
-
-    `floor_strike` enforces the "never write a call below the assignment
-    basis" rule: candidates below it are removed entirely rather than
-    penalised, because the rule is absolute.
-    """
-    side = day_chain[
-        (day_chain["opt_type"] == opt_type)
-        & (day_chain["volume"] >= MIN_STRIKE_VOLUME)
-        & (day_chain["settle"] > 0)
-    ]
-    if side.empty:
-        return None
-    target = spot * (1 - target_otm) if opt_type == "PE" else spot * (1 + target_otm)
-    if floor_strike is not None:
-        side = side[side["strike"] >= floor_strike]
-        if side.empty:
-            return None
-    idx = (side["strike"] - target).abs().idxmin()
-    return side.loc[idx]
-
-
 #: D will not write closer to the money than this delta, so "richest premium"
 #: cannot simply collapse to the at-the-money strike where premium is always
 #: largest. It is a risk cap, not a tuned parameter.
 MAX_SHORT_DELTA = 0.35
-
-#: RSI(14) -> how far above the assignment basis to raise the no-loss floor.
-#: Checked in descending order, first threshold the RSI clears wins. Real
-#: momentum (>=60) earns the full "couple of percent" buffer headroom to
-#: capture more of a genuine recovery; neutral readings get a token buffer;
-#: below 40 there is no shown strength to justify giving up any premium for,
-#: so it falls back to exactly G's basis-floor rule.
-RSI_BASIS_BUFFER_TIERS: tuple[tuple[float, float], ...] = (
-    (60.0, 0.05),
-    (40.0, 0.02),
-    (0.0, 0.0),
-)
-
-
-def _rsi_scaled_basis_buffer(rsi: Optional[float]) -> float:
-    if rsi is None:
-        return 0.0
-    for threshold, pct in RSI_BASIS_BUFFER_TIERS:
-        if rsi >= threshold:
-            return pct
-    return 0.0
 
 
 def select_strike_by_iv_richness(
