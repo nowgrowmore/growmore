@@ -34,20 +34,20 @@ Plain-language list of things only you can do or decide. Updated as the project 
   own generation exclusively and read the token from it for research, rather than the two hosts
   competing. Worth doing before the next study.
 
-## New 2026-09-06 — wheel-basket paper-trading strategy built, needs seeding + verification
+## New 2026-09-06 — wheel-basket paper-trading strategy built, seeded, needs verification
 
 The IV-rich stock-basket wheel strategy from `docs/stock-options-results.md` (ATM put wheel,
 RSI-scaled basis buffer, restricted each cycle to a real per-stock IV ranking) now has a live
 paper-trading implementation — schema, decision engine, scheduler wiring, and a dashboard page
-(`/wheel-basket`), all paper-only. Nothing runs yet: there is no `wheel_basket_configs` row.
+(`/wheel-basket`), all paper-only.
 
-- [ ] **Seed the first `wheel_basket_configs` row directly in Postgres.** The dashboard can only
-  toggle `enabled` on an existing row (same as `bot_config`), not create one — insert it with
-  `enabled=false` initially, a `strategy_id` pointing at a `strategies` row you create for it (e.g.
-  `name="wheel_basket_iv"`), and `total_virtual_capital` set to whatever paper capital you want the
-  basket sized against. `top_iv_frac` defaults to 0.33 (the best risk/robustness trade-off found in
-  the backtest sweep — see `docs/stock-options-results.md` Sec 7.1); 0.20 showed a bigger edge but
-  on thinner evidence, 0.50 was more conservative. Your call once you've seen it trade for a while.
+- [x] **Migration `0021_wheel_basket` applied and the first `wheel_basket_configs` row seeded** —
+  done 2026-09-06, directly against the real Neon database (project `neon-fulvous-grass`, branch
+  `main`). A `strategies` row (`name="wheel_basket_iv"`) and one `wheel_basket_configs` row exist:
+  **`enabled=false`** (deliberately, pending the item below), `mode="paper"`,
+  `total_virtual_capital=₹1,00,00,000`, `top_iv_frac=0.33`, `rotation_hysteresis_pct=0.10`,
+  `call_basis_buffer_tiers` = the code default (`[[60,0.05],[40,0.02],[0,0]]`). Nothing trades until
+  you flip `enabled` on via the `/wheel-basket` dashboard toggle.
 - [ ] **Verify Dhan's real-time option-chain response shape (`GET /optionchain`) against an actual
   call** before trusting `DhanClient.get_option_chain`/`get_expiry_list`'s parsing. Built from Dhan's
   public v2 API docs, same as every other unverified item on this list — not yet checked against a
