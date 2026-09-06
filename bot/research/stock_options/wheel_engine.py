@@ -331,20 +331,24 @@ def run_wheel(
                     records[-1].called_away = True
             short = None
 
-            if long_put is not None and long_put["expiry"] == day:
-                lk = long_put["strike"]
-                lqty = long_put["lots"] * lot_size
-                if spot < lk:
-                    # Protective put pays out: sell the delivered shares at lk.
-                    sold = min(shares, lqty)
-                    if sold > 0:
-                        cost = _delivery_cost(lk * sold, "sell")
-                        cash += lk * sold - cost
-                        total_cost += cost
-                        shares -= sold
-                        if shares == 0:
-                            basis = None
-                long_put = None
+        # The protective leg settles on its own terms, not nested inside the
+        # short's block: if the two ever came apart, a long put left open here
+        # would be marked forever and never pay out.
+        if long_put is not None and long_put["expiry"] == day:
+            lk = long_put["strike"]
+            lqty = long_put["lots"] * lot_size
+            if spot < lk and shares > 0:
+                # Deep enough to bite: exercise, selling the delivered shares
+                # at the long strike. This is what caps strategy F's loss at
+                # the width of the spread however far the stock has fallen.
+                sold = min(shares, lqty)
+                cost = _delivery_cost(lk * sold, "sell")
+                cash += lk * sold - cost
+                total_cost += cost
+                shares -= sold
+                if shares == 0:
+                    basis = None
+            long_put = None
 
         # ---- open a position for the next expiry --------------------------
         if short is None:

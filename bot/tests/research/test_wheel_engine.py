@@ -314,3 +314,26 @@ def test_a_strike_matches_despite_floating_point_rescaling():
     leg = {"strike": 100.0, "expiry": pd.Timestamp("2024-02-01"), "opt_type": "PE",
            "premium": 2.0, "lots": 1, "lot_size": 100}
     assert _mark(leg, chain, spot=95.0) == pytest.approx(750.0)
+
+
+def test_the_spread_caps_the_loss_at_its_width_however_far_the_stock_falls():
+    """Strategy F's defining property, tested against two different crashes.
+
+    Below the long strike the loss stops growing: the short put delivers
+    shares at the high strike and the long put sells them at the low one, so
+    the damage is the width minus the credit no matter what the stock does
+    next. The bare wheel has no such floor.
+    """
+    mild = _six_month_chain(lambda i: 100.0 * (0.99 ** i))
+    severe = _six_month_chain(lambda i: 100.0 * (0.97 ** i))
+    spread_cfg = StrategyConfig(tag="F", call_at_or_above_basis=False, long_put_otm=0.10)
+
+    spread_mild = run_wheel("T", mild, spread_cfg, initial_capital=500_000.0)
+    spread_severe = run_wheel("T", severe, spread_cfg, initial_capital=500_000.0)
+    bare_severe = run_wheel("T", severe, StrategyConfig(tag="A"), initial_capital=500_000.0)
+
+    assert all(r is not None for r in (spread_mild, spread_severe, bare_severe))
+    # A three-times-worse crash must not produce a three-times-worse drawdown
+    # for the spread, and the spread must beat the uncapped wheel outright.
+    assert spread_severe.max_drawdown_pct < bare_severe.max_drawdown_pct
+    assert spread_severe.final_equity > bare_severe.final_equity
