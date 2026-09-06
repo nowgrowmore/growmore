@@ -58,6 +58,7 @@ from growmore_bot.costs import (
     NSE_OPTION_COST_MODEL,
     leg_cost,
 )
+from research.stock_options.pricing import implied_vol, option_delta
 
 #: Fraction of the premium given up to the spread on entry. Options slip on
 #: premium, not in ticks: Rs 0.10 of tick slip is 5bps on a Rs 200 premium and
@@ -174,6 +175,58 @@ def select_strike(
     return side.loc[idx]
 
 
+#: D will not write closer to the money than this delta, so "richest premium"
+#: cannot simply collapse to the at-the-money strike where premium is always
+#: largest. It is a risk cap, not a tuned parameter.
+MAX_SHORT_DELTA = 0.35
+
+
+def select_strike_by_iv_richness(
+    day_chain: pd.DataFrame,
+    opt_type: str,
+    spot: float,
+    years: float,
+    stock_realised_vol: float,
+    floor_strike: Optional[float] = None,
+) -> Optional[pd.Series]:
+    """Strategy D's strike: where implied vol stands furthest above realised.
+
+    This is the variance risk premium measured strike by strike, rather than
+    a fixed distance out of the money. The delta cap stops it drifting to the
+    money; the realised-vol reference is the stock's own, so a chronically
+    volatile name is not flattered for simply being volatile.
+
+    Returns None when nothing clears the cap or no strike yields a usable
+    implied vol -- a real outcome, recorded as a skipped month.
+    """
+    side = day_chain[
+        (day_chain["opt_type"] == opt_type)
+        & (day_chain["volume"] >= MIN_STRIKE_VOLUME)
+        & (day_chain["settle"] > 0)
+    ]
+    if side.empty or years <= 0:
+        return None
+    if floor_strike is not None:
+        side = side[side["strike"] >= floor_strike]
+        if side.empty:
+            return None
+
+    best = None
+    best_score = float("-inf")
+    for _, row in side.iterrows():
+        strike = float(row["strike"])
+        price = float(row["settle"])
+        iv = implied_vol(price, spot, strike, years, opt_type)
+        if iv is None:
+            continue
+        if abs(option_delta(spot, strike, years, iv, opt_type)) > MAX_SHORT_DELTA:
+            continue
+        score = iv - stock_realised_vol
+        if score > best_score:
+            best_score, best = score, row
+    return best
+
+
 def _option_cost(premium_turnover: float, side: str) -> float:
     """Charged on PREMIUM turnover, never on strike x lot."""
     return leg_cost(max(premium_turnover, 0.0), side, NSE_OPTION_COST_MODEL)
@@ -189,6 +242,7 @@ def run_wheel(
     chain: pd.DataFrame,
     config: StrategyConfig,
     initial_capital: float = 1_000_000.0,
+    realised_vol_by_day: Optional[dict] = None,
 ) -> Optional[WheelResult]:
     """Walk one stock's monthly option history through the state machine.
 
@@ -283,8 +337,12 @@ def run_wheel(
                 nxt = future[0]
                 nxt_chain = day_chain[day_chain["expiry"] == nxt]
                 if not nxt_chain.empty:
+                    rv = 0.0
+                    if realised_vol_by_day is not None:
+                        rv = float(realised_vol_by_day.get(day, 0.0))
                     opened = _open_position(
-                        config, nxt, nxt_chain, spot, cash, shares, basis, lot_size
+                        config, nxt, nxt_chain, spot, cash, shares, basis,
+                        lot_size, realised_vol=rv, today=day,
                     )
                     if opened is not None:
                         short = opened["short"]
@@ -346,6 +404,8 @@ def _open_position(
     shares: int,
     basis: Optional[float],
     lot_size: int,
+    realised_vol: float = 0.0,
+    today: Optional[pd.Timestamp] = None,
 ) -> Optional[dict]:
     """Write the next month's option, sizing to CURRENT equity.
 
@@ -358,10 +418,18 @@ def _open_position(
     assignment basis.
     """
     holding = shares > 0
+    years = 0.0
+    if today is not None:
+        years = max((expiry - today).days, 0) / 365.25
 
     if holding or config.always_long:
         floor = basis if (config.call_at_or_above_basis and basis is not None) else None
-        row = select_strike(day_chain, "CE", spot, config.call_otm, floor_strike=floor)
+        if config.dynamic_strike and realised_vol > 0:
+            row = select_strike_by_iv_richness(
+                day_chain, "CE", spot, years, realised_vol, floor_strike=floor
+            )
+        else:
+            row = select_strike(day_chain, "CE", spot, config.call_otm, floor_strike=floor)
         if row is None and floor is not None:
             # The "never below basis" rule can leave nothing sellable at all.
             # That IS the constraint biting, and it is recorded as a frozen
@@ -379,7 +447,10 @@ def _open_position(
         opt_type = "CE"
         action = "sell_call"
     else:
-        row = select_strike(day_chain, "PE", spot, config.put_otm)
+        if config.dynamic_strike and realised_vol > 0:
+            row = select_strike_by_iv_richness(day_chain, "PE", spot, years, realised_vol)
+        else:
+            row = select_strike(day_chain, "PE", spot, config.put_otm)
         if row is None:
             return None
         strike = float(row["strike"])
@@ -452,7 +523,8 @@ def _mark(leg: Optional[dict], day_chain: pd.DataFrame, sign: int = 1) -> float:
 
 __all__ = [
     "StrategyConfig", "CycleRecord", "WheelResult", "HEADER", "as_row",
-    "monthly_expiries", "select_strike", "PREMIUM_SLIPPAGE_PCT",
+    "monthly_expiries", "select_strike", "select_strike_by_iv_richness",
+    "run_wheel", "STRATEGIES", "MAX_SHORT_DELTA", "PREMIUM_SLIPPAGE_PCT",
     "MIN_STRIKE_VOLUME", "cagr_pct", "max_drawdown_pct", "profit_factor",
     "sharpe_ratio", "win_rate_pct",
 ]
