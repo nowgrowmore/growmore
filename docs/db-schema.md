@@ -112,7 +112,6 @@ erDiagram
         uuid strategy_id FK
         uuid instrument_id FK
         boolean enabled
-        numeric virtual_capital
         numeric max_position_size
         numeric daily_loss_limit
         text mode "paper (default) | live -- see CLAUDE.md non-negotiables"
@@ -146,6 +145,66 @@ erDiagram
         text event_type
         jsonb payload
     }
+
+    STRATEGIES ||--o{ WHEEL_BASKET_CONFIGS : "one config manages a rotating basket"
+    WHEEL_BASKET_CONFIGS ||--o{ WHEEL_BASKET_POSITIONS : "one row per (config, symbol)"
+    WHEEL_BASKET_CONFIGS ||--o{ WHEEL_BASKET_SELECTIONS : "one row per candidate per cycle"
+    WHEEL_BASKET_POSITIONS ||--o{ WHEEL_BASKET_LEGS : "one row per option leg written/settled"
+
+    WHEEL_BASKET_CONFIGS {
+        uuid id PK
+        uuid strategy_id FK
+        boolean enabled
+        text mode "paper (only mode that exists -- no live options path yet)"
+        numeric total_virtual_capital "one pool, divided dynamically across eligible symbols"
+        numeric top_iv_frac "fraction of the universe eligible by IV rank, default 0.33"
+        numeric rotation_hysteresis_pct "min score edge a challenger needs to trigger a rotation"
+        jsonb call_basis_buffer_tiers "RSI -> basis-buffer %, default [[60,0.05],[40,0.02],[0,0]]"
+        timestamptz updated_at
+    }
+    WHEEL_BASKET_POSITIONS {
+        uuid id PK
+        uuid config_id FK
+        text symbol "no instruments row -- NSE F&O options aren't in that MCX-shaped table"
+        text status "open|closed"
+        text state "short_put|holding_shares|short_call|flat"
+        numeric basis "assignment strike, null until assigned"
+        numeric shares
+        numeric lots
+        timestamptz opened_at
+        timestamptz closed_at
+        numeric realized_pnl
+        numeric unrealized_pnl
+    }
+    WHEEL_BASKET_LEGS {
+        uuid id PK
+        uuid position_id FK
+        date cycle_expiry
+        text opt_type "PE|CE"
+        numeric strike
+        numeric premium
+        numeric lots
+        text action "sell_put|sell_call"
+        timestamptz opened_at
+        timestamptz settled_at
+        boolean assigned
+        boolean called_away
+        numeric pnl
+    }
+    WHEEL_BASKET_SELECTIONS {
+        uuid id PK
+        uuid config_id FK
+        date cycle_date
+        text symbol
+        boolean selected "every candidate considered gets a row, not just the winner"
+        numeric avg_iv
+        numeric iv_percentile "the validated selection metric, docs/stock-options-results.md Sec 7.1"
+        numeric rsi "recorded for transparency -- not part of the selection score"
+        boolean macd_bullish
+        numeric score "== iv_percentile"
+        text reason "human-readable, rendered directly as prose on the dashboard"
+        timestamptz created_at
+    }
 ```
 
 ## Notes
@@ -167,3 +226,10 @@ erDiagram
   process-wide singleton (is the bot armed, when did it last tick, current Dhan fund balance).
   Neither is written by the dashboard; both are upserted by the scheduler every tick.
 - Money/price columns are `numeric`, never floating point.
+- `wheel_basket_configs` plays `bot_config`'s gating role for the IV-rich stock-basket wheel
+  strategy (`docs/stock-options-results.md`), but at a different grain: one config manages a
+  *rotating basket of many symbols*, not one `(strategy, instrument)` pair, so it has no
+  `instrument_id` and its positions/legs are keyed by `symbol` text directly rather than an
+  `instruments` row (that table is MCX/Dhan-security-id shaped; NSE F&O stock options have no
+  equivalent row today). `mode` only ever has the value `"paper"` — no live options order-placement
+  path exists yet, unlike `bot_config.mode`, which genuinely supports `"live"`.

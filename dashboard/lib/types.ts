@@ -221,6 +221,73 @@ export interface PortfolioRebalanceHolding {
   composite_score: string | null;
 }
 
+// The wheel-basket strategy (docs/stock-options-results.md): a paper-traded,
+// dynamically-selected high-IV stock basket. One config manages a rotating
+// set of many symbols -- unlike bot_config's one (strategy, instrument) pair
+// -- so positions/legs/selections are keyed by config_id + symbol, not by
+// an instruments row (NSE F&O stock options have no existing instruments
+// row; that table is MCX/Dhan-security-id shaped).
+export interface WheelBasketConfig {
+  id: string;
+  strategy_id: string;
+  enabled: boolean;
+  mode: string; // "paper" | "live" (live path does not exist yet)
+  total_virtual_capital: string;
+  top_iv_frac: string;
+  rotation_hysteresis_pct: string;
+  call_basis_buffer_tiers: [number, number][];
+  updated_at: string;
+}
+
+export interface WheelBasketPosition {
+  id: string;
+  config_id: string;
+  symbol: string;
+  status: string; // open|closed
+  state: string; // short_put|holding_shares|short_call|flat
+  basis: string | null;
+  shares: string;
+  lots: string;
+  opened_at: string;
+  closed_at: string | null;
+  realized_pnl: string;
+  unrealized_pnl: string;
+}
+
+export interface WheelBasketLeg {
+  id: string;
+  position_id: string;
+  // Joined in from the parent position by getWheelBasketLegs -- not a real
+  // column on wheel_basket_legs itself.
+  symbol: string;
+  cycle_expiry: string;
+  opt_type: string; // PE|CE
+  strike: string;
+  premium: string;
+  lots: string;
+  action: string; // sell_put|sell_call
+  opened_at: string;
+  settled_at: string | null;
+  assigned: boolean;
+  called_away: boolean;
+  pnl: string | null;
+}
+
+export interface WheelBasketSelection {
+  id: string;
+  config_id: string;
+  cycle_date: string;
+  symbol: string;
+  selected: boolean;
+  avg_iv: string | null;
+  iv_percentile: string | null;
+  rsi: string | null;
+  macd_bullish: boolean | null;
+  score: string | null;
+  reason: string;
+  created_at: string;
+}
+
 export interface AuditLogEntry {
   id: string;
   ts: string;

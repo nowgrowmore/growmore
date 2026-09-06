@@ -36,4 +36,10 @@ test.describe("preview smoke", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: /strategy configuration/i })).toBeVisible();
   });
+
+  test("Wheel Basket page loads and renders its heading", async ({ page }) => {
+    const response = await page.goto("/wheel-basket");
+    expect(response?.status()).toBe(200);
+    await expect(page.getByRole("heading", { name: /wheel basket/i })).toBeVisible();
+  });
 });

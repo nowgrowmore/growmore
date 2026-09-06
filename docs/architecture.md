@@ -17,25 +17,36 @@ flowchart LR
         Live["Live trading engine\n(real orders, gated OFF)"]
         Broker["Dhan client wrapper\n(Data API only)"]
         OrderClient["Dhan order client\n(the ONLY module allowed\nto call the Order API)"]
+        WheelBasket["Wheel-basket engine\n(paper only, rotating\nhigh-IV stock basket,\nonce-daily cycle after\nNSE close)"]
     end
 
-    DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log")]
+    DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log,\nwheel_basket_configs/positions/\nlegs/selections")]
 
     subgraph Vercel["Vercel"]
-        Dashboard["Next.js dashboard\n(Overview, Backtests, Trade Log, Strategy Config)"]
+        Dashboard["Next.js dashboard\n(Overview, Backtests, Trade Log,\nStrategy Config, Wheel Basket)"]
     end
 
     DataAPI --> Broker --> Scheduler
     Scheduler --> Strategies --> Paper
     Strategies --> Live
+    Broker --> WheelBasket
     Backtest --> DB
     Paper --> DB
     Live --> DB
+    WheelBasket --> DB
     Live --> OrderClient
     OrderClient -. "gated: live_trading_enabled AND\nbot_config.mode=live, both required" .-> OrderAPI
     DB --> Dashboard
     Dashboard -- "enable/disable strategy" --> DB
 ```
+
+The wheel-basket engine (`bot/growmore_bot/wheel_basket/`) is a separate, once-daily cycle, not
+part of the 5-minute `Scheduler` tick loop above — an options wheel is decided at expiry, not
+intraday. It is **paper-only**: no live options order-placement path exists, and
+`wheel_basket_configs.mode` stays `"paper"`. See `docs/stock-options-results.md` for the backtested
+strategy it runs (ATM put wheel, RSI-scaled basis buffer, restricted each cycle to a real per-stock
+IV ranking) and `docs/pending-actions.md` for what's still unverified before trusting it further
+(Dhan's real-time option-chain response shape has not yet been checked against a real call).
 
 ## Components
 

@@ -14,7 +14,12 @@ import {
   getPortfolioHoldings,
   getRecentSignals,
   getRecentSignalsForConfigs,
+  getWheelBasketConfigs,
+  getWheelBasketLegs,
+  getWheelBasketPositions,
+  getWheelBasketSelections,
   setBotConfigEnabled,
+  setWheelBasketConfigEnabled,
   updateBotConfigRiskParams,
 } from "./db";
 
@@ -316,5 +321,75 @@ describe("getPortfolioHoldings", () => {
     const result = await getPortfolioHoldings("run-1");
 
     expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getWheelBasketConfigs", () => {
+  it("returns whatever rows the client resolves with", async () => {
+    const fakeRows = [{ id: "config-1", enabled: true }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getWheelBasketConfigs();
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getWheelBasketPositions", () => {
+  it("returns the positions for one config", async () => {
+    const fakeRows = [{ id: "pos-1", symbol: "RELIANCE" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getWheelBasketPositions("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getWheelBasketLegs", () => {
+  it("returns the legs joined through positions for one config", async () => {
+    const fakeRows = [{ id: "leg-1", action: "sell_put" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getWheelBasketLegs("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getWheelBasketSelections", () => {
+  it("returns the selection log for one config", async () => {
+    const fakeRows = [{ id: "sel-1", symbol: "RELIANCE", selected: true }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getWheelBasketSelections("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("setWheelBasketConfigEnabled", () => {
+  it("runs the update and an audit_log insert inside one transaction", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    await setWheelBasketConfigEnabled("config-1", true);
+
+    expect(fakeSql.transaction).toHaveBeenCalledTimes(1);
+    expect(fakeSql).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the requested enabled value in the audit payload", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    await setWheelBasketConfigEnabled("config-1", false);
+
+    const auditCallParams = fakeSql.calls[1];
+    expect(JSON.stringify(auditCallParams)).toContain("wheel_basket_disabled");
   });
 });

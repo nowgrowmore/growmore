@@ -14,6 +14,10 @@ import type {
   PortfolioEquityCurvePoint,
   PortfolioRebalanceHolding,
   SignalHistoryRow,
+  WheelBasketConfig,
+  WheelBasketLeg,
+  WheelBasketPosition,
+  WheelBasketSelection,
 } from "./types";
 
 // Thin, typed query layer against the shared Postgres schema owned by
@@ -464,4 +468,75 @@ export async function getPortfolioHoldings(runId: string): Promise<PortfolioReba
     order by rebalance_date asc, weight desc
   `;
   return rows as unknown as PortfolioRebalanceHolding[];
+}
+
+// The wheel-basket strategy (docs/stock-options-results.md) -- a paper-
+// traded, dynamically-selected high-IV stock basket. One config manages
+// many rotating symbols, unlike bot_config's one-instrument-per-row shape.
+
+export async function getWheelBasketConfigs(): Promise<WheelBasketConfig[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from wheel_basket_configs
+    order by updated_at desc
+  `;
+  return rows as unknown as WheelBasketConfig[];
+}
+
+export async function getWheelBasketPositions(configId: string): Promise<WheelBasketPosition[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from wheel_basket_positions
+    where config_id = ${configId}
+    order by opened_at desc
+  `;
+  return rows as unknown as WheelBasketPosition[];
+}
+
+export async function getWheelBasketLegs(configId: string): Promise<WheelBasketLeg[]> {
+  const sql = getClient();
+  // p.symbol is joined in purely for display -- WheelBasketLeg itself has
+  // no symbol column (that lives on the parent position), mirrored here so
+  // the trade-history table doesn't need a second round trip per leg.
+  const rows = await sql`
+    select l.*, p.symbol as symbol from wheel_basket_legs l
+    join wheel_basket_positions p on p.id = l.position_id
+    where p.config_id = ${configId}
+    order by l.opened_at desc
+  `;
+  return rows as unknown as WheelBasketLeg[];
+}
+
+export async function getWheelBasketSelections(
+  configId: string,
+  limit = 300
+): Promise<WheelBasketSelection[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from wheel_basket_selections
+    where config_id = ${configId}
+    order by cycle_date desc, score desc nulls last
+    limit ${limit}
+  `;
+  return rows as unknown as WheelBasketSelection[];
+}
+
+export async function setWheelBasketConfigEnabled(id: string, enabled: boolean): Promise<void> {
+  const sql = getClient();
+  await sql.transaction((tx) => [
+    tx`
+      update wheel_basket_configs
+      set enabled = ${enabled}, updated_at = now()
+      where id = ${id}
+    `,
+    tx`
+      insert into audit_log (id, ts, event_type, payload)
+      values (
+        gen_random_uuid(),
+        now(),
+        ${enabled ? "wheel_basket_enabled" : "wheel_basket_disabled"},
+        ${JSON.stringify({ wheel_basket_config_id: id, enabled })}::jsonb
+      )
+    `,
+  ]);
 }

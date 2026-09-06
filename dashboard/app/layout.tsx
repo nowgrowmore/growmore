@@ -19,6 +19,7 @@ const NAV_ITEMS = [
   { href: "/guide", label: "Strategy Guide" },
   { href: "/audit", label: "Audit Log" },
   { href: "/smallcap", label: "Smallcap" },
+  { href: "/wheel-basket", label: "Wheel Basket" },
 ] as const;
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
