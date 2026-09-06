@@ -283,3 +283,34 @@ def test_a_cash_secured_put_never_deploys_more_cash_than_it_has():
     assert result is not None
     # Equity never goes negative: assignment was always affordable.
     assert min(result.equity_curve) > 0
+
+
+def test_a_leg_whose_strike_is_not_quoted_marks_at_intrinsic_not_at_entry():
+    """The fallback that stops a frozen liability hiding a real move.
+
+    If the contract simply did not print that day, holding it at the entry
+    premium would keep the liability at last month's value while the stock
+    moved underneath it. Intrinsic is the honest floor.
+    """
+    from research.stock_options.wheel_engine import _mark
+
+    empty = pd.DataFrame(columns=["expiry", "strike", "opt_type", "settle"])
+    leg = {"strike": 100.0, "expiry": pd.Timestamp("2024-02-01"), "opt_type": "PE",
+           "premium": 2.0, "lots": 1, "lot_size": 100}
+    # Stock at 70: the 100 put is 30 in the money, so the liability is 3,000,
+    # not the 200 it was written for.
+    assert _mark(leg, empty, spot=70.0) == pytest.approx(3000.0)
+    # Stock at 130: worthless, not still 200.
+    assert _mark(leg, empty, spot=130.0) == pytest.approx(0.0)
+
+
+def test_a_strike_matches_despite_floating_point_rescaling():
+    from research.stock_options.wheel_engine import _mark
+
+    chain = pd.DataFrame([{
+        "expiry": pd.Timestamp("2024-02-01"), "strike": 100.0000001,
+        "opt_type": "PE", "settle": 7.5,
+    }])
+    leg = {"strike": 100.0, "expiry": pd.Timestamp("2024-02-01"), "opt_type": "PE",
+           "premium": 2.0, "lots": 1, "lot_size": 100}
+    assert _mark(leg, chain, spot=95.0) == pytest.approx(750.0)

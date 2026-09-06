@@ -379,7 +379,9 @@ def run_wheel(
                         records.append(opened["record"])
 
         # ---- mark to market ----------------------------------------------
-        short_value = _mark(short, day_chain) + _mark(long_put, day_chain, sign=-1)
+        short_value = _mark(short, day_chain, spot) + _mark(
+            long_put, day_chain, spot, sign=-1
+        )
         equity = cash + shares * spot - short_value
         equity_curve.append(equity)
         curve_days.append(day)
@@ -562,17 +564,41 @@ def _open_position(
     return result
 
 
-def _mark(leg: Optional[dict], day_chain: pd.DataFrame, sign: int = 1) -> float:
-    """Current liability of an open option leg, at today's settlement price."""
+def _mark(
+    leg: Optional[dict], day_chain: pd.DataFrame, spot: float, sign: int = 1
+) -> float:
+    """Current value of an open option leg, at today's settlement price.
+
+    Strikes are matched on nearest-within-tolerance rather than exact float
+    equality. Two things defeat equality: prices are rescaled into adjusted
+    space by a factor that CHANGES at a corporate action, so a leg opened
+    before one carries a strike the post-action chain no longer contains; and
+    float equality on a product of two floats is fragile regardless.
+
+    When the strike genuinely is not quoted that day -- an illiquid contract
+    that simply did not print -- the fallback is INTRINSIC value, not the
+    entry premium. A stale entry price would hold the liability frozen at
+    what it was worth a month ago, hiding exactly the move that matters.
+    """
     if leg is None:
         return 0.0
-    row = day_chain[
+    quantity = leg["lots"] * leg["lot_size"]
+    same = day_chain[
         (day_chain["expiry"] == leg["expiry"])
-        & (day_chain["strike"] == leg["strike"])
         & (day_chain["opt_type"] == leg["opt_type"])
     ]
-    price = float(row["settle"].iloc[0]) if not row.empty else leg["premium"]
-    return sign * price * leg["lots"] * leg["lot_size"]
+    price = None
+    if not same.empty:
+        gap = (same["strike"] - leg["strike"]).abs()
+        nearest = gap.idxmin()
+        if float(gap.loc[nearest]) <= max(0.005 * leg["strike"], 0.01):
+            price = float(same.loc[nearest, "settle"])
+    if price is None:
+        strike = leg["strike"]
+        price = max(
+            (spot - strike) if leg["opt_type"] == "CE" else (strike - spot), 0.0
+        )
+    return sign * price * quantity
 
 
 __all__ = [
