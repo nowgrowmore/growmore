@@ -123,6 +123,9 @@ class WheelResult:
     time_underwater_pct: float
     time_frozen_pct: float
     equity_curve: list[float] = field(default_factory=list)
+    #: Trading dates aligned 1:1 with `equity_curve`, so the curve can be
+    #: sliced by period without re-running the engine.
+    days: list = field(default_factory=list)
     returns: list[float] = field(default_factory=list)
     records: list[CycleRecord] = field(default_factory=list)
 
@@ -276,6 +279,7 @@ def run_wheel(
     short: Optional[dict] = None           # the written option
     long_put: Optional[dict] = None        # protective leg, strategy F only
     equity_curve: list[float] = []
+    curve_days: list = []
     records: list[CycleRecord] = []
     total_cost = 0.0
     peak = float(initial_capital)
@@ -358,6 +362,7 @@ def run_wheel(
         short_value = _mark(short, day_chain) + _mark(long_put, day_chain, sign=-1)
         equity = cash + shares * spot - short_value
         equity_curve.append(equity)
+        curve_days.append(day)
         peak = max(peak, equity)
         if equity < peak:
             underwater_days += 1
@@ -390,6 +395,7 @@ def run_wheel(
         time_underwater_pct=100.0 * underwater_days / len(equity_curve),
         time_frozen_pct=100.0 * frozen_days / len(equity_curve),
         equity_curve=equity_curve,
+        days=curve_days,
         returns=returns,
         records=records,
     )
