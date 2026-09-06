@@ -79,35 +79,62 @@ def cached_days() -> list[date]:
     return sorted(date.fromisoformat(p.stem) for p in DAY_DIR.glob("*.parquet"))
 
 
-def consolidate_by_symbol(symbols: Optional[Iterable[str]] = None) -> dict[str, int]:
+def consolidate_by_symbol(
+    symbols: Optional[Iterable[str]] = None, flush_every: int = 120
+) -> dict[str, int]:
     """Rewrite the per-day files as one parquet per underlying.
 
-    Done in a single streaming pass over the day files, accumulating per
-    symbol, because loading 46M rows at once is unnecessary and the whole
-    point of the per-symbol layout is that the engine never has to.
+    Streams, and that is not premature: the full store is ~46M rows across
+    ~1,740 days, which is several GB if accumulated in memory before writing.
+    Day files are read in order and per-symbol buckets flushed to numbered
+    part files every `flush_every` days; the parts are then concatenated once
+    per symbol, which never holds more than one symbol's history at a time.
     """
     days = cached_days()
     if not days:
         return {}
     wanted = set(symbols) if symbols is not None else None
     SYMBOL_DIR.mkdir(parents=True, exist_ok=True)
+    parts_dir = SYMBOL_DIR / "_parts"
+    if parts_dir.exists():
+        for stale in parts_dir.glob("*.parquet"):
+            stale.unlink()
+    parts_dir.mkdir(parents=True, exist_ok=True)
 
     buckets: dict[str, list[pd.DataFrame]] = {}
-    for day in days:
+    part_index = 0
+
+    def flush(index: int) -> None:
+        for symbol, frames in buckets.items():
+            if frames:
+                pd.concat(frames, ignore_index=True).to_parquet(
+                    parts_dir / f"{symbol}__{index:04d}.parquet", index=False
+                )
+        buckets.clear()
+
+    for position, day in enumerate(days, start=1):
         frame = pd.read_parquet(_day_path(day))
-        if frame.empty:
-            continue
-        for symbol, group in frame.groupby("symbol", sort=False):
-            if wanted is not None and symbol not in wanted:
-                continue
-            buckets.setdefault(str(symbol), []).append(group)
+        if not frame.empty:
+            for symbol, group in frame.groupby("symbol", sort=False):
+                if wanted is not None and symbol not in wanted:
+                    continue
+                buckets.setdefault(str(symbol), []).append(group)
+        if position % flush_every == 0:
+            flush(part_index)
+            part_index += 1
+    flush(part_index)
 
     counts: dict[str, int] = {}
-    for symbol, parts in buckets.items():
-        merged = pd.concat(parts, ignore_index=True)
+    all_symbols = sorted({p.stem.split("__")[0] for p in parts_dir.glob("*.parquet")})
+    for symbol in all_symbols:
+        parts = sorted(parts_dir.glob(f"{symbol}__*.parquet"))
+        merged = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
         merged = merged.sort_values(["trade_date", "expiry", "strike", "opt_type"])
         merged.reset_index(drop=True).to_parquet(SYMBOL_DIR / f"{symbol}.parquet", index=False)
         counts[symbol] = len(merged)
+        for p in parts:
+            p.unlink()
+    parts_dir.rmdir()
     return counts
 
 
@@ -125,7 +152,7 @@ def load_symbol(symbol: str) -> pd.DataFrame:
 def cached_symbols() -> list[str]:
     if not SYMBOL_DIR.exists():
         return []
-    return sorted(p.stem for p in SYMBOL_DIR.glob("*.parquet"))
+    return sorted(p.stem for p in SYMBOL_DIR.glob("*.parquet") if "__" not in p.stem)
 
 
 __all__ = [
