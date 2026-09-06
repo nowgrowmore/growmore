@@ -285,6 +285,11 @@ def run_wheel(
 
     short: Optional[dict] = None           # the written option
     long_put: Optional[dict] = None        # protective leg, strategy F only
+    #: The expiry we have already acted on. Without this, a month in which we
+    #: deliberately write nothing (strategy E's trend skip) re-decides every
+    #: single day, producing one record per DAY instead of one per month --
+    #: 210 cycles where there were 7, and every per-cycle statistic wrong.
+    handled_expiry = None
     equity_curve: list[float] = []
     curve_days: list = []
     records: list[CycleRecord] = []
@@ -344,7 +349,7 @@ def run_wheel(
         # ---- open a position for the next expiry --------------------------
         if short is None:
             future = [e for e in expiries if e > day]
-            if future:
+            if future and future[0] != handled_expiry:
                 nxt = future[0]
                 nxt_chain = day_chain[day_chain["expiry"] == nxt]
                 if not nxt_chain.empty:
@@ -359,7 +364,12 @@ def run_wheel(
                         lot_size, realised_vol=rv, today=day, trend_bullish=bullish,
                     )
                     if opened is not None:
-                        short = opened["short"]  # may be None: a deliberate skip
+                        # A None short is a deliberate skip, not a failure;
+                        # either way this expiry is now decided. When
+                        # `_open_position` returns None outright no strike was
+                        # tradeable, and retrying tomorrow is the right move.
+                        handled_expiry = nxt
+                        short = opened["short"]
                         long_put = opened.get("long_put")
                         cash += opened["cash_delta"]
                         total_cost += opened["cost"]

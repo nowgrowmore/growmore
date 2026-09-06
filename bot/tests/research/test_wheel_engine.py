@@ -229,3 +229,42 @@ def test_the_trend_filter_makes_strategy_e_differ_from_plain_buy_write():
     assert not any(r.action == "hold_uncovered" for r in plain.records)
     # Uncapped upside on a rising stock must beat the capped version.
     assert filtered.final_equity > plain.final_equity
+
+
+def test_a_month_is_decided_once_not_re_decided_every_day():
+    """The bug this pins produced 210 cycles where there were 7.
+
+    A month in which the strategy deliberately writes nothing leaves no open
+    short, so without a guard the engine re-runs the decision on every
+    subsequent trading day and appends a record each time. Every per-cycle
+    statistic -- cycle count, win rate, assignment rate -- is then wrong by
+    the number of trading days in a month.
+    """
+    chain = _six_month_chain(lambda i: 100.0 * (1.004 ** i))
+    days = sorted({d for d in pd.to_datetime(chain["trade_date"]).unique()})
+    always_bullish = {pd.Timestamp(d): True for d in days}
+    result = run_wheel(
+        "T", chain,
+        StrategyConfig(tag="E", always_long=True, call_at_or_above_basis=False,
+                       trend_conditioned=True),
+        initial_capital=500_000.0, trend_bullish_by_day=always_bullish,
+    )
+    assert result is not None
+    expiries = {r.expiry for r in result.records}
+    # One record per expiry, not one per trading day.
+    assert len(result.records) == len(expiries)
+    assert len(result.records) < 15
+    assert len(days) > 200
+
+
+def test_every_strategy_records_at_most_one_cycle_per_expiry():
+    chain = _six_month_chain(lambda i: 100.0 * (0.995 ** i))
+    for config in (
+        StrategyConfig(tag="A"),
+        StrategyConfig(tag="B", call_at_or_above_basis=False),
+        StrategyConfig(tag="F", call_at_or_above_basis=False, long_put_otm=0.10),
+    ):
+        result = run_wheel("T", chain, config, initial_capital=500_000.0)
+        assert result is not None, config.tag
+        seen = [r.expiry for r in result.records]
+        assert len(seen) == len(set(seen)), config.tag
