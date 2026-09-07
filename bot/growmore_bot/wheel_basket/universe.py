@@ -22,6 +22,13 @@ class UniverseRow:
     symbol: str
     security_id: str
     lot_size: int
+    #: NSE's own macro sector, one of 18. Mutually exclusive, and the bucket
+    #: the basket's sector diversification counts against.
+    nse_industry: str = ""
+    #: An OVERLAY, not a bucket -- a defence name keeps its NSE sector (BEL is
+    #: Capital Goods, BHARATFORG is Automobile). Reported as an exposure,
+    #: never used as a 19th sector. See research/fno/sectors.py.
+    is_defence: bool = False
 
 
 def load_universe(path: Path = _DEFAULT_UNIVERSE_CSV) -> list[UniverseRow]:
@@ -34,6 +41,8 @@ def load_universe(path: Path = _DEFAULT_UNIVERSE_CSV) -> list[UniverseRow]:
                 symbol=row["symbol"],
                 security_id=row["security_id"],
                 lot_size=int(row["fno_lot_size"]),
+                nse_industry=row.get("nse_industry", ""),
+                is_defence=row.get("is_defence", "").strip().lower() == "true",
             )
             for row in reader
         ]
