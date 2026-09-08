@@ -815,14 +815,25 @@ class LiveTradingEngine:
         if float(position.stop_order_trigger_price or 0) == float(stop_price):
             return  # Trail hasn't moved -- nothing to modify.
 
-        self.order_client.modify_stop_loss_trigger(
+        # Only record the move if Dhan actually took it. On a refusal the
+        # resting order still sits at the old trigger, and recording the new
+        # one would make the guard above skip the retry on every later tick
+        # -- the trail would stop ratcheting silently, with the DB showing a
+        # tighter stop than the broker really holds.
+        if not self.order_client.modify_stop_loss_trigger(
             instrument,
             position.stop_order_id,
             transaction_type="SELL",
             quantity=qty,
             new_trigger_price=stop_price,
             limit_price=limit_price,
-        )
+        ):
+            logger.warning(
+                "%s -- stop trail modify to %s REFUSED -- resting order still at %s, "
+                "will retry next tick",
+                label or position.id, stop_price, position.stop_order_trigger_price,
+            )
+            return
         position.stop_order_trigger_price = stop_price
         self.session.add(position)
 

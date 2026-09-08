@@ -423,3 +423,39 @@ def test_an_explicit_limit_on_the_wrong_side_is_forced_clear_of_the_trigger(inst
     sent = json.loads(responses.calls[0].request.body)
     assert sent["price"] == 146760 - instrument.tick_size
     assert sent["price"] < sent["triggerPrice"]
+
+
+@responses.activate
+def test_modify_reports_whether_it_actually_succeeded(instrument):
+    """`modify_stop_loss_trigger` swallows failures by design, so it has to
+    SAY whether the broker accepted the move -- the caller records the new
+    trigger price and would otherwise record a move that never happened."""
+    responses.add(
+        responses.POST, f"{API_BASE}/orders", json={"orderId": "X"}, status=200
+    )
+    responses.add(
+        responses.PUT,
+        f"{API_BASE}/orders/112111182199",
+        json={"orderId": "112111182199", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    client = _make_client()
+    assert client.modify_stop_loss_trigger(
+        instrument, "112111182199", transaction_type="SELL", quantity=1,
+        new_trigger_price=148000,
+    ) is True
+
+
+@responses.activate
+def test_modify_reports_false_when_dhan_rejects_it(instrument):
+    responses.add(
+        responses.PUT,
+        f"{API_BASE}/orders/112111182199",
+        json={"errorCode": "DH-906", "errorMessage": "nope"},
+        status=400,
+    )
+    client = _make_client()
+    assert client.modify_stop_loss_trigger(
+        instrument, "112111182199", transaction_type="SELL", quantity=1,
+        new_trigger_price=148000,
+    ) is False

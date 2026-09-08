@@ -376,7 +376,18 @@
   2 ordinary) beyond the stop level, i.e. ~4 ticks, while a 0.5-ATR limit leg permits a far worse
   tail fill. Expected fills are unaffected (a triggered stop-limit normally fills at/near the
   trigger); only the fast-move tail differs, and a tighter leg would trade that tail for the worse
-  failure of not filling at all. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
+  failure of not filling at all.
+
+  **(2026-09-08) A second bug found while verifying the trail end-to-end.**
+  `modify_stop_loss_trigger` swallows failures by design (an already-filled or already-cancelled
+  order is an expected race), but returned nothing, and `_ensure_stop_order` recorded
+  `stop_order_trigger_price = stop_price` unconditionally afterwards. On a refused modify the
+  resting order still sat at the OLD trigger while the DB claimed the new one -- and the next
+  tick's `stop_order_trigger_price == stop_price` guard then skipped the retry forever. The trail
+  would have stopped ratcheting silently, showing a tighter stop than the broker actually held.
+  Never fired in production (no modify has been attempted against a real order yet), but the first
+  one would have hit it if Dhan refused, exactly as it refused the placements. Fixed: the modify
+  now returns True/False and the caller records the move only on True, retrying otherwise. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
   yet, and a limit leg can miss on a gap -- see `docs/pending-actions.md`. Live trading is still
   blocked on the pre-existing unverified MCX order-quantity-unit question.
 - **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the

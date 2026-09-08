@@ -1124,3 +1124,43 @@ def test_stop_order_carries_the_strategys_atr_scaled_limit_leg():
     order_client.place_stop_loss_market_order.assert_called_once_with(
         instrument, transaction_type="SELL", quantity=1, trigger_price=95.0, limit_price=92.5
     )
+
+
+def test_a_rejected_trail_modify_is_retried_rather_than_recorded_as_done():
+    """If Dhan refuses the modify, the resting order still sits at the OLD
+    trigger. Recording the new one anyway would make the next tick's
+    "trail hasn't moved" guard skip it forever -- the trail would silently
+    stop ratcheting while the DB claimed a tighter stop than really exists."""
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=1)
+    strategy = _RiskAwareSpyStrategy([
+        (SignalAction.BUY, {"stop_price": 95.0, "high_water": 100.0}),
+        (SignalAction.HOLD, {"stop_price": 97.0, "high_water": 105.0}),
+    ])
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD1", order_status="TRANSIT")
+    order_client.place_stop_loss_market_order.return_value = PlacedOrder(
+        order_id="STOP1", order_status="TRANSIT"
+    )
+    order_client.modify_stop_loss_trigger.return_value = False  # Dhan refused
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+    position = [
+        c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], LivePosition)
+    ][0]
+
+    session.get.return_value = position
+    dhan_client.get_quote.return_value = Quote(ltp=105, open=105, high=106, low=104, close=105)
+    engine.process_tick(
+        config=config, instrument=instrument, strategy=strategy,
+        current_position_qty=1, avg_entry_price=100, live_position_id=position.id,
+    )
+
+    order_client.modify_stop_loss_trigger.assert_called_once()
+    # The broker still holds 95.0, so that is what we must still believe.
+    assert position.stop_order_trigger_price == 95.0

@@ -315,7 +315,7 @@ class DhanOrderClient:
         quantity: int,
         new_trigger_price: float,
         limit_price: float | None = None,
-    ) -> None:
+    ) -> bool:
         """Move a resting SL-M order's trigger price -- how a risk-managed
         position's trailing stop actually ratchets at the exchange, instead
         of the bot re-detecting and re-placing an order every tick.
@@ -331,6 +331,11 @@ class DhanOrderClient:
         a stale trigger) is logged and audited, not treated as fatal -- the
         position stays open with whatever stop is actually resting, and the
         next tick's reconciliation is what actually matters here.
+
+        Returns True only if Dhan accepted the move. Callers MUST NOT record
+        the new trigger price on a False: the resting order still sits at
+        the old one, and believing otherwise makes the caller's own
+        "trail hasn't moved" check skip the retry forever.
         """
         from growmore_bot.persistence.models import AuditLog
 
@@ -373,7 +378,7 @@ class DhanOrderClient:
                 )
             )
             logger.exception("LIVE STOP ORDER MODIFY FAILED: %s", audit_payload)
-            return
+            return False
 
         if response.get("status") != "success":
             audit_payload["result"] = "failed"
@@ -385,13 +390,14 @@ class DhanOrderClient:
                 )
             )
             logger.warning("LIVE STOP ORDER MODIFY FAILED: %s", audit_payload)
-            return
+            return False
 
         audit_payload["result"] = "modified"
         self._session.add(
             AuditLog(id=uuid.uuid4(), ts=now, event_type="live_stop_order_modified", payload=audit_payload)
         )
         logger.warning("LIVE STOP ORDER MODIFIED (REAL MONEY): %s", audit_payload)
+        return True
 
     def cancel_stop_loss_order(self, order_id: str) -> None:
         """Cancel a resting SL-M order -- called before the bot places any
