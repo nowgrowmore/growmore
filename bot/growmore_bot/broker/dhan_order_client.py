@@ -52,22 +52,37 @@ _PROTECTION_BAND = 0.01
 
 
 def _stop_leg_prices(
-    instrument: Any, transaction_type: str, trigger_price: float
+    instrument: Any,
+    transaction_type: str,
+    trigger_price: float,
+    limit_price: Any = None,
 ) -> tuple[float, float]:
     """Tick-aligned (trigger, limit) pair for a resting stop order.
 
-    The limit leg goes a full protection band on the SAFE side of the
-    trigger -- below it for a SELL (protecting a long), above for a BUY
-    (protecting a short) -- and is forced at least one tick clear so the
-    strict inequality Dhan requires can never collapse on rounding.
+    `limit_price` is the risk layer's own ATR-scaled `stop_limit_price`
+    (RiskManagedStrategy.stop_limit_atr) and is the right answer whenever
+    the caller has one: how far a triggered stop may still fill is a risk
+    decision, and scaling it to ATR keeps it proportionate to the
+    instrument's actual volatility. The percentage band is only a fallback
+    for callers with no ATR to offer.
+
+    Either way the limit leg is forced at least one tick clear on the SAFE
+    side -- below the trigger for a SELL (protecting a long), above for a
+    BUY (protecting a short) -- so the strict inequality Dhan requires can
+    never collapse on rounding.
     """
     tick = float(getattr(instrument, "tick_size", None) or 0.05)
     trigger = round(trigger_price / tick) * tick
-    if transaction_type == "SELL":
+    if limit_price is not None:
+        price = round(float(limit_price) / tick) * tick
+    elif transaction_type == "SELL":
         price = round(trigger * (1 - _PROTECTION_BAND) / tick) * tick
-        price = min(price, trigger - tick)
     else:
         price = round(trigger * (1 + _PROTECTION_BAND) / tick) * tick
+
+    if transaction_type == "SELL":
+        price = min(price, trigger - tick)
+    else:
         price = max(price, trigger + tick)
     return trigger, price
 
@@ -183,7 +198,12 @@ class DhanOrderClient:
         return PlacedOrder(order_id=order_id, order_status=order_status)
 
     def place_stop_loss_market_order(
-        self, instrument: Any, transaction_type: str, quantity: int, trigger_price: float
+        self,
+        instrument: Any,
+        transaction_type: str,
+        quantity: int,
+        trigger_price: float,
+        limit_price: float | None = None,
     ) -> PlacedOrder:
         """Place a real resting STOP_LOSS_MARKET (SL-M) order on MCX for
         `instrument` -- lets the EXCHANGE enforce a risk-managed strategy's
@@ -246,7 +266,9 @@ class DhanOrderClient:
         # have helped. The fix is to stop asking Dhan to invent the limit
         # leg -- send a plain STOP_LOSS with an explicit limit price on the
         # correct side of the trigger.
-        rounded_trigger, price = _stop_leg_prices(instrument, transaction_type, trigger_price)
+        rounded_trigger, price = _stop_leg_prices(
+            instrument, transaction_type, trigger_price, limit_price
+        )
 
         response = self._sdk.place_order(
             security_id=instrument.security_id,
@@ -286,7 +308,13 @@ class DhanOrderClient:
         return PlacedOrder(order_id=order_id, order_status=order_status)
 
     def modify_stop_loss_trigger(
-        self, instrument: Any, order_id: str, transaction_type: str, quantity: int, new_trigger_price: float
+        self,
+        instrument: Any,
+        order_id: str,
+        transaction_type: str,
+        quantity: int,
+        new_trigger_price: float,
+        limit_price: float | None = None,
     ) -> None:
         """Move a resting SL-M order's trigger price -- how a risk-managed
         position's trailing stop actually ratchets at the exchange, instead
@@ -320,7 +348,9 @@ class DhanOrderClient:
         # Same explicit limit leg as place_stop_loss_market_order -- see the
         # root-cause comment there for why Dhan must not be left to
         # synthesise it.
-        rounded_trigger, price = _stop_leg_prices(instrument, transaction_type, new_trigger_price)
+        rounded_trigger, price = _stop_leg_prices(
+            instrument, transaction_type, new_trigger_price, limit_price
+        )
 
         try:
             response = self._sdk.modify_order(

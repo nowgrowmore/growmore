@@ -371,3 +371,55 @@ def test_order_api_failure_raises_and_writes_audit_log(instrument):
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
     assert len(audit_entries) == 1
     assert audit_entries[0].event_type == "live_order_failed"
+
+
+@responses.activate
+def test_explicit_limit_price_from_the_strategy_is_used_verbatim(instrument):
+    """The wrapper's ATR-scaled `stop_limit_price` is the real source of
+    truth for the limit leg -- the 1% band is only a fallback for callers
+    that have no ATR to offer."""
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"orderId": "112111182201", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    client = _make_client()
+
+    client.place_stop_loss_market_order(
+        instrument,
+        transaction_type="SELL",
+        quantity=1,
+        trigger_price=146760.4567,
+        limit_price=143581.2,
+    )
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["triggerPrice"] == 146760
+    assert sent["price"] == 143581  # tick-aligned, not the 1% fallback
+    assert sent["price"] != 145292
+
+
+@responses.activate
+def test_an_explicit_limit_on_the_wrong_side_is_forced_clear_of_the_trigger(instrument):
+    """A limit leg that lands on or past the trigger would fail Dhan's own
+    strict inequality, so it is clamped rather than sent and rejected."""
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"orderId": "112111182202", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    client = _make_client()
+
+    client.place_stop_loss_market_order(
+        instrument,
+        transaction_type="SELL",
+        quantity=1,
+        trigger_price=146760,
+        limit_price=146760,  # equal -- not strictly below
+    )
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["price"] == 146760 - instrument.tick_size
+    assert sent["price"] < sent["triggerPrice"]

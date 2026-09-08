@@ -45,18 +45,38 @@ class RiskManagedStrategy(Strategy):
         atr_period: int = 14,
         initial_stop_atr: float = 2.0,
         trail_atr: Optional[float] = 3.0,
+        stop_limit_atr: float = 0.5,
         max_bars_held: Optional[int] = None,
     ) -> None:
         if initial_stop_atr <= 0:
             raise ValueError("initial_stop_atr must be positive")
         if trail_atr is not None and trail_atr <= 0:
             raise ValueError("trail_atr must be positive or None")
+        if stop_limit_atr <= 0:
+            raise ValueError("stop_limit_atr must be positive")
         self.inner = inner
         self.initial_stop_atr = initial_stop_atr
         self.trail_atr = trail_atr
+        # How far PAST the trigger the resting stop order may still fill.
+        # A separate concept from initial_stop_atr/trail_atr, which decide
+        # where the trigger sits: by the time this applies, the trigger has
+        # already been hit. It exists because Dhan rejects SL-M on MCX_COMM
+        # (see dhan_order_client.py), so the real order is an SL *limit* and
+        # something has to name its limit leg. Too tight and a fast move
+        # leaves the order resting unfilled while the position keeps going;
+        # too wide and a triggered stop fills far worse than the backtest's
+        # `stop_slippage_ticks` assumed.
+        self.stop_limit_atr = stop_limit_atr
         self.max_bars_held = max_bars_held
         self._atr = AtrCalculator(period=atr_period)
         self._last_close: Optional[float] = None
+
+    def _limit_leg(self, stop: Optional[float], atr: Optional[float], direction: int):
+        """Where a triggered stop may still fill -- below the trigger for a
+        long, above it for a short."""
+        if stop is None or atr is None:
+            return None
+        return stop - direction * self.stop_limit_atr * float(atr)
 
     # A single-day inner strategy stays single-day when wrapped.
     @property
@@ -127,6 +147,7 @@ class RiskManagedStrategy(Strategy):
             stop_price=stop,
             risk_state={
                 "stop_price": stop,
+                "stop_limit_price": self._limit_leg(stop, atr, direction),
                 "high_water": reference,
                 "entry_atr": atr,
                 "bars_held": 0,
@@ -157,10 +178,12 @@ class RiskManagedStrategy(Strategy):
                     max(stop, trailed) if direction == 1 else min(stop, trailed)
                 )
 
+        carried_atr = risk.get("entry_atr", atr)
         return {
             "stop_price": stop,
+            "stop_limit_price": self._limit_leg(stop, carried_atr, direction),
             "high_water": water,
-            "entry_atr": risk.get("entry_atr", atr),
+            "entry_atr": carried_atr,
             "bars_held": int(risk.get("bars_held", 0)) + 1,
             "direction": direction,
         }
@@ -239,7 +262,11 @@ def build_risk_managed(params: dict) -> RiskManagedStrategy:
         {"inner_strategy": "donchian_breakout",
          "inner_params": {"period": 20},
          "atr_period": 14, "initial_stop_atr": 2.0, "trail_atr": 3.0,
-         "max_bars_held": null}
+         "stop_limit_atr": 0.5, "max_bars_held": null}
+
+    `stop_limit_atr` is optional and defaults to 0.5; it is the only one of
+    these that does NOT move the stop level -- it sets how far past the
+    trigger the resting broker order may still fill.
     """
     params = dict(params)
     name = params.pop("inner_strategy", None)

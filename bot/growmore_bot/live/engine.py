@@ -178,7 +178,10 @@ class LiveTradingEngine:
                 # of it resetting every tick (found live 2026-09-05).
                 position.risk_state = signal.risk_state or {}
                 self.session.add(position)
-                self._ensure_stop_order(position, instrument, signal.stop_price, label)
+                self._ensure_stop_order(
+                    position, instrument, signal.stop_price, label,
+                    limit_price=(signal.risk_state or {}).get("stop_limit_price"),
+                )
             logger.info("%s -- HOLD ltp=%s %s", label, quote.ltp, computed)
             return
 
@@ -751,7 +754,12 @@ class LiveTradingEngine:
         self.session.add(position)
 
     def _ensure_stop_order(
-        self, position: Any, instrument: Any, stop_price: Optional[float], label: str = ""
+        self,
+        position: Any,
+        instrument: Any,
+        stop_price: Optional[float],
+        label: str = "",
+        limit_price: Optional[float] = None,
     ) -> None:
         """Place or move a risk-managed position's resting real stop order
         so it always reflects the wrapper's latest computed `stop_price` --
@@ -773,7 +781,8 @@ class LiveTradingEngine:
         if not position.stop_order_id:
             try:
                 placed = self.order_client.place_stop_loss_market_order(
-                    instrument, transaction_type="SELL", quantity=qty, trigger_price=stop_price
+                    instrument, transaction_type="SELL", quantity=qty,
+                    trigger_price=stop_price, limit_price=limit_price,
                 )
             except Exception:
                 logger.exception(
@@ -812,6 +821,7 @@ class LiveTradingEngine:
             transaction_type="SELL",
             quantity=qty,
             new_trigger_price=stop_price,
+            limit_price=limit_price,
         )
         position.stop_order_trigger_price = stop_price
         self.session.add(position)
@@ -1027,7 +1037,10 @@ class LiveTradingEngine:
             )
         )
 
-        self._ensure_stop_order(position, instrument, (risk_state or {}).get("stop_price"), label)
+        self._ensure_stop_order(
+            position, instrument, (risk_state or {}).get("stop_price"), label,
+            limit_price=(risk_state or {}).get("stop_limit_price"),
+        )
 
     def _handle_sell(
         self,

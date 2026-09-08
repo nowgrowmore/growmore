@@ -1048,8 +1048,11 @@ def test_risk_state_round_trips_across_ticks_for_a_risk_managed_strategy():
     assert position.risk_state == {"stop_price": 95.0, "high_water": 100.0}
     # The real point of Part 2: a resting broker-side stop order is placed
     # at entry, at the wrapper's own computed stop price.
+    # limit_price is None here: this scripted strategy emits a bare
+    # risk_state with no `stop_limit_price`, so the client falls back to its
+    # own percentage band.
     order_client.place_stop_loss_market_order.assert_called_once_with(
-        instrument, transaction_type="SELL", quantity=1, trigger_price=95.0
+        instrument, transaction_type="SELL", quantity=1, trigger_price=95.0, limit_price=None
     )
     assert position.stop_order_id == "STOP1"
     assert position.stop_order_trigger_price == 95.0
@@ -1065,7 +1068,8 @@ def test_risk_state_round_trips_across_ticks_for_a_risk_managed_strategy():
     # The trail ratcheted (95.0 -> 97.0) -- the resting stop is MOVED via
     # modify, not cancelled and re-placed.
     order_client.modify_stop_loss_trigger.assert_called_once_with(
-        instrument, "STOP1", transaction_type="SELL", quantity=1, new_trigger_price=97.0
+        instrument, "STOP1", transaction_type="SELL", quantity=1, new_trigger_price=97.0,
+        limit_price=None,
     )
     assert position.stop_order_trigger_price == 97.0
 
@@ -1092,3 +1096,31 @@ def test_hold_marks_open_position_to_market():
 
     assert float(existing_position.unrealized_pnl) == pytest.approx(500_000)
     order_client.place_market_order.assert_not_called()
+
+
+def test_stop_order_carries_the_strategys_atr_scaled_limit_leg():
+    """The resting order is an SL *limit* (Dhan rejects SL-M on MCX_COMM),
+    so the wrapper's `stop_limit_price` must reach the broker -- otherwise
+    the client falls back to a flat percentage band that has nothing to do
+    with the instrument's volatility."""
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=1)
+    strategy = _RiskAwareSpyStrategy([
+        (SignalAction.BUY, {"stop_price": 95.0, "stop_limit_price": 92.5, "high_water": 100.0}),
+    ])
+    dhan_client = MagicMock()
+    dhan_client.get_quote.return_value = Quote(ltp=100, open=100, high=100, low=100, close=100)
+    order_client = MagicMock()
+    order_client.place_market_order.return_value = PlacedOrder(order_id="ORD1", order_status="TRANSIT")
+    order_client.place_stop_loss_market_order.return_value = PlacedOrder(
+        order_id="STOP1", order_status="TRANSIT"
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = None
+
+    engine = LiveTradingEngine(dhan_client=dhan_client, order_client=order_client, session=session)
+    engine.process_tick(config=config, instrument=instrument, strategy=strategy)
+
+    order_client.place_stop_loss_market_order.assert_called_once_with(
+        instrument, transaction_type="SELL", quantity=1, trigger_price=95.0, limit_price=92.5
+    )

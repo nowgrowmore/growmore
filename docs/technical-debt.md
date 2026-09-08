@@ -367,8 +367,16 @@
   leg at `trigger * 1.01`, which for a SELL sits *above* the trigger and fails Dhan's own
   `trigger > price` check. Our `price` field was being discarded before that check ran, so no
   value of it could ever have helped. Fix: send `order_type=SL` with an explicit limit leg one
-  full 1% protection band on the safe side of the trigger (`_stop_leg_prices`), mirroring the band
-  Dhan applies itself. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
+  full protection band on the safe side of the trigger (`_stop_leg_prices`). That band is the risk
+  layer's own **`stop_limit_atr`** (new `RiskManagedStrategy` param, default 0.5 ATR), carried to
+  the broker as `stop_limit_price` in `risk_state`; the flat 1% is only a fallback for callers with
+  no ATR to offer. It is a distinct concept from `initial_stop_atr`/`trail_atr`, which position the
+  trigger -- by the time the limit leg matters the trigger has already been hit. **Note the
+  backtest divergence this opens**: `costs.py` models a stop fill at `stop_slippage_ticks=2` (plus
+  2 ordinary) beyond the stop level, i.e. ~4 ticks, while a 0.5-ATR limit leg permits a far worse
+  tail fill. Expected fills are unaffected (a triggered stop-limit normally fills at/near the
+  trigger); only the fast-move tail differs, and a tighter leg would trade that tail for the worse
+  failure of not filling at all. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
   yet, and a limit leg can miss on a gap -- see `docs/pending-actions.md`. Live trading is still
   blocked on the pre-existing unverified MCX order-quantity-unit question.
 - **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the

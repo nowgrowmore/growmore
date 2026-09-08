@@ -212,3 +212,49 @@ def test_requires_intraday_flatten_is_inherited_from_the_inner_strategy():
 
     assert RiskManagedStrategy(VwapSessionBounceStrategy()).requires_intraday_flatten is True
     assert RiskManagedStrategy(_Scripted([])).requires_intraday_flatten is False
+
+
+def test_risk_state_carries_an_atr_scaled_stop_limit_price():
+    """The resting stop is an SL *limit* order on MCX (Dhan rejects SL-M --
+    see dhan_order_client's root-cause note), so the wrapper must say how
+    far past the trigger it is still willing to fill. That distance is
+    ATR-scaled like every other level here, via its own `stop_limit_atr`
+    param -- NOT `initial_stop_atr`/`trail_atr`, which position the trigger
+    and have already done their job by this point."""
+    strategy = RiskManagedStrategy(_Scripted([]), stop_limit_atr=0.5)
+    _warm(strategy)
+    signal = strategy.on_bar(_bar(105, 95, 100), _long(entry=100.0))
+
+    risk = signal.risk_state
+    atr = risk["entry_atr"]
+    # Long -> the limit leg sits BELOW the trigger, by half an ATR.
+    assert risk["stop_limit_price"] == pytest.approx(risk["stop_price"] - 0.5 * atr)
+    assert risk["stop_limit_price"] < risk["stop_price"]
+
+
+def test_stop_limit_price_is_configurable_and_defaults_to_half_an_atr():
+    default = RiskManagedStrategy(_Scripted([]))
+    assert default.stop_limit_atr == 0.5
+
+    wide = RiskManagedStrategy(_Scripted([]), stop_limit_atr=1.0)
+    _warm(wide)
+    risk = wide.on_bar(_bar(105, 95, 100), _long(entry=100.0)).risk_state
+    assert risk["stop_limit_price"] == pytest.approx(
+        risk["stop_price"] - 1.0 * risk["entry_atr"]
+    )
+
+
+def test_stop_limit_price_mirrors_for_a_short():
+    strategy = RiskManagedStrategy(_Scripted([]), stop_limit_atr=0.5)
+    _warm(strategy)
+    risk = strategy.on_bar(_bar(105, 95, 100), _long(qty=-1.0, entry=100.0)).risk_state
+    # Short -> the limit leg sits ABOVE the trigger.
+    assert risk["stop_limit_price"] == pytest.approx(
+        risk["stop_price"] + 0.5 * risk["entry_atr"]
+    )
+    assert risk["stop_limit_price"] > risk["stop_price"]
+
+
+def test_stop_limit_atr_must_be_positive():
+    with pytest.raises(ValueError):
+        RiskManagedStrategy(_Scripted([]), stop_limit_atr=0)
