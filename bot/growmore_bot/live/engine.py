@@ -810,6 +810,31 @@ class LiveTradingEngine:
         if qty <= 0:
             return
 
+        # A stop order that died without filling (exchange RMS rejection,
+        # a cancel) leaves the position pointing at a corpse. Reconciliation
+        # clears that when it sees the transition, but it filters terminal
+        # statuses out of its query, so an order that went terminal under
+        # older code is never revisited -- hence this second check, which
+        # costs one indexed lookup a tick and prevents the position from
+        # being silently unprotected forever.
+        if position.stop_order_id:
+            existing = (
+                self.session.query(LiveOrder)
+                .filter_by(broker_order_id=position.stop_order_id)
+                .one_or_none()
+            )
+            if (
+                existing is not None
+                and existing.order_status in _TERMINAL_ORDER_STATUSES
+                and existing.order_status != "TRADED"
+            ):
+                logger.error(
+                    "%s -- stop order %s is %s and never rested -- re-placing",
+                    label or position.id, position.stop_order_id, existing.order_status,
+                )
+                position.stop_order_id = None
+                position.stop_order_trigger_price = None
+
         if not position.stop_order_id:
             try:
                 placed = self.order_client.place_stop_loss_market_order(

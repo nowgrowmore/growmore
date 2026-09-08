@@ -1202,3 +1202,38 @@ def test_a_stop_order_rejected_by_exchange_rms_is_cleared_so_it_gets_replaced():
     assert position.stop_order_id is None
     assert position.stop_order_trigger_price is None
     assert position.status == "open"  # a rejected stop does NOT close anything
+
+
+def test_ensure_stop_order_replaces_one_whose_order_row_is_already_dead():
+    """Belt and braces for the reconcile path: if a stop order reached a
+    terminal status while older code was running, reconciliation will never
+    revisit it (it filters terminal statuses out), so the position would
+    point at a dead order forever. `_ensure_stop_order` must notice and
+    re-place rather than trying to modify a corpse."""
+    config = _bot_config()
+    instrument = _instrument(config, lot_size=1)
+    position = LivePosition(
+        id=uuid.uuid4(), strategy_id=uuid.uuid4(), instrument_id=instrument.id,
+        status="open", quantity=1, avg_entry_price=100,
+        stop_order_id="DEAD1", stop_order_trigger_price=95.0,
+    )
+    dead = LiveOrder(
+        id=uuid.uuid4(), live_position_id=position.id, side="sell", quantity=1,
+        broker_order_id="DEAD1", order_status="REJECTED", fill_price=None,
+        close_reason="broker_stop_loss",
+    )
+    order_client = MagicMock()
+    order_client.place_stop_loss_market_order.return_value = PlacedOrder(
+        order_id="STOP2", order_status="TRANSIT"
+    )
+    session = MagicMock()
+    session.query.return_value.filter_by.return_value.one_or_none.return_value = dead
+
+    engine = LiveTradingEngine(
+        dhan_client=MagicMock(), order_client=order_client, session=session
+    )
+    engine._ensure_stop_order(position, instrument, 95.0, "test", limit_price=92.5)
+
+    order_client.modify_stop_loss_trigger.assert_not_called()
+    order_client.place_stop_loss_market_order.assert_called_once()
+    assert position.stop_order_id == "STOP2"
