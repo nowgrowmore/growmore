@@ -63,8 +63,31 @@ class BasketConfig:
     support_strikes: bool = False
     relative_strength_tiebreak: bool = False
 
-    # --- The mandatory control, not a variant.
+    # --- Controls, not variants. Neither tests a hypothesis; both exist so a
+    # variant's result cannot be confounded with something else.
     buy_and_hold: bool = False
+    #: Re-divide the REMAINING budget among the REMAINING candidates as the
+    #: allocation walks its order, so capital a candidate cannot use passes to
+    #: the next one instead of sitting idle. Without it, splitting the pool
+    #: evenly across every eligible name leaves most of it unusable (a slot
+    #: buys no lot at all), and any variant that shrinks the candidate list
+    #: then looks better purely because it deployed more capital.
+    carryover_fill: bool = False
+    #: Run a FIXED number of equal-weight positions rather than splitting the
+    #: pool across however many names happen to be eligible that cycle.
+    #:
+    #: This is the study's most important control. With slot size derived from
+    #: the candidate count, any rule that shrinks the list (a sector cap, a
+    #: headwind filter) enlarges every surviving position and deploys more
+    #: capital -- so the variant books a leverage gain as a selection gain, and
+    #: the measured deployment moved from 0.76 to 1.05 between configs that
+    #: were supposed to differ only in which stocks they chose.
+    #:
+    #: 10 is declared, not swept: Rs 1 crore over 10 slots is Rs 10 lakh each,
+    #: against a median F&O lot notional of roughly Rs 7 lakh. Fewer slots
+    #: would leave capital idle; more would price most of the universe out,
+    #: which is the defect this control exists to remove.
+    target_positions: Optional[int] = None
 
 
 #: Stages A and B. C, D and E are appended by run_basket_configs once the
@@ -74,11 +97,33 @@ BASELINE_CONFIGS = [
     BasketConfig(tag="BH-buy-and-hold", buy_and_hold=True),
 ]
 
-SECTOR_CONFIGS = [
-    BasketConfig(tag="S1-round-robin", sector_round_robin=True),
-    BasketConfig(tag="S2-cap-1-per-sector", sector_round_robin=True, max_per_sector=1),
-    BasketConfig(tag="S3-cap-3-per-sector", sector_round_robin=True, max_per_sector=3),
+#: The sizing control. B0 is faithful to the live engine; B1 differs from it
+#: by exactly one decision, so the gap between them measures under-deployment
+#: and nothing else.
+#: Declared in docs/wheel-basket-research.md. Not swept.
+TARGET_POSITIONS = 10
+
+CONTROL_CONFIGS = [
+    BasketConfig(tag="B1-fixed-slots", carryover_fill=True,
+                 target_positions=TARGET_POSITIONS),
 ]
+
+def sector_configs(base: BasketConfig) -> list:
+    """Stage B: each differs from the CONTROL by the sector constraint alone.
+
+    Derived from `base` rather than constructed fresh, so a variant cannot
+    silently miss a control setting -- an earlier version built these
+    standalone, and they quietly ran without the fixed slot count, which put
+    the deployment confound straight back into the comparison.
+    """
+    from dataclasses import replace
+    return [
+        replace(base, tag="S1-round-robin", sector_round_robin=True),
+        replace(base, tag="S2-cap-1-per-sector", sector_round_robin=True,
+                max_per_sector=1),
+        replace(base, tag="S3-cap-3-per-sector", sector_round_robin=True,
+                max_per_sector=3),
+    ]
 
 
 def regime_configs(base: BasketConfig) -> list:
@@ -102,7 +147,8 @@ def per_stock_configs(base: BasketConfig) -> list:
 
 
 __all__ = [
-    "BasketConfig", "BASELINE_CONFIGS", "SECTOR_CONFIGS",
+    "BasketConfig", "BASELINE_CONFIGS", "CONTROL_CONFIGS", "sector_configs",
+    "TARGET_POSITIONS",
     "regime_configs", "per_stock_configs",
     "REGIME_GATE_BLOCKS", "REGIME_PUT_OTM", "REGIME_CALL_OTM",
     "REGIME_DEPLOY_FRACTION",

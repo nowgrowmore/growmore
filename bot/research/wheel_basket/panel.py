@@ -14,11 +14,27 @@ saving is (a measured 100 MB -> 5.6 MB for RELIANCE). Nothing about which
 strikes are available is discarded, so strike selection sees the same menu the
 long frame would have offered.
 
-ADJUSTED SPACE IS NOT OPTIONAL. Bhavcopy strikes and premiums are unadjusted;
-the cached cash bars are corporate-action adjusted. Mixing them silently
-compares a pre-split strike against a post-split chain. `factors` is applied to
-strikes, premiums and spot alike, exactly as `run_strategies.to_adjusted_space`
-does for the per-symbol study.
+ADJUSTED SPACE IS NOT OPTIONAL, BUT ONE FACTOR PER CYCLE IS. Bhavcopy strikes
+and premiums are unadjusted; the cached cash bars are corporate-action
+adjusted. Mixing them silently compares a pre-split strike against a post-split
+chain, so `factors` is applied to strikes, premiums and spot alike -- but ONCE
+PER CYCLE, at the decision day, not per day as
+`run_strategies.to_adjusted_space` does.
+
+That difference is forced, and it is measurable rather than theoretical. The
+factor is `adjusted_close / unadjusted_close` recomputed independently each
+day, so it carries float noise: RELIANCE has 30 distinct factors across 30
+days, all ~0.44967. Multiplying discrete strikes by a noisy factor turned 83
+real strikes into 888 near-identical ones, which destroys strike identity,
+defeats the nearest-match lookup and inflated one symbol's matrices from 1.6 MB
+to 24 MB. A per-cycle factor keeps strikes discrete. The cost is that a
+corporate action landing mid-cycle is applied from the next cycle instead of
+the day it happens -- one month of slightly stale scaling on a rare event,
+against a bug that would corrupt every strike lookup in the study.
+
+Indicators (RSI, MACD, SMA200, swing low, trailing return) still run on the
+fully per-day adjusted price series, because continuity across an action is the
+entire reason adjustment exists.
 
 DECISION DAYS ARE PREVIOUS EXPIRIES. A cycle is decided on the day the previous
 cycle settles -- which is what the live engine does (`run_cycle` settles legs
@@ -198,10 +214,7 @@ def build_symbol_panel(
     """
     if chain is None:
         from research.stock_options import chain_cache
-        from research.stock_options.run_strategies import (
-            adjustment_factors,
-            to_adjusted_space,
-        )
+        from research.stock_options.run_strategies import adjustment_factors
 
         chain = chain_cache.load_symbol(symbol)
         if chain.empty:
@@ -212,21 +225,14 @@ def build_symbol_panel(
             factors = adjustment_factors(symbol, chain)
         if factors is None:
             return None
-        chain = to_adjusted_space(chain, factors)
-        if chain.empty:
-            return None
-        factors = None  # already applied
 
     chain = chain.copy()
     chain["trade_date"] = pd.to_datetime(chain["trade_date"])
     chain["expiry"] = pd.to_datetime(chain["expiry"])
-
     if factors is not None:
-        scale = chain["trade_date"].map(factors)
-        chain = chain[scale.notna()].copy()
-        scale = scale[scale.notna()]
-        for column in ("strike", "settle", "underlying"):
-            chain[column] = chain[column] * scale
+        chain = chain[chain["trade_date"].map(factors).notna()].copy()
+        if chain.empty:
+            return None
 
     if lot_size is None:
         lot_size = int(chain["lot_size"].replace(0, pd.NA).dropna().median() or 0)
@@ -237,8 +243,14 @@ def build_symbol_panel(
     if len(expiries) < MIN_CYCLES + 1:
         return None
 
+    # Indicators run on the ADJUSTED price series -- that is what makes the
+    # series continuous across a corporate action, which is the whole reason
+    # adjustment exists. The option mechanics below are scaled separately.
     spot_by_day = chain.groupby("trade_date")["underlying"].first().sort_index()
-    rsi, macd, sma, swing, trailing = _indicator_series(spot_by_day)
+    adjusted_spot = spot_by_day
+    if factors is not None:
+        adjusted_spot = (spot_by_day * spot_by_day.index.map(factors)).dropna()
+    rsi, macd, sma, swing, trailing = _indicator_series(adjusted_spot)
 
     chain["day_ord"] = _ordinal(chain["trade_date"])
     chain["exp_ord"] = _ordinal(chain["expiry"])
@@ -254,6 +266,31 @@ def build_symbol_panel(
         group = group[(group["day_ord"] >= decision) & (group["day_ord"] <= expiry_ord)]
         if group.empty:
             continue
+
+        # ONE factor for the whole cycle, taken at the decision day.
+        #
+        # A per-DAY factor cannot be used here, and the reason is measurable
+        # rather than theoretical: the factor is adjusted_close/unadjusted_close
+        # computed independently each day, so it carries float noise (RELIANCE:
+        # 30 distinct factors across 30 days, all ~0.44967). Multiplying
+        # discrete strikes by a noisy factor turns 83 real strikes into ~2,500
+        # near-identical ones, which destroys strike identity, defeats the
+        # nearest-match lookup, and inflates the dense matrices ~30x.
+        #
+        # The cost is that a corporate action landing MID-cycle is applied from
+        # the next cycle instead of the day it happens. That is one month of
+        # slightly stale scaling on a rare event, against a bug that would
+        # corrupt every strike lookup in the study.
+        scale = 1.0
+        if factors is not None:
+            decision_ts = pd.Timestamp(np.datetime64(int(decision), "D"))
+            if decision_ts in factors.index:
+                scale = float(factors.loc[decision_ts])
+            else:
+                earlier = factors.index[factors.index <= decision_ts]
+                if not len(earlier):
+                    continue
+                scale = float(factors.loc[earlier[-1]])
 
         days = np.sort(group["day_ord"].unique()).astype(np.int32)
         strikes = np.sort(group["strike"].unique()).astype(np.float32)
@@ -283,6 +320,12 @@ def build_symbol_panel(
             group.groupby("day_ord")["underlying"].first()
             .reindex(days).ffill().to_numpy(dtype=np.float32)
         )
+        if scale != 1.0:
+            strikes = (strikes * scale).astype(np.float32)
+            spot = (spot * scale).astype(np.float32)
+            put_settle = (put_settle * scale).astype(np.float32)
+            call_settle = (call_settle * scale).astype(np.float32)
+
         cycle = CycleChain(
             expiry=expiry_ord, decision_day=decision, days=days, strikes=strikes,
             spot=spot, put_settle=put_settle, call_settle=call_settle,

@@ -85,12 +85,22 @@ class Leg:
 
 @dataclass
 class Position:
+    """One symbol's wheel. `realized` accumulates the CASH outcome of the whole
+    wheel -- premiums kept, shares bought, shares sold -- so that when the
+    position finally closes there is a real trade P&L that can be negative.
+
+    Scoring each written leg by its own premium would make every leg a winner
+    by construction: a put assigned 40% underwater still "collected" its
+    premium. The completed wheel is the only unit that can actually lose.
+    """
+
     symbol: str
     state: str = "flat"          # flat | short_put | holding_shares | short_call
     basis: Optional[float] = None
     shares: int = 0
     lots: int = 0
     leg: Optional[Leg] = None
+    realized: float = 0.0
 
 
 @dataclass
@@ -110,12 +120,25 @@ class BasketResult:
     total_cost: float
     min_cash: float
     max_sector_share: float
+    mean_sector_share: float
     defence_share: float
     peak_deployed_fraction: float
+    peak_entry_exposure_fraction: float
+    max_put_reserve_ratio: float
     time_underwater_pct: float
     time_frozen_pct: float
     max_concurrent_by_sector: dict
+    max_concurrent_positions: int
+    #: Wheels still open when the run ended. THIS is where the strategy's
+    #: losses live. A wheel only COMPLETES by being called away, which happens
+    #: above the assignment basis and is therefore always profitable -- so
+    #: `win_rate_pct` over completed wheels is ~100% by construction and says
+    #: nothing. An assignment that fell and never recovered simply never
+    #: closes; it sits frozen, marked at spot, and shows up in drawdown and in
+    #: `time_frozen_pct` instead. Read those, not the win rate.
+    unfinished_positions: int
     symbols_traded: set
+    closed_pnls: list = field(default_factory=list)
     legs: list = field(default_factory=list)
     per_year_return_pct: dict = field(default_factory=dict)
 
@@ -201,9 +224,21 @@ def run_basket(
     assignments = called_away = cycle_count = 0
     min_cash = cash
     peak = cash
-    underwater_days = frozen_days = 0
+    underwater_days = 0
+    frozen_fraction_sum = 0.0
+    frozen_observations = 0
     peak_deployed_fraction = 0.0
+    peak_entry_exposure_fraction = 0.0
+    max_put_reserve_ratio = 0.0
+    peak_gross_capital = 0.0
+    weighted_sector_share = 0.0
+    weighted_capital = 0.0
+    best_sector_share = 0.0
+    best_defence_share = 0.0
+    closed_pnls: list = []
     max_concurrent_by_sector: dict = {}
+    max_concurrent_positions = 0
+    last_equity = float(initial_capital)
     symbols_traded: set = set()
 
     if config.buy_and_hold:
@@ -213,6 +248,7 @@ def run_basket(
         today = day_to_cycles[day]
 
         # ---- 1. settle anything expiring today ---------------------------
+        finished: list = []
         for symbol, position in list(positions.items()):
             leg = position.leg
             if leg is None or leg.expiry != day or symbol not in today:
@@ -226,6 +262,7 @@ def run_basket(
                 if spot < leg.strike:
                     cost = _delivery_cost(leg.strike * quantity, "buy")
                     cash -= leg.strike * quantity + cost
+                    position.realized -= leg.strike * quantity + cost
                     total_cost += cost
                     position.shares += quantity
                     position.basis = (
@@ -241,17 +278,25 @@ def run_basket(
                     sold = min(position.shares, quantity)
                     cost = _delivery_cost(leg.strike * sold, "sell")
                     cash += leg.strike * sold - cost
+                    position.realized += leg.strike * sold - cost
                     total_cost += cost
                     position.shares -= sold
                     called_away += 1
                     if position.shares == 0:
-                        position.basis = None
-                        position.state = "flat"
+                        # The wheel is COMPLETE. Remove it rather than resetting
+                        # it in place: a zombie left behind gets closed a second
+                        # time on a later cycle and books a trade worth exactly
+                        # zero, which is neither a win nor a loss and sent
+                        # profit factor to infinity against a 78% win rate.
+                        closed_pnls.append(position.realized)
+                        finished.append(symbol)
                     else:
                         position.state = "holding_shares"
                 else:
                     position.state = "holding_shares"
             position.leg = None
+        for symbol in finished:
+            positions.pop(symbol, None)
 
         # ---- 2. decisions, only on a decision day ------------------------
         if day in cycles_by_decision:
@@ -281,6 +326,7 @@ def run_basket(
                     if written is not None:
                         leg, credit, cost = written
                         cash += credit
+                        position.realized += credit
                         total_cost += cost
                         position.leg, position.state = leg, "short_call"
                         legs.append(leg)
@@ -294,23 +340,27 @@ def run_basket(
                     if best is not None and should_rotate(
                         current, best[1], config.rotation_hysteresis_pct
                     ):
+                        closed_pnls.append(position.realized)
                         del positions[symbol]     # frees the slot for 2b
                         continue
                     if symbol in eligible and not _gated(config, regime):
+                        free = cash - _reserved(positions, panels)
                         opened = _open_put(
                             config, symbol, cycle, index, panels[symbol].lot_size,
-                            regime, cash, _reserved(positions, panels),
-                            slots=1, capital=initial_capital,
+                            regime, per_slot=free * _deploy_fraction(config, regime),
+                            available_cash=free, fixed_lots=position.lots or None,
                         )
                         if opened is not None:
                             leg, credit, cost = opened
                             cash += credit
+                            position.realized += credit
                             total_cost += cost
                             position.leg, position.lots = leg, leg.lots
                             position.state = "short_put"
                             legs.append(leg)
                             cycle_count += 1
                     else:
+                        closed_pnls.append(position.realized)
                         del positions[symbol]
 
             # 2b. free capital goes to candidates not already held
@@ -336,29 +386,81 @@ def run_basket(
 
                 order = _respect_concurrent_cap(order, positions, sector_by_symbol, config)
                 if order:
-                    for symbol in order:
-                        cycle = deciding[symbol]
-                        opened = _open_put(
-                            config, symbol, cycle, 0, panels[symbol].lot_size,
-                            regime, cash, _reserved(positions, panels),
-                            slots=len(order), capital=initial_capital,
+                    # Fixed once, before any of this round's entries, so every
+                    # candidate is offered the same budget.
+                    budget = (cash - _reserved(positions, panels)) * _deploy_fraction(
+                        config, regime
+                    )
+                    if config.target_positions is not None:
+                        room = config.target_positions - len(positions)
+                        order = order[:max(room, 0)]
+                        # Equal weight against CURRENT equity, so position size
+                        # compounds with the book instead of staying fixed --
+                        # a constant lot count over seven years is escalating
+                        # leverage, the bug that invalidated the first run of
+                        # the F&O equity study.
+                        budget = (
+                            last_equity
+                            * _deploy_fraction(config, regime)
+                            * len(order) / config.target_positions
                         )
-                        if opened is None:
-                            continue
-                        leg, credit, cost = opened
-                        cash += credit
-                        total_cost += cost
-                        positions[symbol] = Position(
-                            symbol=symbol, state="short_put", lots=leg.lots, leg=leg,
-                        )
-                        legs.append(leg)
-                        cycle_count += 1
-                        symbols_traded.add(symbol)
+                    unopened = list(order)
+                    while unopened:
+                        # Everyone gets a fair share of what is still free,
+                        # then leftovers are redistributed in another pass.
+                        #
+                        # The rejected alternative was sizing slot i as
+                        # `free / remaining` inside a single pass. That grows
+                        # each successive slot as earlier candidates underspend,
+                        # so the END of the queue gets the most capital -- and
+                        # since round-robin deliberately puts the crowded
+                        # sector's 2nd and 3rd names last, the two mechanisms
+                        # together CONCENTRATED the book (measured: mean sector
+                        # share 0.52 against 0.29 for no round-robin at all),
+                        # which is the exact opposite of the point.
+                        free = cash - _reserved(positions, panels)
+                        if free <= 0:
+                            break
+                        if config.target_positions is not None:
+                            per_slot = min(budget / config.target_positions, free)
+                        elif config.carryover_fill:
+                            per_slot = (
+                                free * _deploy_fraction(config, regime) / len(unopened)
+                            )
+                        else:
+                            per_slot = budget / len(order)
+                        still_unopened = []
+                        opened_this_pass = 0
+                        for symbol in unopened:
+                            cycle = deciding[symbol]
+                            opened = _open_put(
+                                config, symbol, cycle, 0, panels[symbol].lot_size,
+                                regime, per_slot=per_slot,
+                                available_cash=cash - _reserved(positions, panels),
+                            )
+                            if opened is None:
+                                still_unopened.append(symbol)
+                                continue
+                            leg, credit, cost = opened
+                            cash += credit
+                            total_cost += cost
+                            positions[symbol] = Position(
+                                symbol=symbol, state="short_put", lots=leg.lots,
+                                leg=leg, realized=credit,
+                            )
+                            legs.append(leg)
+                            cycle_count += 1
+                            symbols_traded.add(symbol)
+                            opened_this_pass += 1
+                        if not config.carryover_fill or not opened_this_pass:
+                            break
+                        unopened = still_unopened
 
             live_sectors: dict = {}
             for symbol in positions:
                 sector = sector_by_symbol.get(symbol, symbol)
                 live_sectors[sector] = live_sectors.get(sector, 0) + 1
+            max_concurrent_positions = max(max_concurrent_positions, len(positions))
             for sector, count in live_sectors.items():
                 max_concurrent_by_sector[sector] = max(
                     max_concurrent_by_sector.get(sector, 0), count
@@ -367,7 +469,7 @@ def run_basket(
         # ---- 3. mark to market -------------------------------------------
         equity = cash
         deployed = 0.0
-        frozen = False
+        frozen_capital = 0.0
         for symbol, position in positions.items():
             if symbol not in today:
                 continue
@@ -383,25 +485,77 @@ def run_basket(
                 if leg.opt_type == "PE":
                     deployed += leg.strike * leg.lots * lot_size
             if position.shares and position.basis and spot < position.basis:
-                frozen = True
+                # Capital STUCK below its basis, not a book-level boolean. A
+                # boolean saturates the moment more than a couple of positions
+                # are open and stops telling configs apart.
+                frozen_capital += position.shares * spot
 
+        # Concentration is a statement about what is held AT ONCE, so it is
+        # measured on the live book each day and kept as a running maximum.
+        # Summing one leg per symbol over the whole run describes a portfolio
+        # that existed on no single day, and can make a 1-per-sector cap look
+        # MORE concentrated than no cap at all.
+        live_capital = {}
+        for symbol, position in positions.items():
+            if symbol not in today:
+                continue
+            cycle, index = today[symbol]
+            lot_size = panels[symbol].lot_size
+            value = position.shares * float(cycle.spot[index])
+            if position.leg is not None and position.leg.opt_type == "PE":
+                value += position.leg.strike * position.leg.lots * lot_size
+            if value > 0:
+                live_capital[symbol] = value
+        # Reported AT PEAK DEPLOYMENT, not as a max over all days. A plain
+        # daily maximum is dominated by sparse days: whenever exactly one
+        # position happens to be live, its sector share is trivially 100%, so
+        # every config scores ~1.0 and the metric stops discriminating. The day
+        # the book is most invested is the day concentration actually matters.
+        gross = sum(live_capital.values())
+        if live_capital and gross > 0:
+            # Capital-weighted across every open day: the primary number, and
+            # the one the study's risk claim rests on.
+            weighted_sector_share += gross * max_sector_share(
+                live_capital, sector_by_symbol
+            )
+            weighted_capital += gross
+        if live_capital and gross > peak_gross_capital:
+            peak_gross_capital = gross
+            best_sector_share = max_sector_share(live_capital, sector_by_symbol)
+            best_defence_share = defence_share(live_capital, is_defence_by_symbol)
+
+        # The leverage invariant is about CASH, not equity: a cash-secured put
+        # is secured by cash on hand. Equity nets off the option's own mark, so
+        # exposure/equity sits a hair above 1.0 by construction and would fail
+        # a leverage test that is not actually being violated.
+        if cash > 0:
+            put_reserve = _reserved(positions, panels)
+            max_put_reserve_ratio = max(max_put_reserve_ratio, put_reserve / cash)
+        if equity > 0:
+            peak_entry_exposure_fraction = max(
+                peak_entry_exposure_fraction, gross / equity
+            )
+
+        last_equity = equity
         equity_curve.append(equity)
         curve_days.append(day)
         min_cash = min(min_cash, cash)
         peak = max(peak, equity)
         if equity < peak:
             underwater_days += 1
-        if frozen:
-            frozen_days += 1
+        if deployed > 0:
+            frozen_fraction_sum += frozen_capital / deployed
+            frozen_observations += 1
         if equity > 0:
             peak_deployed_fraction = max(peak_deployed_fraction, deployed / equity)
 
-    deployed_by_symbol = {
-        leg.symbol: leg.strike * leg.lots * panels[leg.symbol].lot_size for leg in legs
-    }
     returns = [(b / a - 1) for a, b in zip(equity_curve, equity_curve[1:]) if a]
     years = max((all_days[-1] - all_days[0]) / 365.25, 1e-9)
-    pnls = _leg_pnls(legs)
+    per_year = _per_year_returns(curve_days, equity_curve)
+    # Positions still open at the end are excluded rather than marked and
+    # counted: an unfinished wheel has no outcome yet, and forcing one would
+    # book a paper loss as if it had been realised.
+    pnls = closed_pnls
     pf = profit_factor(pnls)
 
     return BasketResult(
@@ -419,15 +573,47 @@ def run_basket(
         called_away=called_away,
         total_cost=total_cost,
         min_cash=min_cash,
-        max_sector_share=max_sector_share(deployed_by_symbol, sector_by_symbol),
-        defence_share=defence_share(deployed_by_symbol, is_defence_by_symbol),
+        max_sector_share=best_sector_share,
+        mean_sector_share=(
+            weighted_sector_share / weighted_capital if weighted_capital else 0.0
+        ),
+        defence_share=best_defence_share,
         peak_deployed_fraction=peak_deployed_fraction,
+        peak_entry_exposure_fraction=peak_entry_exposure_fraction,
+        max_put_reserve_ratio=max_put_reserve_ratio,
         time_underwater_pct=100.0 * underwater_days / max(len(equity_curve), 1),
-        time_frozen_pct=100.0 * frozen_days / max(len(equity_curve), 1),
+        time_frozen_pct=(
+            100.0 * frozen_fraction_sum / frozen_observations
+            if frozen_observations else 0.0
+        ),
         max_concurrent_by_sector=max_concurrent_by_sector,
+        max_concurrent_positions=max_concurrent_positions,
+        unfinished_positions=len(positions),
         symbols_traded=symbols_traded,
+        closed_pnls=closed_pnls,
         legs=legs,
+        per_year_return_pct=per_year,
     )
+
+
+def _per_year_returns(days, curve) -> dict:
+    """Calendar-year returns, for the "wins in at least 4 of 7 years" clause.
+
+    A single aggregate CAGR can be one good year carrying six flat ones, which
+    is what the per-year win rate in docs/stock-options-results.md Sec 7.1 was
+    reporting alongside its edge and the reason it is repeated here.
+    """
+    import datetime
+
+    by_year: dict = {}
+    for day, equity in zip(days, curve):
+        year = datetime.date(1970, 1, 1) + datetime.timedelta(days=int(day))
+        by_year.setdefault(year.year, []).append(equity)
+    return {
+        year: round(100.0 * (values[-1] / values[0] - 1), 2)
+        for year, values in sorted(by_year.items())
+        if values and values[0]
+    }
 
 
 def _is_headwind(cycle) -> bool:
@@ -480,8 +666,16 @@ def _respect_concurrent_cap(order, positions, sector_by_symbol, config):
     return out
 
 
-def _open_put(config, symbol, cycle, index, lot_size, regime, cash, reserved,
-              slots, capital):
+def _open_put(config, symbol, cycle, index, lot_size, regime, per_slot,
+              available_cash, fixed_lots=None):
+    """Open one cash-secured put, sized from a budget fixed BEFORE the round.
+
+    `per_slot` is computed once per allocation round rather than re-derived
+    per symbol. Re-dividing the REMAINING free capital by the FULL slot count
+    on every iteration compounds: with four equal candidates the first took
+    250 lots and the fourth got 3, which is a capital-allocation artefact
+    masquerading as a concentration result.
+    """
     spot = float(cycle.spot[index])
     if spot <= 0:
         return None
@@ -496,12 +690,20 @@ def _open_put(config, symbol, cycle, index, lot_size, regime, cash, reserved,
         return None
     strike, premium = picked
 
-    free = (cash - reserved) * _deploy_fraction(config, regime)
-    per_slot = free / max(slots, 1)
     notional = strike * lot_size
     if notional <= 0:
         return None
-    lots = int(per_slot // notional)
+    if fixed_lots is not None:
+        # A re-sell continues an EXISTING position, so it keeps its own size --
+        # what `WheelBasketEngine._decide_put_rotation` does by writing the new
+        # leg with `lots=position.lots`. Sizing it from the free pool instead
+        # let the first position to re-sell each cycle swallow the entire
+        # remaining budget.
+        lots = fixed_lots
+        if lots * notional > available_cash:
+            return None
+    else:
+        lots = int(min(per_slot, available_cash) // notional)
     if lots < 1:
         return None
 
@@ -543,13 +745,6 @@ def _write_call(config, position, cycle, index, lot_size, regime):
     return leg, turnover - cost, cost
 
 
-def _leg_pnls(legs) -> list:
-    """Premium collected per leg. Assignment P&L lands on the equity curve
-    rather than here -- a leg's own outcome is the credit it kept.
-    """
-    return [leg.premium * leg.lots for leg in legs]
-
-
 def _buy_and_hold(panels, tag, initial_capital, all_days, day_to_cycles):
     """The mandatory control: own the identical universe over the identical
     window. Every post-mortem in this repo turns on a missing benchmark.
@@ -579,9 +774,12 @@ def _buy_and_hold(panels, tag, initial_capital, all_days, day_to_cycles):
         sharpe=sharpe_ratio(returns), max_drawdown_pct=max_drawdown_pct(curve),
         win_rate_pct=0.0, profit_factor=None, cycles=0, assignments=0,
         called_away=0, total_cost=0.0, min_cash=initial_capital,
-        max_sector_share=0.0, defence_share=0.0, peak_deployed_fraction=1.0,
+        max_sector_share=0.0, mean_sector_share=0.0, defence_share=0.0,
+        peak_deployed_fraction=1.0,
+        peak_entry_exposure_fraction=1.0, max_put_reserve_ratio=0.0,
         time_underwater_pct=0.0, time_frozen_pct=0.0,
-        max_concurrent_by_sector={}, symbols_traded=set(panels),
+        max_concurrent_by_sector={}, max_concurrent_positions=len(panels), unfinished_positions=0,
+        symbols_traded=set(panels), closed_pnls=[],
     )
 
 
@@ -591,9 +789,12 @@ def _empty_result(tag, initial_capital):
         equity_curve=[initial_capital], cagr_pct=0.0, sharpe=0.0,
         max_drawdown_pct=0.0, win_rate_pct=0.0, profit_factor=None, cycles=0,
         assignments=0, called_away=0, total_cost=0.0, min_cash=initial_capital,
-        max_sector_share=0.0, defence_share=0.0, peak_deployed_fraction=0.0,
+        max_sector_share=0.0, mean_sector_share=0.0, defence_share=0.0,
+        peak_deployed_fraction=0.0,
+        peak_entry_exposure_fraction=0.0, max_put_reserve_ratio=0.0,
         time_underwater_pct=0.0, time_frozen_pct=0.0,
-        max_concurrent_by_sector={}, symbols_traded=set(),
+        max_concurrent_by_sector={}, max_concurrent_positions=0, unfinished_positions=0,
+        symbols_traded=set(), closed_pnls=[],
     )
 
 

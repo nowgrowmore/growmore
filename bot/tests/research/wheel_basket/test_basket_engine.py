@@ -207,3 +207,180 @@ def test_results_are_reproducible_run_to_run():
     first, second = _run(panels, config), _run(panels, config)
     assert first.final_equity == pytest.approx(second.final_equity)
     assert first.cycles == second.cycles
+
+
+def test_win_rate_is_not_trivially_one_hundred_percent():
+    """A wheel that never records a loss is not measuring outcomes.
+
+    Counting each written leg's premium as its P&L makes every leg a winner
+    by construction -- an assignment 40% underwater still "won" because the
+    premium was collected. The unit that can actually lose is the completed
+    WHEEL: puts sold, shares taken, shares eventually sold.
+    """
+    crash = [100.0] * 19 + [50.0]
+    cycles = [_cycle(0, 19, crash)] + [
+        _cycle(20 * i, 20 * i + 19, [50.0] * 20) for i in range(1, 6)
+    ]
+    result = _run({"A": _panel("A", cycles)}, BasketConfig(tag="B0"))
+    assert result.final_equity < result.initial_capital
+    assert result.win_rate_pct < 100.0, (
+        "a basket that lost money reported a 100% win rate"
+    )
+
+
+def test_max_sector_share_is_measured_on_concurrent_positions():
+    """Concentration is a statement about what is held AT ONCE.
+
+    Summing the last leg per symbol over the whole run reports a portfolio
+    that never existed on any single day, and can make a 1-per-sector cap
+    look MORE concentrated than no cap at all.
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    uncapped = _run(panels, BasketConfig(tag="S1", top_iv_frac=1.0,
+                                         sector_round_robin=True))
+    capped = _run(panels, BasketConfig(tag="S2", top_iv_frac=1.0,
+                                       sector_round_robin=True, max_per_sector=1))
+    assert capped.max_sector_share <= uncapped.max_sector_share + 1e-9, (
+        f"capped {capped.max_sector_share} exceeded uncapped {uncapped.max_sector_share}"
+    )
+
+
+def test_exposure_never_exceeds_equity_at_the_moment_of_entry():
+    """Entry-time commitment is the leverage test. A cash-secured put must be
+    secured by cash that exists when it is written -- whatever the position is
+    later worth after the market moves against it.
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    result = _run(panels, BasketConfig(tag="B0"), capital=500_000.0)
+    assert result.min_cash >= -1e-6
+    # Against CASH, not equity: equity nets off the short option's own mark,
+    # so gross exposure sits a hair above equity by construction even with no
+    # leverage at all. What must never happen is puts reserving more cash than
+    # the book holds.
+    assert result.max_put_reserve_ratio <= 1.0 + 1e-9
+
+
+def test_mean_sector_share_is_capital_weighted_across_the_whole_run():
+    """Peak-day concentration is one observation and moves on noise.
+
+    The study's central claim is about risk carried over YEARS, so the primary
+    concentration number has to be an average over every day the book was
+    open, weighted by how much was actually at stake that day -- otherwise a
+    single unrepresentative day decides whether diversification "worked".
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    uncapped = _run(panels, BasketConfig(tag="S1", top_iv_frac=1.0,
+                                         sector_round_robin=True,
+                                         carryover_fill=True))
+    capped = _run(panels, BasketConfig(tag="S2", top_iv_frac=1.0,
+                                       sector_round_robin=True,
+                                       max_per_sector=1, carryover_fill=True))
+    assert 0.0 < capped.mean_sector_share <= 1.0
+    assert capped.mean_sector_share <= uncapped.mean_sector_share + 1e-9
+
+
+def test_carryover_fill_does_not_hand_the_tail_of_the_queue_the_most_capital():
+    """A fill that grows each successive slot inverts diversification.
+
+    Sizing slot i as `free / remaining` makes later slots larger as earlier
+    candidates underspend, so the END of the queue gets the most capital.
+    Round-robin deliberately puts the crowded sector's 2nd, 3rd, ... names at
+    the end -- so the two mechanisms combined CONCENTRATE the book instead of
+    spreading it, which is the opposite of the point. Leftovers must be
+    redistributed evenly, not piled onto whoever happens to be last.
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    plain = _run(panels, BasketConfig(tag="B1", top_iv_frac=1.0, carryover_fill=True))
+    spread = _run(panels, BasketConfig(tag="S1", top_iv_frac=1.0,
+                                       carryover_fill=True, sector_round_robin=True))
+    assert spread.mean_sector_share <= plain.mean_sector_share + 1e-9, (
+        f"round-robin concentrated the book: {spread.mean_sector_share} "
+        f"vs {plain.mean_sector_share}"
+    )
+
+
+def test_a_fixed_slot_count_holds_deployment_steady_across_configs():
+    """Without this, every variant is confounded with leverage.
+
+    Sizing each slot as `budget / number of eligible candidates` means ANY
+    rule that shrinks the candidate list -- a sector cap, a headwind filter --
+    enlarges every surviving position and deploys more capital. The variant
+    then scores a leverage gain as a stock-selection gain. Fixing the slot
+    count makes configs differ by WHICH stocks they pick, not how many.
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    wide = _run(panels, BasketConfig(tag="wide", top_iv_frac=1.0, target_positions=2))
+    narrow = _run(panels, BasketConfig(tag="narrow", top_iv_frac=0.5, target_positions=2))
+    assert wide.peak_deployed_fraction == pytest.approx(
+        narrow.peak_deployed_fraction, rel=0.35
+    ), "a narrower candidate list still changed how much capital was deployed"
+
+
+def test_a_fixed_slot_count_caps_concurrent_positions():
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    result = _run(panels, BasketConfig(tag="t", top_iv_frac=1.0, target_positions=2))
+    assert result.max_concurrent_positions <= 2
+
+
+def test_frozen_time_is_capital_weighted_not_any_position_frozen():
+    """A book-level "any position is frozen" flag saturates and stops measuring.
+
+    With ten concurrent positions, at least one sitting below its basis is
+    near-certain on any given day, so the metric reads ~97% for every config
+    and can no longer distinguish them. What matters is how much CAPITAL is
+    stuck, not whether anything is.
+    """
+    panels = {s: _flat_panel(s, iv) for s, iv in
+              (("A", 0.60), ("B", 0.55), ("C", 0.50), ("D", 0.45))}
+    result = _run(panels, BasketConfig(tag="B0"))
+    # Nothing is ever assigned in a flat market, so nothing can be frozen.
+    assert result.time_frozen_pct == 0.0
+
+    crash = [100.0] * 19 + [40.0]
+    cycles = [_cycle(0, 19, crash)] + [
+        _cycle(20 * i, 20 * i + 19, [40.0] * 20) for i in range(1, 5)
+    ]
+    stuck = _run({"A": _panel("A", cycles)}, BasketConfig(tag="B0"))
+    assert 0.0 < stuck.time_frozen_pct <= 100.0
+
+
+def test_a_completed_wheel_does_not_leave_a_zombie_that_books_a_zero_trade():
+    """Win rate and profit factor have to agree about what a loser is.
+
+    After a call is exercised the wheel is over. Leaving the position in the
+    book with its P&L reset means the next cycle can close it AGAIN, recording
+    a trade worth exactly zero -- which counts as neither a win nor a loss and
+    drove profit factor to infinity while the win rate sat at 78%.
+    """
+    rise = [100.0] * 19 + [130.0]
+    cycles = [_cycle(0, 19, [100.0] * 20)] + [
+        _cycle(20, 39, [100.0] * 19 + [60.0])
+    ] + [_cycle(20 * i, 20 * i + 19, rise) for i in range(2, 7)]
+    result = _run({"A": _panel("A", cycles)}, BasketConfig(tag="B0"))
+    assert result.profit_factor is None or result.profit_factor < float("inf")
+    # No recorded trade may be exactly zero: every closed wheel either kept
+    # premium or lost money on shares.
+    assert all(abs(p) > 1e-9 for p in result.closed_pnls)
+
+
+def test_unfinished_wheels_are_counted_because_that_is_where_losses_live():
+    """A wheel only completes by being called away, which is always profitable.
+
+    So win rate over completed wheels is ~100% by construction and is not a
+    measure of anything. A stock assigned and never recovered simply never
+    closes. Reporting how many wheels were left open is what stops the 100%
+    from reading as success.
+    """
+    crash = [100.0] * 19 + [40.0]
+    cycles = [_cycle(0, 19, crash)] + [
+        _cycle(20 * i, 20 * i + 19, [40.0] * 20) for i in range(1, 5)
+    ]
+    result = _run({"A": _panel("A", cycles)}, BasketConfig(tag="B0"))
+    assert result.unfinished_positions >= 1
+    assert result.final_equity < result.initial_capital

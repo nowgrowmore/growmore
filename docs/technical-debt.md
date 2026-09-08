@@ -839,3 +839,32 @@
   is gated by `beautifulforce` Vercel team membership; see `docs/pending-actions.md` to confirm who's
   on it. `CLAUDE.md`'s "production promotion requires explicit confirmation every time" rule stays in
   force as a backstop regardless.
+- **(Open, found 2026-09-07) The live wheel-basket engine would commit ~2.5x its configured
+  capital.** `WheelBasketEngine._fill_empty_capital` splits `total_virtual_capital` evenly across
+  *every* eligible candidate (median 43 names at the configured `top_iv_frac=0.33`, so ~Rs 2.33 lakh
+  each), then sizes with `lots = max(1, capital_per_slot // (strike * lot_size))`. A typical F&O lot
+  needs Rs 7 lakh or more of cash to secure a short put, so only **4.7%** of candidates are genuinely
+  affordable at that slot size — and the `max(1, ...)` opens the other 95% anyway, at one lot each.
+  Measured over the 82 monthly cycles in the cached option history, the cash needed to open one lot
+  on every top-33% name is a **median Rs 2.47 crore (range 0.92–6.21 crore)** against the
+  Rs 1 crore configured. Harmless right now — the config is `enabled=false`, `mode=paper`, and the
+  capital is virtual, so nothing surfaces the over-commitment — and it would misprice every position
+  on the first live cycle. The backtest engine (`research/wheel_basket/basket_engine.py`)
+  deliberately diverges here: it refuses a position it cannot fully cash-secure, so a backtest can
+  never spend money it does not have and report the leverage as alpha. Quantified in
+  `docs/wheel-basket-results.md` Sec 6.
+- **(Open, found 2026-09-07) Between 44% and 60% of the wheel basket's deployed capital sits frozen
+  below its assignment basis.** An assigned holding that has fallen cannot be sold without realising
+  the loss the strategy exists to avoid, and cannot be covered at a strike above its basis, so it
+  stays. Over seven years and 82 cycles the basket traded only 40–55 distinct symbols out of 199.
+  This is the binding constraint on the whole strategy — it is why sector diversification had almost
+  nothing to act on, and why the basket underperforms buying and holding the same universe. No exit
+  rule for underwater assignments has been designed or tested yet. See
+  `docs/wheel-basket-results.md` Secs 2 and 8.
+- **(Deferred by decision 2026-09-07) The wheel basket has no earnings-calendar input.** Pending
+  quarterly results were requested as a per-stock selection signal and deliberately left out of the
+  first study: no point-in-time earnings dates exist anywhere in this repo, and NSE publishes only
+  forward-looking result dates, so the signal could be built for live trading but could not be
+  *validated* over 2019–2026. Shipping an unvalidated selection input is the thing
+  `docs/wheel-basket-research.md` Sec 1 exists to prevent. Revisit as its own study; the option
+  chain's own front-month IV term structure is the candidate point-in-time proxy.

@@ -273,3 +273,27 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   Vercel team** — this is what actually gates access to the Preview URL via Vercel Authentication,
   today, not something waiting on a future Pro upgrade. Worth checking now.
 
+
+## Wheel-basket refinement study (2026-09-07)
+
+- [ ] **Refresh the Dhan access token.** The one in `.env.local` is a 24-hour token that expired
+  2026-09-06 08:17 UTC, so anything touching Dhan currently fails with `DH-901
+  Invalid_Authentication`. This blocks the last 4 of the 12 declared variants in the wheel-basket
+  study (the three market-regime ones and the relative-strength one), which need NIFTY 50 and INDIA
+  VIX daily history. Everything else in that study ran off the local caches and is finished. The
+  security IDs are already confirmed against the live Dhan scrip master (NIFTY 50 = 13, INDIA
+  VIX = 21, segment `IDX_I`) and no code change is needed — just the token.
+- [ ] **Decide what to do about the wheel-basket sizing defect** before the config is ever enabled.
+  As written, the live engine would commit a median Rs 2.47 crore against the Rs 1 crore configured
+  (details in `docs/technical-debt.md` and `docs/wheel-basket-results.md` Sec 6). This is a design
+  question, not just a bug fix: the choice is between running fewer, properly-sized positions (the
+  backtest used ten equal-weight slots, which is Rs 10 lakh each against a ~Rs 7 lakh typical lot) or
+  funding the basket with substantially more capital. Nothing has been changed in the live engine —
+  your call.
+- [ ] **Read the headline result before deciding whether to continue this line of work.** The wheel
+  basket as currently configured **underperforms simply buying and holding the same 199 stocks**
+  (13.64% CAGR vs 15.24%, at a slightly worse Sharpe), and none of the three requested refinements
+  survived its own accept rule. The study's most useful finding is that 44–60% of capital sits frozen
+  in underwater assignments, which is what caps the strategy — and that an exit rule for those is
+  probably worth more than any amount of smarter stock selection. See `docs/wheel-basket-results.md`
+  Sec 8 for what would be worth trying next.
