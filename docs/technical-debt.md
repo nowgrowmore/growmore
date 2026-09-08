@@ -387,7 +387,22 @@
   would have stopped ratcheting silently, showing a tighter stop than the broker actually held.
   Never fired in production (no modify has been attempted against a real order yet), but the first
   one would have hit it if Dhan refused, exactly as it refused the placements. Fixed: the modify
-  now returns True/False and the caller records the move only on True, retrying otherwise. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
+  now returns True/False and the caller records the move only on True, retrying otherwise.
+
+  **(2026-09-08, deployed) The SL fix works at the API layer, but MCX circuit limits are a real
+  constraint nobody had accounted for.** First order placed after the fix
+  (`34826090814707`, `orderType=STOP_LOSS`, `price=226790`, `triggerPrice=229968`) was **accepted
+  by Dhan** -- no DH-906, confirming the root cause and fix -- then **rejected by the exchange's
+  RMS**: `Rate Not Within Ckt Limit 231232.00 To 250500.00`. MCX runs a ±4% daily price band off
+  the previous close (240,866 that day), and a 2-ATR stop on SILVERM is ~5.2% away, so the stop
+  simply cannot rest as an exchange order on a day when it is outside the band. Two consequences:
+  (1) a stop order accepted by Dhan's API is NOT yet a resting stop -- `orderStatus` must be
+  re-checked, which is what `_clear_dead_stop_order` now does; (2) whenever the ATR stop is outside
+  the band the bot falls back to the software stop for that day. Mitigating: price cannot trade
+  through the lower band that day without a halt/expansion, so an out-of-band stop is largely
+  unreachable anyway. **Open decision for the account owner**: leave it retrying (harmless, noisy),
+  clamp the resting order into the band (a tighter stop than the strategy asked for), or place the
+  order only once the stop is inside the band. Not decided -- see `docs/pending-actions.md`. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
   yet, and a limit leg can miss on a gap -- see `docs/pending-actions.md`. Live trading is still
   blocked on the pre-existing unverified MCX order-quantity-unit question.
 - **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the

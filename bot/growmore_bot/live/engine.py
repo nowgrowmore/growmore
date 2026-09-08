@@ -438,6 +438,38 @@ class LiveTradingEngine:
             ):
                 self._close_position_from_filled_stop_order(order)
 
+            # A stop order can be ACCEPTED by Dhan's API (TRANSIT) and then
+            # killed by the exchange's own RMS -- seen for real on
+            # 2026-09-08, an MCX circuit-limit breach ("Rate Not Within Ckt
+            # Limit"), because a 2-ATR stop can sit outside the day's price
+            # band. Nothing filled, so the position stays open, but it must
+            # stop pointing at the dead order: `_ensure_stop_order` would
+            # otherwise take its modify branch forever and never re-place,
+            # leaving the bot believing it is protected while nothing rests
+            # at the broker. Clearing the id makes the next tick re-place.
+            elif (
+                new_status in _TERMINAL_ORDER_STATUSES
+                and getattr(order, "side", None) == "sell"
+                and getattr(order, "close_reason", None) == "broker_stop_loss"
+            ):
+                self._clear_dead_stop_order(order, new_status)
+
+    def _clear_dead_stop_order(self, order: Any, status: str) -> None:
+        """Detach a position from a stop order that died without filling."""
+        position = self.session.get(LivePosition, order.live_position_id)
+        if position is None or position.status != "open":
+            return
+        if getattr(position, "stop_order_id", None) != order.broker_order_id:
+            return  # Already moved on to a different stop order.
+        logger.error(
+            "%s -- resting stop order %s is %s and did NOT fill -- position is "
+            "protected only by the software stop until the next tick re-places it",
+            position.id, order.broker_order_id, status,
+        )
+        position.stop_order_id = None
+        position.stop_order_trigger_price = None
+        self.session.add(position)
+
     def _close_position_from_filled_stop_order(self, order: Any) -> None:
         position = self.session.get(LivePosition, order.live_position_id)
         if position is None or position.status != "open":

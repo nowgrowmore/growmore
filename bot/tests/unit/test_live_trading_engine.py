@@ -1164,3 +1164,41 @@ def test_a_rejected_trail_modify_is_retried_rather_than_recorded_as_done():
     order_client.modify_stop_loss_trigger.assert_called_once()
     # The broker still holds 95.0, so that is what we must still believe.
     assert position.stop_order_trigger_price == 95.0
+
+
+def test_a_stop_order_rejected_by_exchange_rms_is_cleared_so_it_gets_replaced():
+    """Dhan's API can ACCEPT a stop order (status TRANSIT) that the exchange
+    then rejects at RMS -- e.g. an MCX circuit-limit breach. Real case,
+    2026-09-08: order 34826090814707 came back TRANSIT, then REJECTED with
+    "Rate Not Within Ckt Limit". If the position keeps pointing at that dead
+    order, `_ensure_stop_order` takes its modify branch forever and never
+    re-places -- the bot believes it is protected while nothing rests at the
+    broker. The stale id must be cleared so the next tick re-places."""
+    position = LivePosition(
+        id=uuid.uuid4(), strategy_id=uuid.uuid4(), instrument_id=uuid.uuid4(),
+        status="open", quantity=1, avg_entry_price=100,
+        stop_order_id="STOP1", stop_order_trigger_price=95.0,
+    )
+    order = LiveOrder(
+        id=uuid.uuid4(), live_position_id=position.id, side="sell", quantity=1,
+        broker_order_id="STOP1", order_status="TRANSIT", fill_price=None,
+        close_reason="broker_stop_loss",
+    )
+    order_client = MagicMock()
+    order_client.get_order_status.return_value = {
+        "data": {"orderStatus": "REJECTED", "averageTradedPrice": 0}
+    }
+    session = MagicMock()
+    session.query.return_value.filter.return_value.all.return_value = [order]
+    session.get.return_value = position
+
+    engine = LiveTradingEngine(
+        dhan_client=MagicMock(), order_client=order_client, session=session
+    )
+    engine.reconcile_pending_orders()
+
+    assert order.order_status == "REJECTED"
+    # The position must no longer claim a resting stop.
+    assert position.stop_order_id is None
+    assert position.stop_order_trigger_price is None
+    assert position.status == "open"  # a rejected stop does NOT close anything

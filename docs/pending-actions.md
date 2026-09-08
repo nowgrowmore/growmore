@@ -73,6 +73,15 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   *write* path. Reads are fine (`select c.*`), the bot is unaffected, and paper trading is
   unaffected — but the **Save button on the risk-params form will error until production is
   promoted**. I do not promote to production without you asking, so this is waiting on you.
+- [ ] **DECIDE: what should the bot do when the ATR stop falls outside MCX's daily circuit band?**
+  (2026-09-08) The DH-906 fix is confirmed working — Dhan now accepts the SL order — but the
+  exchange rejected the first one with `Rate Not Within Ckt Limit 231232.00 To 250500.00`. MCX runs
+  a ±4% daily band and a 2-ATR SILVERM stop is ~5.2% out, so on days like this no exchange-resident
+  stop can exist and the software stop is the only protection. Options: (a) leave it retrying every
+  tick (harmless, but noisy in the order book and audit log), (b) clamp the resting order to the
+  band edge — a tighter stop than the strategy chose, which changes its risk profile, (c) place the
+  order only once the stop is inside the band, software stop until then. I have not chosen; (c) is
+  my recommendation but it is your risk call.
 - [ ] **Verify the stop path against one real MCX order — the order type has changed, the exchange
   behaviour is still not confirmed.** (Updated 2026-09-08: the path now sends a plain `STOP_LOSS`
   (SL limit), not `STOP_LOSS_MARKET`. SL-M is rejected on MCX_COMM with `DH-906` because Dhan
