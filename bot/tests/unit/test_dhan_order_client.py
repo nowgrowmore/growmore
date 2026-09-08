@@ -27,6 +27,7 @@ def instrument():
         symbol="GOLDM",
         exchange_segment="MCX_COMM",
         security_id="569003",
+        tick_size=1.0,
     )
 
 
@@ -122,8 +123,17 @@ def test_places_a_real_stop_loss_market_order_and_writes_audit_log(instrument):
     session = MagicMock()
     client = _make_client(session=session)
 
+    # Dhan rewrites market-style orders on MCX rather than forwarding them:
+    # a MARKET buy sent with price=0 came back from GET /orders as
+    # orderType=LIMIT with price = LTP * 1.01 (order 34826090811807, real,
+    # 2026-09-08). STOP_LOSS_MARKET gets the same treatment -- Dhan
+    # synthesises the limit leg itself, at trigger * 1.01, which for a SELL
+    # sits ABOVE the trigger and so fails Dhan's own "trigger > price"
+    # check. That is DH-906, and it fired identically whatever price we
+    # sent, because our price was discarded. So send a plain STOP_LOSS with
+    # a limit leg we control, on the correct side of the trigger.
     placed = client.place_stop_loss_market_order(
-        instrument, transaction_type="SELL", quantity=1, trigger_price=146760
+        instrument, transaction_type="SELL", quantity=1, trigger_price=146760.4567
     )
 
     assert placed.order_id == "112111182199"
@@ -131,16 +141,46 @@ def test_places_a_real_stop_loss_market_order_and_writes_audit_log(instrument):
 
     sent = json.loads(responses.calls[0].request.body)
     assert sent["transactionType"] == "SELL"
-    assert sent["orderType"] == "STOP_LOSS_MARKET"
+    assert sent["orderType"] == "STOP_LOSS"
     assert sent["triggerPrice"] == 146760
     assert sent["productType"] == "MARGIN"
+    # For a SELL stop (protecting a long) the limit leg sits a full
+    # protection band BELOW the trigger, not one tick: a one-tick limit
+    # would simply not fill on the fast move that triggered it, leaving the
+    # position unprotected with a resting order that looks healthy.
+    assert sent["price"] == 145292  # round_to_tick(146760 * 0.99)
+    assert sent["price"] < sent["triggerPrice"]
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
     assert len(audit_entries) == 1
     assert audit_entries[0].event_type == "live_stop_order_placed"
     assert audit_entries[0].payload["broker_order_id"] == "112111182199"
-    assert audit_entries[0].payload["trigger_price"] == 146760
+    assert audit_entries[0].payload["trigger_price"] == 146760.4567
+
+
+@responses.activate
+def test_buy_stop_loss_puts_its_limit_leg_above_the_trigger(instrument):
+    """A stop protecting a SHORT is a BUY above the market, so the limit leg
+    has to sit ABOVE the trigger -- the mirror of the sell case, and the
+    side Dhan's own synthesised leg happens to get right."""
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/orders",
+        json={"orderId": "112111182200", "orderStatus": "TRANSIT"},
+        status=200,
+    )
+    client = _make_client()
+
+    client.place_stop_loss_market_order(
+        instrument, transaction_type="BUY", quantity=1, trigger_price=146760.4567
+    )
+
+    sent = json.loads(responses.calls[0].request.body)
+    assert sent["orderType"] == "STOP_LOSS"
+    assert sent["triggerPrice"] == 146760
+    assert sent["price"] == 148228  # round_to_tick(146760 * 1.01)
+    assert sent["price"] > sent["triggerPrice"]
 
 
 @responses.activate
@@ -167,18 +207,20 @@ def test_stop_loss_order_failure_raises_and_writes_audit_log(instrument):
     assert audit_entries[0].event_type == "live_stop_order_failed"
 
 
-def test_modify_stop_loss_trigger_refuses_when_live_trading_disabled():
+def test_modify_stop_loss_trigger_refuses_when_live_trading_disabled(instrument):
     from growmore_bot.broker.dhan_order_client import LiveTradingDisabledError
 
     session = MagicMock()
     client = _make_client(live_trading_enabled=False, session=session)
 
     with pytest.raises(LiveTradingDisabledError):
-        client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)
+        client.modify_stop_loss_trigger(
+            instrument, "112111182199", transaction_type="SELL", quantity=1, new_trigger_price=148000
+        )
 
 
 @responses.activate
-def test_modify_stop_loss_trigger_writes_audit_log_on_success():
+def test_modify_stop_loss_trigger_writes_audit_log_on_success(instrument):
     responses.add(
         responses.PUT,
         f"{API_BASE}/orders/112111182199",
@@ -188,10 +230,18 @@ def test_modify_stop_loss_trigger_writes_audit_log_on_success():
     session = MagicMock()
     client = _make_client(session=session)
 
-    client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)
+    # Same non-tick-aligned trigger as a real trailing-stop update, and the
+    # same SELL-side price offset as the initial placement -- see
+    # test_places_a_real_stop_loss_market_order_and_writes_audit_log.
+    client.modify_stop_loss_trigger(
+        instrument, "112111182199", transaction_type="SELL", quantity=1, new_trigger_price=148000.789
+    )
 
     sent = json.loads(responses.calls[0].request.body)
-    assert sent["triggerPrice"] == 148000
+    assert sent["orderType"] == "STOP_LOSS"
+    assert sent["triggerPrice"] == 148001  # rounded to the nearest tick
+    assert sent["price"] == 146521  # round_to_tick(148001 * 0.99)
+    assert sent["price"] < sent["triggerPrice"]
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]
@@ -200,7 +250,7 @@ def test_modify_stop_loss_trigger_writes_audit_log_on_success():
 
 
 @responses.activate
-def test_modify_stop_loss_trigger_does_not_raise_on_failure_only_audits():
+def test_modify_stop_loss_trigger_does_not_raise_on_failure_only_audits(instrument):
     responses.add(
         responses.PUT,
         f"{API_BASE}/orders/112111182199",
@@ -210,7 +260,9 @@ def test_modify_stop_loss_trigger_does_not_raise_on_failure_only_audits():
     session = MagicMock()
     client = _make_client(session=session)
 
-    client.modify_stop_loss_trigger("112111182199", quantity=1, new_trigger_price=148000)  # must not raise
+    client.modify_stop_loss_trigger(
+        instrument, "112111182199", transaction_type="SELL", quantity=1, new_trigger_price=148000
+    )  # must not raise
 
     added = [c.args[0] for c in session.add.call_args_list]
     audit_entries = [obj for obj in added if hasattr(obj, "event_type")]

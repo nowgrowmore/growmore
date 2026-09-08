@@ -10,8 +10,8 @@ Hard rules (see CLAUDE.md non-negotiables):
 `growmore_bot.broker.dhan_client.DhanClient` (Data API only) is a completely
 separate class with its own hard runtime allow-list (`_SafeSdk`) blocking
 `place_order` -- it must never be extended to reach this code path. This
-class is deliberately narrow: it only knows how to place one thing, a real
-MARKET order, nothing else (no modify/cancel/other segments).
+class is deliberately narrow: it only knows how to place a real MARKET
+entry/exit and a resting stop, nothing else (no other segments).
 
 Order schema confirmed against the installed `dhanhq==2.2.0` SDK source
 (2026-09-04), not guessed:
@@ -42,6 +42,34 @@ logger = logging.getLogger(__name__)
 
 _VALID_TRANSACTION_TYPES = frozenset({"BUY", "SELL"})
 
+# Dhan applies a 1% "market protection" band when it converts a market-style
+# order into the limit order the exchange actually accepts. Confirmed against
+# a real order, not guessed: the bot's BUY MARKET entry (price=0) came back
+# from GET /orders as orderType=LIMIT, price=245106 -- exactly LTP * 1.01
+# (order 34826090811807, SILVERM, 2026-09-08). We mirror that band on the
+# stop's limit leg so a triggered stop still fills on a fast move.
+_PROTECTION_BAND = 0.01
+
+
+def _stop_leg_prices(
+    instrument: Any, transaction_type: str, trigger_price: float
+) -> tuple[float, float]:
+    """Tick-aligned (trigger, limit) pair for a resting stop order.
+
+    The limit leg goes a full protection band on the SAFE side of the
+    trigger -- below it for a SELL (protecting a long), above for a BUY
+    (protecting a short) -- and is forced at least one tick clear so the
+    strict inequality Dhan requires can never collapse on rounding.
+    """
+    tick = float(getattr(instrument, "tick_size", None) or 0.05)
+    trigger = round(trigger_price / tick) * tick
+    if transaction_type == "SELL":
+        price = round(trigger * (1 - _PROTECTION_BAND) / tick) * tick
+        price = min(price, trigger - tick)
+    else:
+        price = round(trigger * (1 + _PROTECTION_BAND) / tick) * tick
+        price = max(price, trigger + tick)
+    return trigger, price
 
 @dataclass(frozen=True)
 class PlacedOrder:
@@ -169,14 +197,18 @@ class DhanOrderClient:
         `Signal.stop_price`, in the same per-lot rupee terms the quote/ATR
         values are already in.
 
-        **UNVERIFIED against a real MCX order**: `order_type=SLM` +
-        `trigger_price` is confirmed present in the installed dhanhq SDK
-        (`dhanhq.SLM = "STOP_LOSS_MARKET"`, `_order.py`'s `place_order`
-        signature), but whether Dhan actually accepts an SL-M order for the
-        MCX_COMM segment, and what its real fill behavior is around a fast
-        move, has not been confirmed with a real placed order. Resolve
-        before relying on this for real risk management -- see
-        docs/pending-actions.md.
+        Sends a plain `STOP_LOSS` (SL limit), NOT `STOP_LOSS_MARKET`,
+        despite the method name kept for its callers: SL-M is rejected by
+        Dhan on MCX_COMM with DH-906, because Dhan rewrites market-style
+        orders into limit orders and synthesises the limit leg on the wrong
+        side of the trigger for a SELL. See the root-cause comment in the
+        body. The limit leg this sends is a full 1% protection band clear of
+        the trigger, matching the band Dhan itself applies to a MARKET
+        order.
+
+        **STILL UNVERIFIED**: no SL order has yet been accepted by Dhan for
+        MCX_COMM, and its real fill behaviour around a fast move (a limit
+        leg can miss on a gap) is unknown. See docs/pending-actions.md.
 
         Raises/audits identically to `place_market_order`.
         """
@@ -201,20 +233,38 @@ class DhanOrderClient:
             "order_purpose": "stop_loss",
         }
 
+        # ROOT CAUSE of the DH-906 outage (2026-09-08), from real evidence:
+        # Dhan does not forward market-style orders to MCX, it rewrites
+        # them. The bot's own BUY MARKET entry, sent with price=0, is
+        # recorded in Dhan's order book as orderType=LIMIT with
+        # price = LTP * 1.01. STOP_LOSS_MARKET gets the same rewrite, so
+        # Dhan synthesises the limit leg at trigger * 1.01 -- which for a
+        # SELL lands ABOVE the trigger and fails Dhan's own
+        # "trigger > price" validation. Hence DH-906 firing identically for
+        # price=0, price=trigger and price=trigger-tick: our price field was
+        # being discarded before the check ever ran, so no value of it could
+        # have helped. The fix is to stop asking Dhan to invent the limit
+        # leg -- send a plain STOP_LOSS with an explicit limit price on the
+        # correct side of the trigger.
+        rounded_trigger, price = _stop_leg_prices(instrument, transaction_type, trigger_price)
+
         response = self._sdk.place_order(
             security_id=instrument.security_id,
             exchange_segment=instrument.exchange_segment,
             transaction_type=transaction_type,
             quantity=quantity,
-            order_type=self._sdk.SLM,
+            order_type=self._sdk.SL,
             product_type="MARGIN",
-            price=0,
-            trigger_price=trigger_price,
+            price=price,
+            trigger_price=rounded_trigger,
         )
 
         if response.get("status") != "success":
             audit_payload["result"] = "failed"
             audit_payload["error"] = str(response.get("remarks"))
+            audit_payload["raw_response"] = response
+            audit_payload["sent_price"] = price
+            audit_payload["sent_trigger_price"] = rounded_trigger
             self._session.add(
                 AuditLog(
                     id=uuid.uuid4(), ts=now, event_type="live_stop_order_failed", payload=audit_payload
@@ -235,7 +285,9 @@ class DhanOrderClient:
         logger.warning("LIVE STOP ORDER PLACED (REAL MONEY): %s", audit_payload)
         return PlacedOrder(order_id=order_id, order_status=order_status)
 
-    def modify_stop_loss_trigger(self, order_id: str, quantity: int, new_trigger_price: float) -> None:
+    def modify_stop_loss_trigger(
+        self, instrument: Any, order_id: str, transaction_type: str, quantity: int, new_trigger_price: float
+    ) -> None:
         """Move a resting SL-M order's trigger price -- how a risk-managed
         position's trailing stop actually ratchets at the exchange, instead
         of the bot re-detecting and re-placing an order every tick.
@@ -265,14 +317,19 @@ class DhanOrderClient:
             "broker_order_id": order_id,
             "new_trigger_price": new_trigger_price,
         }
+        # Same explicit limit leg as place_stop_loss_market_order -- see the
+        # root-cause comment there for why Dhan must not be left to
+        # synthesise it.
+        rounded_trigger, price = _stop_leg_prices(instrument, transaction_type, new_trigger_price)
+
         try:
             response = self._sdk.modify_order(
                 order_id=order_id,
-                order_type=self._sdk.SLM,
+                order_type=self._sdk.SL,
                 leg_name="",
                 quantity=quantity,
-                price=0,
-                trigger_price=new_trigger_price,
+                price=price,
+                trigger_price=rounded_trigger,
                 disclosed_quantity=0,
                 validity="DAY",
             )

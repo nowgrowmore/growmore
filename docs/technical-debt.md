@@ -356,10 +356,21 @@
   `close_reason="broker_stop_loss"`) when the resting order fills between polls -- the actual point
   of the feature. Paper trading has no real broker to place a resting order at, so its stop stays
   software-detected by design; the risk_state fix above means it now at least enforces correctly.
-  **UNVERIFIED against a real order**: whether Dhan accepts an SL-M order for MCX_COMM, and the
-  `modify_order`/`cancel_order` real response shapes for a plain (non-Super) order, have not been
-  confirmed with an actual placed order -- see `docs/pending-actions.md`. Not enabled anywhere yet;
-  live trading is still blocked on the pre-existing unverified MCX order-quantity-unit question.
+  **(2026-09-08) SL-M turned out NOT to be accepted on MCX_COMM, and the order type has been
+  changed to plain `STOP_LOSS` (SL limit).** A real SILVERM long ran for ~50 minutes with no
+  broker-side stop while every 5-minute retry was rejected with `DH-906 Trigger Price should be
+  greater than Price` -- identically for `price=0`, `price=trigger` and `price=trigger-1tick`,
+  which is what made it look like a generic catch-all. Root cause, from Dhan's own order book:
+  Dhan does not forward market-style orders to MCX, it **rewrites** them. The bot's `BUY MARKET`
+  entry, sent with `price=0`, is recorded by `GET /orders` as `orderType=LIMIT, price=245106` --
+  exactly `LTP * 1.01`. `STOP_LOSS_MARKET` gets the same rewrite, so Dhan synthesised the limit
+  leg at `trigger * 1.01`, which for a SELL sits *above* the trigger and fails Dhan's own
+  `trigger > price` check. Our `price` field was being discarded before that check ran, so no
+  value of it could ever have helped. Fix: send `order_type=SL` with an explicit limit leg one
+  full 1% protection band on the safe side of the trigger (`_stop_leg_prices`), mirroring the band
+  Dhan applies itself. **Still unverified**: no SL order has been accepted by Dhan for MCX_COMM
+  yet, and a limit leg can miss on a gap -- see `docs/pending-actions.md`. Live trading is still
+  blocked on the pre-existing unverified MCX order-quantity-unit question.
 - **The backtest still does not model the live engines' own guards.** `daily_loss_limit`, the
   contract-expiry force-close and the end-of-day flatten for `requires_intraday_flatten` strategies
   all exist in `paper/engine.py` and `live/engine.py` and in none of `backtest/engine.py`. Backtest

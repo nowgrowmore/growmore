@@ -807,7 +807,11 @@ class LiveTradingEngine:
             return  # Trail hasn't moved -- nothing to modify.
 
         self.order_client.modify_stop_loss_trigger(
-            position.stop_order_id, quantity=qty, new_trigger_price=stop_price
+            instrument,
+            position.stop_order_id,
+            transaction_type="SELL",
+            quantity=qty,
+            new_trigger_price=stop_price,
         )
         position.stop_order_trigger_price = stop_price
         self.session.add(position)

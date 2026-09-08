@@ -73,8 +73,12 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   *write* path. Reads are fine (`select c.*`), the bot is unaffected, and paper trading is
   unaffected — but the **Save button on the risk-params form will error until production is
   promoted**. I do not promote to production without you asking, so this is waiting on you.
-- [ ] **Verify the SL-M stop path against one real MCX order — the code is done, the exchange
-  behaviour is not confirmed.** Exchange-resident stops are fully built (`dhan_order_client.py`
+- [ ] **Verify the stop path against one real MCX order — the order type has changed, the exchange
+  behaviour is still not confirmed.** (Updated 2026-09-08: the path now sends a plain `STOP_LOSS`
+  (SL limit), not `STOP_LOSS_MARKET`. SL-M is rejected on MCX_COMM with `DH-906` because Dhan
+  rewrites market-style orders and synthesises the limit leg on the wrong side of the trigger for
+  a SELL — full root cause in `docs/technical-debt.md`. What remains open is whether Dhan accepts
+  the SL form, and whether a limit leg 1% clear of the trigger actually fills on a fast move.) Exchange-resident stops are fully built (`dhan_order_client.py`
   place/modify/cancel, wired into `live/engine.py:_sync_stop_order`, 15 tests): the stop is placed
   at order time, the trigger is moved only when the trail actually moves, a failed placement is
   retried every tick, and the resting order is cancelled before any other kind of exit so it cannot

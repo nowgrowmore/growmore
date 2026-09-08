@@ -1065,7 +1065,7 @@ def test_risk_state_round_trips_across_ticks_for_a_risk_managed_strategy():
     # The trail ratcheted (95.0 -> 97.0) -- the resting stop is MOVED via
     # modify, not cancelled and re-placed.
     order_client.modify_stop_loss_trigger.assert_called_once_with(
-        "STOP1", quantity=1, new_trigger_price=97.0
+        instrument, "STOP1", transaction_type="SELL", quantity=1, new_trigger_price=97.0
     )
     assert position.stop_order_trigger_price == 97.0
 
