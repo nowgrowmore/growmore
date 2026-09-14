@@ -2,6 +2,28 @@
 
 Plain-language list of things only you can do or decide. Updated as the project progresses.
 
+## New 2026-09-14 — MCX options-selling backtest research built, real-world verification pending
+
+An offline-only backtest for an MCX Goldmini/Silvermini options-SELLING strategy (sell OTM puts,
+take assignment into futures, sell covered calls against it) is now built end-to-end under
+`bot/research/mcx_options/` — data pipeline, pricing, regime labelling, strike selection, the
+cycle engine, a local results store, and a config-comparison harness (flat 0.30-delta baseline vs.
+a dynamic 0.30/0.50-delta-by-regime mapping). Nothing here touches paper/live trading or the
+production database. Nothing to decide yet, but several real-world facts need sourcing before any
+number from this is trustworthy — see `docs/technical-debt.md` for the full list:
+
+- [ ] **Verify MCX's real bhavcopy column names/date format** against an actual downloaded file —
+  `bhavcopy.py`'s schema is reconstructed from documentation, unconfirmed.
+- [ ] **No live MCX bhavcopy scraping exists yet** — only fabricated fixtures have been run through
+  the pipeline.
+- [ ] **Source real Goldmini/Silvermini options lot size, tick size, and expiry offsets** —
+  `contract_specs.py`'s figures are unverified.
+- [ ] **Source real MCX commodity-options cost figures** (brokerage/STT/CTT/GST rates) — the
+  engine currently defaults the option leg to zero cost as an explicit placeholder.
+- [ ] Nothing to action on assignment/rollover/margin modelling right now — they are documented
+  simplifications, not bugs — but don't quote an absolute CAGR/Sharpe from this study as real until
+  the four items above are sourced.
+
 ## RESOLVED 2026-09-06 — the bot fixed itself, no action needed
 
 - [x] **The DH-906 outage is over, and it self-healed.** The VPS regenerated its own token at

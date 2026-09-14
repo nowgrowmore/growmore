@@ -1,5 +1,37 @@
 # Technical Debt / Known Limitations
 
+- **(OPEN, 2026-09-14) MCX Goldmini/Silvermini options-SELLING backtest research (phases 1-4) is
+  built end-to-end but rests on several unverified real-world assumptions.** Entirely under
+  `bot/research/mcx_options/` (offline research only, never touching Neon/production and never
+  placing an order): `bhavcopy.py`/`chain_cache.py`/`fetch.py` (data pipeline), `pricing.py`
+  (Black-76), `regime.py` (ADX/Bollinger-Bandwidth regime labels), `strike_selection.py`
+  (target-delta strike picker), `engine.py` (the put-sell -> assignment -> covered-call state
+  machine, no stop-loss by design), `results_store.py` (local SQLite run store) and
+  `run_strategies.py` (the flat-0.30-delta vs. dynamic-0.30/0.50-delta comparison harness). Every
+  piece has passing unit tests against hand-computed arithmetic, but several inputs are still
+  placeholders or unconfirmed against reality:
+  - **MCX bhavcopy column names/date format are UNVERIFIED against a real downloaded file** —
+    `bhavcopy.py`'s schema is reconstructed from documentation, not a real CSV (see that module's
+    docstring).
+  - **No live scraping is implemented** — `fetch.py` has no working path against MCX's scrape-only
+    ASP.NET bhavcopy UI yet; the whole pipeline has only ever run against fabricated fixtures.
+  - **Goldmini/Silvermini options lot size, tick size, and expiry offsets are unverified** —
+    `contract_specs.py`'s figures are not sourced from a live MCX contract spec.
+  - **Real MCX commodity-options cost figures are not sourced.** `growmore_bot/costs.py`'s
+    `MCX_COMMODITY_OPTION_COST_MODEL` is a `reviewed=False` NaN placeholder that raises on use;
+    `engine.py` defaults its option leg to `FREE_COST_MODEL` (zero cost) instead, which is
+    unmistakably a placeholder but means every backtest number understates real option-selling
+    costs.
+  - **Assignment/rollover/margin are documented simplifications, not real SPAN/exchange
+    mechanics.** `EngineConfig.margin_multiple_of_premium` is a flat, non-gating multiple for
+    reporting only; futures contract rollover charges a flat
+    `futures_roll_cost_per_lot` placeholder rather than a real bid/ask roll spread; assignment is
+    modelled as an instant conversion to a futures position at the raw strike, not real exchange
+    settlement timing.
+
+  None of this blocks the code from running or being tested — it blocks trusting any CAGR/Sharpe
+  number this produces as a real trading conclusion until the above are sourced/verified.
+
 - **(OPEN, found 2026-09-05) The Dhan token can be dead while the bot believes it is valid, and
   the bot cannot self-heal.** `DhanClient.refresh_access_token_if_needed` decides whether a token
   needs refreshing by decoding the JWT `exp` claim and nothing else. But Dhan allows only one
