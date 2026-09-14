@@ -222,6 +222,32 @@ def fetch_day(day: date, fetcher: Optional[Fetcher] = None) -> list:
     return parse_bhavcopy_json(records, trade_date=day)
 
 
+#: Index matches Python's `date.weekday()` (0=Monday ... 6=Sunday).
+_WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday",
+                  "saturday", "sunday"]
+
+
+def dates_in_range(from_date: date, to_date: date, weekday: Optional[int] = None) -> list:
+    """Every date from `from_date` to `to_date` inclusive, or (if `weekday`
+    is given, 0=Monday ... 6=Sunday) only the dates matching that weekday.
+
+    Used by `main`'s backfill loop to support `--every monday` (etc.): the
+    engine only needs an options chain on a day it actually attempts an
+    entry, and settlement is decided from the futures price alone (see
+    `engine.py`'s docstring on why the entry logic re-tries day-by-day until
+    a day WITH chain data and a favorable regime coincide) -- so restricting
+    the backfill to one weekday is not a data-availability compromise, it's
+    a deliberate "the engine may only enter on this weekday" simplification,
+    made explicit here rather than left as an accident of a sparse cache.
+    """
+    if from_date > to_date:
+        return []
+    all_days = [from_date + timedelta(days=i) for i in range((to_date - from_date).days + 1)]
+    if weekday is None:
+        return all_days
+    return [d for d in all_days if d.weekday() == weekday]
+
+
 def fetch_and_cache_day(day: date, fetcher: Optional[Fetcher] = None) -> int:
     """Fetch one day and write it into `chain_cache`, returning the row count.
 
@@ -238,6 +264,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--from", dest="from_date", required=False)
     parser.add_argument("--to", dest="to_date", default=date.today().isoformat())
+    parser.add_argument(
+        "--every", dest="every", default="day",
+        choices=["day", "monday", "tuesday", "wednesday", "thursday", "friday",
+                 "saturday", "sunday"],
+        help=(
+            "Backfill cadence (default: day). 'monday' (etc.) fetches only "
+            "that weekday between --from/--to, on the deliberate assumption "
+            "(see engine.py and dates_in_range's docstring) that the engine "
+            "only needs an options chain on the day it attempts an entry -- "
+            "settlement is decided from the futures price alone. This is a "
+            "real simplification (the engine can then only ever enter on "
+            "that weekday), not just a bandwidth saving."
+        ),
+    )
     parser.add_argument(
         "--consolidate", action="store_true",
         help="Rewrite cached days as one parquet per underlying, then exit.",
@@ -309,17 +349,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     from_date = date.fromisoformat(args.from_date)
     to_date = date.fromisoformat(args.to_date)
+    weekday = _WEEKDAY_NAMES.index(args.every) if args.every != "day" else None
 
-    day = from_date
     fetched = skipped = 0
-    while day <= to_date:
+    for day in dates_in_range(from_date, to_date, weekday=weekday):
         if chain_cache.is_day_cached(day):
             skipped += 1
         else:
             count = fetch_and_cache_day(day)
             fetched += 1
             print(f"  {day}: {count} rows", file=sys.stderr)
-        day += timedelta(days=1)
 
     print(f"\nfetched {fetched}, skipped {skipped} already cached", file=sys.stderr)
     print("now run: python -m research.mcx_options.fetch --consolidate", file=sys.stderr)
@@ -331,5 +370,6 @@ if __name__ == "__main__":
 
 
 __all__ = [
-    "Fetcher", "MCX_BHAVCOPY_URL", "fetch_day", "fetch_and_cache_day", "main",
+    "Fetcher", "MCX_BHAVCOPY_URL", "fetch_day", "fetch_and_cache_day",
+    "dates_in_range", "main",
 ]

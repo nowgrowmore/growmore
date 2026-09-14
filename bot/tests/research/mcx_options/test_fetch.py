@@ -262,6 +262,55 @@ def test_fetch_live_json_raw_still_gets_data_when_warmup_itself_fails(monkeypatc
     assert result.json_body == {"IsSuccess": True, "Data": CANNED_RECORDS}
 
 
+# --- dates_in_range -- the sparse-cadence backfill helper. The engine only
+# needs an options chain on the day it actually attempts an entry (settlement
+# is decided from the futures price alone, no chain lookup); fetching every
+# calendar day for a multi-year backfill is unnecessarily heavy, so `--every
+# monday` (etc.) restricts the backfill to one weekday, which becomes "the
+# engine can only enter on that weekday" -- a deliberate, documented
+# simplification, not an accident of what data happens to exist. ---
+
+
+def test_dates_in_range_defaults_to_every_day():
+    days = fetch.dates_in_range(date(2026, 9, 1), date(2026, 9, 5))
+    assert days == [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3),
+                     date(2026, 9, 4), date(2026, 9, 5)]
+
+
+def test_dates_in_range_filters_to_one_weekday():
+    # 2026-09-01 is a Tuesday; Mondays in this window are 2026-09-07 and 09-14.
+    days = fetch.dates_in_range(date(2026, 9, 1), date(2026, 9, 15), weekday=0)
+    assert days == [date(2026, 9, 7), date(2026, 9, 14)]
+
+
+def test_dates_in_range_weekday_matching_from_date_includes_it():
+    # 2026-09-07 is itself a Monday -- must be included, not skipped.
+    days = fetch.dates_in_range(date(2026, 9, 7), date(2026, 9, 7), weekday=0)
+    assert days == [date(2026, 9, 7)]
+
+
+def test_dates_in_range_empty_when_from_after_to():
+    assert fetch.dates_in_range(date(2026, 9, 5), date(2026, 9, 1)) == []
+
+
+def test_main_with_every_monday_only_fetches_mondays(tmp_path, monkeypatch):
+    monkeypatch.setattr(chain_cache, "DAY_DIR", tmp_path / "days")
+    monkeypatch.setattr(chain_cache, "SYMBOL_DIR", tmp_path / "symbols")
+
+    fetched_days = []
+
+    def fake_fetch_and_cache_day(day, fetcher=None):
+        fetched_days.append(day)
+        return 0
+
+    monkeypatch.setattr(fetch, "fetch_and_cache_day", fake_fetch_and_cache_day)
+
+    # 2026-09-01 (Tue) .. 2026-09-15 (Tue): Mondays in range are 09-07, 09-14.
+    fetch.main(["--from", "2026-09-01", "--to", "2026-09-15", "--every", "monday"])
+
+    assert fetched_days == [date(2026, 9, 7), date(2026, 9, 14)]
+
+
 def test_fetch_and_cache_day_is_a_noop_write_when_fetcher_has_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(chain_cache, "DAY_DIR", tmp_path / "days")
     monkeypatch.setattr(chain_cache, "SYMBOL_DIR", tmp_path / "symbols")
