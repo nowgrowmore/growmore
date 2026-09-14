@@ -14,11 +14,16 @@ import {
   getPortfolioHoldings,
   getRecentSignals,
   getRecentSignalsForConfigs,
+  getMCXOptionsConfigs,
+  getMCXOptionsLegs,
+  getMCXOptionsPositions,
+  getMCXOptionsSelections,
   getWheelBasketConfigs,
   getWheelBasketLegs,
   getWheelBasketPositions,
   getWheelBasketSelections,
   setBotConfigEnabled,
+  setMCXOptionsConfigEnabled,
   setWheelBasketConfigEnabled,
   updateBotConfigRiskParams,
 } from "./db";
@@ -391,5 +396,75 @@ describe("setWheelBasketConfigEnabled", () => {
 
     const auditCallParams = fakeSql.calls[1];
     expect(JSON.stringify(auditCallParams)).toContain("wheel_basket_disabled");
+  });
+});
+
+describe("getMCXOptionsConfigs", () => {
+  it("returns whatever rows the client resolves with", async () => {
+    const fakeRows = [{ id: "config-1", enabled: true, symbol: "GOLDM" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getMCXOptionsConfigs();
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getMCXOptionsPositions", () => {
+  it("returns the positions for one config", async () => {
+    const fakeRows = [{ id: "pos-1", state: "long_futures" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getMCXOptionsPositions("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getMCXOptionsLegs", () => {
+  it("returns the legs joined through positions for one config", async () => {
+    const fakeRows = [{ id: "leg-1", action: "sell_put" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getMCXOptionsLegs("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("getMCXOptionsSelections", () => {
+  it("returns the selection log for one config", async () => {
+    const fakeRows = [{ id: "sel-1", regime: "consolidating" }];
+    const fakeSql = makeFakeSql(fakeRows);
+    __setTestClient(fakeSql as never);
+
+    const result = await getMCXOptionsSelections("config-1");
+
+    expect(result).toBe(fakeRows);
+  });
+});
+
+describe("setMCXOptionsConfigEnabled", () => {
+  it("runs the update and an audit_log insert inside one transaction", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    await setMCXOptionsConfigEnabled("config-1", true);
+
+    expect(fakeSql.transaction).toHaveBeenCalledTimes(1);
+    expect(fakeSql).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the requested enabled value in the audit payload", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    await setMCXOptionsConfigEnabled("config-1", false);
+
+    const auditCallParams = fakeSql.calls[1];
+    expect(JSON.stringify(auditCallParams)).toContain("mcx_options_disabled");
   });
 });

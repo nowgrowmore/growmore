@@ -18,6 +18,10 @@ import type {
   WheelBasketLeg,
   WheelBasketPosition,
   WheelBasketSelection,
+  MCXOptionsConfig,
+  MCXOptionsLeg,
+  MCXOptionsPosition,
+  MCXOptionsSelection,
 } from "./types";
 
 // Thin, typed query layer against the shared Postgres schema owned by
@@ -536,6 +540,74 @@ export async function setWheelBasketConfigEnabled(id: string, enabled: boolean):
         now(),
         ${enabled ? "wheel_basket_enabled" : "wheel_basket_disabled"},
         ${JSON.stringify({ wheel_basket_config_id: id, enabled })}::jsonb
+      )
+    `,
+  ]);
+}
+
+// The MCX options-selling strategy (bot/research/mcx_options/engine.py) --
+// the direct MCX analog of the wheel-basket strategy above: one config row
+// per commodity (GOLDM/SILVERM), sized in lots rather than virtual capital.
+
+export async function getMCXOptionsConfigs(): Promise<MCXOptionsConfig[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from mcx_options_configs
+    order by updated_at desc
+  `;
+  return rows as unknown as MCXOptionsConfig[];
+}
+
+export async function getMCXOptionsPositions(configId: string): Promise<MCXOptionsPosition[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from mcx_options_positions
+    where config_id = ${configId}
+    order by opened_at desc
+  `;
+  return rows as unknown as MCXOptionsPosition[];
+}
+
+export async function getMCXOptionsLegs(configId: string): Promise<MCXOptionsLeg[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select l.* from mcx_options_legs l
+    join mcx_options_positions p on p.id = l.position_id
+    where p.config_id = ${configId}
+    order by l.opened_at desc
+  `;
+  return rows as unknown as MCXOptionsLeg[];
+}
+
+export async function getMCXOptionsSelections(
+  configId: string,
+  limit = 300
+): Promise<MCXOptionsSelection[]> {
+  const sql = getClient();
+  const rows = await sql`
+    select * from mcx_options_selections
+    where config_id = ${configId}
+    order by cycle_date desc, created_at desc
+    limit ${limit}
+  `;
+  return rows as unknown as MCXOptionsSelection[];
+}
+
+export async function setMCXOptionsConfigEnabled(id: string, enabled: boolean): Promise<void> {
+  const sql = getClient();
+  await sql.transaction((tx) => [
+    tx`
+      update mcx_options_configs
+      set enabled = ${enabled}, updated_at = now()
+      where id = ${id}
+    `,
+    tx`
+      insert into audit_log (id, ts, event_type, payload)
+      values (
+        gen_random_uuid(),
+        now(),
+        ${enabled ? "mcx_options_enabled" : "mcx_options_disabled"},
+        ${JSON.stringify({ mcx_options_config_id: id, enabled })}::jsonb
       )
     `,
   ]);

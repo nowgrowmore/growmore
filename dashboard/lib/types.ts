@@ -288,6 +288,75 @@ export interface WheelBasketSelection {
   created_at: string;
 }
 
+// The MCX options-selling strategy (bot/research/mcx_options/engine.py): the
+// direct MCX analog of the wheel-basket strategy above, but one config row
+// per commodity (GOLDM/SILVERM), sized in lots rather than virtual capital
+// -- no cross-sectional universe/rotation concept. An assigned put settles
+// into a FUTURES position (not shares), which carries its own contract
+// expiry independent of the option's expiry. No stop-loss ever closes a
+// position by deliberate design -- only expiry (OTM), assignment (ITM put),
+// or being called away (ITM call).
+export interface MCXOptionsConfig {
+  id: string;
+  strategy_id: string;
+  enabled: boolean;
+  mode: string; // "paper" | "live" (live order placement does not exist yet)
+  symbol: string; // "GOLDM" | "SILVERM"
+  lots: number;
+  consolidating_target_delta: string;
+  trend_favorable_target_delta: string;
+  min_open_interest: number;
+  margin_multiple_of_premium: string;
+  updated_at: string;
+}
+
+export interface MCXOptionsPosition {
+  id: string;
+  config_id: string;
+  status: string; // open|closed
+  state: string; // flat|long_futures|closed
+  // Raw strike the put was assigned at, not premium-adjusted -- premium
+  // received is booked as its own cash P&L at entry, never netted in.
+  basis: string | null;
+  futures_qty: string;
+  futures_contract_expiry: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  realized_pnl: string;
+  unrealized_pnl: string;
+}
+
+export interface MCXOptionsLeg {
+  id: string;
+  position_id: string;
+  cycle_expiry: string;
+  opt_type: string; // PE|CE
+  strike: string;
+  premium: string;
+  lots: string;
+  // sell_put | assigned | sell_call | call_expired_otm | called_away | roll
+  // | put_expired_otm
+  action: string;
+  opened_at: string;
+  settled_at: string | null;
+  assigned: boolean;
+  called_away: boolean;
+  pnl: string | null;
+}
+
+export interface MCXOptionsSelection {
+  id: string;
+  config_id: string;
+  cycle_date: string;
+  // consolidating|trend_favorable|trend_unfavorable, or null for "no
+  // opinion" (treated the same as trend_unfavorable: never permissive).
+  regime: string | null;
+  target_delta: string | null;
+  selected_strike: string | null;
+  reason: string;
+  created_at: string;
+}
+
 export interface AuditLogEntry {
   id: string;
   ts: string;
