@@ -347,10 +347,23 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
 
 - [ ] **(Update 2026-09-14) The live paper-trading engine now exists** (`bot/growmore_bot/
   mcx_options/` — see `docs/technical-debt.md`'s new entry for what it still defers, notably
-  futures contract rollover), but nothing runs it yet: there is no scheduler job wiring it into
-  `growmore_bot/scheduler/run.py` (wheel_basket has `growmore_bot/wheel_basket/scheduler_job.py`
-  as the template for what this would look like), and no `mcx_options_configs` rows have been
-  created for GOLDM/SILVERM in any environment. As with wheel_basket, this strategy places no real
-  orders anywhere — it is a self-contained paper ledger — so enabling it is a paper-trading-only
-  decision, but still one for the account owner to make deliberately once the migration above has
-  been applied.
+  futures contract rollover). It is now wired into the scheduler
+  (`growmore_bot/mcx_options/scheduler_job.py`, called once daily at 23:59 IST from
+  `growmore_bot/scheduler/run.py`'s `_mcx_options_job`, gated on
+  `growmore_bot.scheduler.market_hours.is_mcx_trading_day` — a day-only weekday+holiday check
+  reusing the same 2026 MCX holiday list `is_market_open` uses; it does not yet handle
+  partial-session holidays, the same known gap `market_hours.py`/`nse_equity_hours.py` already
+  carry), and `bot/research/provision_mcx_options_configs.py` is the idempotent
+  `--dry-run`/`--apply` CLI that creates the `mcx_options_configs` rows for GOLDM/SILVERM.
+  **Nobody has run it against production yet, and it always creates rows `enabled=False`.**
+  Two separate deliberate manual steps remain for the account owner, in order:
+  1. Apply migration `0022_mcx_options` to the real Neon database (see the item above — still not
+     done).
+  2. Run `python -m research.provision_mcx_options_configs --apply` against production (creates
+     the disabled GOLDM/SILVERM config rows, seeded at `consolidating_target_delta=0.30`,
+     `trend_favorable_target_delta=0.50`, `lots=1` — the values validated in the offline backtest's
+     "dynamic-0.30-0.50-delta" variant), then flip `enabled=True` on a row only when ready to let it
+     run — the cron job and provisioning script never do this themselves.
+  As with wheel_basket, this strategy places no real orders anywhere — it is a self-contained paper
+  ledger — so enabling it is a paper-trading-only decision, but still one for the account owner to
+  make deliberately, and only after the migration has been applied.

@@ -18,7 +18,7 @@ flowchart LR
         Broker["Dhan client wrapper\n(Data API only)"]
         OrderClient["Dhan order client\n(the ONLY module allowed\nto call the Order API)"]
         WheelBasket["Wheel-basket engine\n(paper only, rotating\nhigh-IV stock basket,\nonce-daily cycle after\nNSE close)"]
-        MCXOptions["MCX options-selling engine\n(paper only, put-sell/covered-call\ncycle on GOLDM/SILVERM,\nonce-daily, no scheduler\nwiring yet)"]
+        MCXOptions["MCX options-selling engine\n(paper only, put-sell/covered-call\ncycle on GOLDM/SILVERM,\nonce-daily cron @ 23:59 IST,\nconfigs disabled by default)"]
     end
 
     DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log,\nwheel_basket_configs/positions/\nlegs/selections,\nmcx_options_configs/positions/\nlegs/selections")]
@@ -57,10 +57,18 @@ shape one level down: `regime.py` (hand-rolled ADX/Bollinger-Bandwidth regime cl
 `pricing.py`/`strike_selection.py` (Black-76 pricing and delta-targeted strike selection),
 `live_data.py` (the only module calling `DhanClient`), and `mcx_options_engine.py` (the
 put-sell -> assignment -> covered-call state machine, no stop-loss by design). Also **paper-only**
-— `mcx_options_configs.mode` stays `"paper"`, and there is no scheduler wiring for it yet (see
-`docs/pending-actions.md`). Futures contract rollover is a known, loudly-flagged gap (see
-`docs/technical-debt.md`) — do not enable this strategy across a contract-month boundary until
-that is built.
+— `mcx_options_configs.mode` stays `"paper"`. `growmore_bot/mcx_options/scheduler_job.py` (called
+from a `_mcx_options_job` cron, `CronTrigger(hour=23, minute=59, timezone=MCX_TIMEZONE)`, gated by
+`growmore_bot.scheduler.market_hours.is_mcx_trading_day`) now wires it into
+`growmore_bot/scheduler/run.py`'s `start()`, mirroring `_wheel_basket_job`'s shape — one cycle per
+enabled `mcx_options_configs` row, per-config try/except so one commodity's failure never aborts
+another's. 23:59 IST is chosen to clear MCX's own seasonal non-agri close (23:30/23:55 IST) in
+every season without a season-aware trigger. `bot/research/provision_mcx_options_configs.py` is
+the idempotent `--dry-run`/`--apply` CLI that creates the `mcx_options_configs` rows for
+GOLDM/SILVERM — it always creates them `enabled=False`; nothing has actually enabled this strategy
+in any environment yet (see `docs/pending-actions.md`). Futures contract rollover is a known,
+loudly-flagged gap (see `docs/technical-debt.md`) — do not enable this strategy across a
+contract-month boundary until that is built.
 
 ## Components
 

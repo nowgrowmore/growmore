@@ -14,7 +14,12 @@ from typing import Any, Callable, Optional
 
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
 from growmore_bot.scheduler.contract_rollover import is_past_close_out_cutoff, roll_to_next_contract
-from growmore_bot.scheduler.market_hours import MCX_TIMEZONE, is_market_open, is_near_session_close
+from growmore_bot.scheduler.market_hours import (
+    MCX_TIMEZONE,
+    is_market_open,
+    is_mcx_trading_day,
+    is_near_session_close,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -517,11 +522,45 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
         with session_scope() as session:
             run_wheel_basket_configs(session, dhan_client, today=now.date())
 
+    def _mcx_options_job() -> None:
+        # Separate from _job's 5-minute MCX tick loop, same shape as
+        # _wheel_basket_job above: the options-selling strategy's cycle is
+        # decided once a day (at/after that day's settlement), not
+        # intraday -- see growmore_bot.mcx_options.mcx_options_engine's
+        # module docstring.
+        #
+        # Cron time 23:59 IST: MCX's non-agri close is itself SEASONAL --
+        # 23:30 IST while the US observes DST, 23:55 IST otherwise (see
+        # market_hours.MCX_CLOSE_TIME_SUMMER/WINTER) -- so unlike
+        # _wheel_basket_job's fixed 15:45 (NSE equity close, 15:30, has no
+        # such seasonal shift), a single fixed CronTrigger time has to clear
+        # BOTH seasonal closes, not just one. 23:59 is comfortably after the
+        # later of the two (23:55) in every season, without needing a
+        # season-aware trigger -- so the day's final settlement/closing
+        # prices for GOLDM/SILVERM are always already in by the time this
+        # runs, regardless of time of year.
+        from growmore_bot.mcx_options.scheduler_job import run_mcx_options_configs
+
+        now = datetime.now(MCX_TIMEZONE)
+        if not is_mcx_trading_day(now):
+            return
+
+        settings = Settings()
+        dhan_client = DhanClient(
+            client_id=settings.dhan_client_id, access_token=settings.dhan_access_token
+        )
+        dhan_client.refresh_access_token_if_needed()
+        with session_scope() as session:
+            run_mcx_options_configs(session, dhan_client, today=now.date())
+
     scheduler = BlockingScheduler(timezone=MCX_TIMEZONE)
     scheduler.add_job(_job, "interval", seconds=interval, next_run_time=datetime.now(MCX_TIMEZONE))
     # After NSE equity close (~15:30 IST) so the day's closing/settlement
     # quality prices are available for expiry-day assignment decisions.
     scheduler.add_job(_wheel_basket_job, CronTrigger(hour=15, minute=45, timezone=MCX_TIMEZONE))
+    # After MCX's own (seasonal) session close -- see _mcx_options_job's own
+    # comment for why 23:59 clears both the 23:30 and 23:55 close times.
+    scheduler.add_job(_mcx_options_job, CronTrigger(hour=23, minute=59, timezone=MCX_TIMEZONE))
     logger.info("Starting scheduler, polling every %s seconds", interval)
     scheduler.start()
 

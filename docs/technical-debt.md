@@ -34,8 +34,10 @@
 
 - **(OPEN, 2026-09-14) MCX options-selling LIVE paper-trading engine (phase 2) is built
   (`bot/growmore_bot/mcx_options/`: `pricing.py`, `regime.py`, `strike_selection.py`,
-  `live_data.py`, `mcx_options_engine.py`) and unit-tested, but carries two open items forward
-  from phase 1/the offline backtest, plus one new deferral of its own:
+  `live_data.py`, `mcx_options_engine.py`) and unit-tested, and (phase 3, same day) is now wired
+  into the scheduler (`growmore_bot/mcx_options/scheduler_job.py`, a once-daily 23:59 IST cron —
+  see `docs/architecture.md`), but carries two open items forward from phase 1/the offline
+  backtest, plus one new deferral of its own:
   - **Futures contract rollover is NOT implemented.** If an assigned `long_futures` position's
     contract month expires before its covered-call cycle resolves, `mcx_options_engine.py` does
     nothing — `MCXOptionsPosition.futures_contract_expiry` is never set on assignment, and there is

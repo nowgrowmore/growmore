@@ -109,9 +109,35 @@ def is_near_session_close(now: datetime, buffer_minutes: int = 15) -> bool:
     return close_dt - timedelta(minutes=buffer_minutes) <= now_ist <= close_dt
 
 
+def is_mcx_trading_day(now: datetime) -> bool:
+    """True if `now` falls on an MCX trading day -- weekday, not a
+    full-closure holiday. Deliberately day-only (no intraday open/close time
+    check, unlike `is_market_open`): for a once-a-day EOD job (e.g. the MCX
+    options-selling strategy's daily cycle, decided at/after settlement, not
+    intraday -- mirrors `nse_equity_hours.is_nse_trading_day`'s same
+    day-only shape for the wheel-basket job), "is today a trading day at
+    all" is the only question, not "is it open right now."
+
+    Reuses `MCX_HOLIDAYS_2026`, the same real (not approximated) MCX 2026
+    holiday list `is_market_open` uses -- so it carries the exact same
+    documented gap: partial-session holidays (e.g. Holi, Ganesh Chaturthi)
+    are not included, and this has not been checked against any year other
+    than 2026.
+    """
+    if now.tzinfo is not None:
+        now_ist = now.astimezone(MCX_TIMEZONE)
+    else:
+        now_ist = MCX_TIMEZONE.localize(now)
+
+    if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    return now_ist.date() not in MCX_HOLIDAYS_2026
+
+
 __all__ = [
     "is_market_open",
     "is_near_session_close",
+    "is_mcx_trading_day",
     "MCX_TIMEZONE",
     "MCX_OPEN_TIME",
     "MCX_CLOSE_TIME",

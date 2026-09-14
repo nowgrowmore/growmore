@@ -14,6 +14,7 @@ import pytz
 from growmore_bot.scheduler.market_hours import (
     _nth_sunday_of_month,
     is_market_open,
+    is_mcx_trading_day,
     is_near_session_close,
 )
 
@@ -156,3 +157,34 @@ class TestIsNearSessionClose:
 
     def test_true_exactly_at_close(self):
         assert is_near_session_close(_ist(2026, 9, 2, 23, 30)) is True
+
+
+class TestIsMcxTradingDay:
+    """Day-only gate (no intraday time check) for once-a-day EOD jobs like
+    the MCX options-selling strategy's daily cycle -- see
+    growmore_bot.scheduler.run._mcx_options_job.
+    """
+
+    def test_weekday_is_a_trading_day_any_time_of_day(self):
+        assert is_mcx_trading_day(_ist(2026, 9, 2, 0, 1)) is True
+        assert is_mcx_trading_day(_ist(2026, 9, 2, 23, 59)) is True
+
+    def test_saturday_is_not_a_trading_day(self):
+        assert is_mcx_trading_day(_ist(2026, 9, 5, 14, 0)) is False
+
+    def test_sunday_is_not_a_trading_day(self):
+        assert is_mcx_trading_day(_ist(2026, 9, 6, 14, 0)) is False
+
+    def test_2026_full_closure_holiday_is_not_a_trading_day(self):
+        assert is_mcx_trading_day(_ist(2026, 12, 25, 14, 0)) is False
+
+    def test_day_after_a_holiday_is_a_trading_day(self):
+        assert is_mcx_trading_day(_ist(2026, 1, 2, 14, 0)) is True
+
+    def test_naive_datetime_is_assumed_ist(self):
+        assert is_mcx_trading_day(datetime(2026, 9, 2, 23, 59)) is True
+
+    def test_utc_datetime_is_converted_to_ist(self):
+        # 2026-09-05 18:31 UTC == 2026-09-06 00:01 IST, a Sunday.
+        utc = pytz.utc.localize(datetime(2026, 9, 5, 18, 31))
+        assert is_mcx_trading_day(utc) is False
