@@ -302,13 +302,14 @@ export function MCXOptionsClient({
                 <p className="text-sm text-[color:var(--text-muted)]">No selection cycle recorded yet.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
-                  <table className="w-full min-w-[1100px] text-sm">
+                  <table className="w-full min-w-[1250px] text-sm">
                     <thead>
                       <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
-                        <th className="px-3 py-2 font-medium">Date</th>
+                        <th className="px-3 py-2 font-medium">Cycle time</th>
                         <th className="px-3 py-2 font-medium">Regime</th>
                         <th className="px-3 py-2 font-medium text-right">Target delta</th>
                         <th className="px-3 py-2 font-medium text-right">Selected strike</th>
+                        <th className="px-3 py-2 font-medium">Expiry</th>
                         <th className="px-3 py-2 font-medium text-right">Futures price</th>
                         <th className="px-3 py-2 font-medium">Position</th>
                         <th className="px-3 py-2 font-medium text-right">Basis</th>
@@ -320,7 +321,9 @@ export function MCXOptionsClient({
                     <tbody>
                       {selections.map((s) => (
                         <tr key={s.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
-                          <td className="px-3 py-2 tabular-nums">{new Date(s.cycle_date).toLocaleDateString()}</td>
+                          <td className="px-3 py-2 tabular-nums" title={s.cycle_date}>
+                            {new Date(s.created_at).toLocaleString()}
+                          </td>
                           <td className="px-3 py-2">
                             <span
                               className={`rounded px-2 py-0.5 text-xs font-medium ${
@@ -337,6 +340,9 @@ export function MCXOptionsClient({
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {s.selected_strike ? formatCurrency(toNumber(s.selected_strike)) : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {s.option_expiry ? new Date(s.option_expiry).toLocaleDateString() : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {s.futures_price ? formatCurrency(toNumber(s.futures_price)) : "—"}

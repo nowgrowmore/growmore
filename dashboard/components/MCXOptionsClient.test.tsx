@@ -134,6 +134,7 @@ describe("MCXOptionsClient", () => {
           { strike: 61000, delta: 0.3, oi: 5000, ltp: 210.0 },
           { strike: 61500, delta: 0.45, oi: 3100, ltp: 340.25 },
         ],
+        option_expiry: "2026-09-24",
         created_at: "2026-09-01T00:00:00Z",
       },
       {
@@ -149,6 +150,7 @@ describe("MCXOptionsClient", () => {
         position_basis: null,
         position_unrealized_pnl: null,
         candidates_considered: null,
+        option_expiry: "2026-09-24",
         created_at: "2026-08-25T00:00:00Z",
       },
     ];
@@ -185,6 +187,7 @@ describe("MCXOptionsClient", () => {
           { strike: 60500, delta: 0.18, oi: 4200, ltp: 120.5 },
           { strike: 61000, delta: 0.3, oi: 5000, ltp: 210.0 },
         ],
+        option_expiry: "2026-09-24",
         created_at: "2026-09-01T00:00:00Z",
       },
       {
@@ -200,6 +203,7 @@ describe("MCXOptionsClient", () => {
         position_basis: "61000",
         position_unrealized_pnl: "1250.5",
         candidates_considered: null,
+        option_expiry: "2026-09-24",
         created_at: "2026-08-31T00:00:00Z",
       },
     ];
@@ -310,6 +314,66 @@ describe("MCXOptionsClient", () => {
     expect(within(zeroRow as HTMLElement).getByText("₹0.00")).toBeInTheDocument();
   });
 
+  it("shows the option expiry and the real cycle timestamp, not just the date", () => {
+    // Regression: two manually-triggered cycles landed on the same
+    // cycle_date (before/after a same-day bug fix), and with only a
+    // date-level "Date" column they were indistinguishable and the expiry
+    // being considered wasn't shown anywhere for a SKIPPED cycle at all
+    // (MCXOptionsLeg.cycle_expiry only exists once an entry actually
+    // happens).
+    const selections: MCXOptionsSelection[] = [
+      {
+        id: "sel-early",
+        config_id: "config-1",
+        cycle_date: "2026-09-14",
+        regime: "consolidating",
+        target_delta: "0.30",
+        selected_strike: "207000",
+        reason: "entered PE at strike 207000.0",
+        futures_price: "236895",
+        position_state: "flat",
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: [{ strike: 207000, delta: -0.3, oi: 0, ltp: 27409.5 }],
+        option_expiry: "2026-09-24",
+        created_at: "2026-09-14T13:43:00Z",
+      },
+      {
+        id: "sel-later",
+        config_id: "config-1",
+        cycle_date: "2026-09-14",
+        regime: "consolidating",
+        target_delta: "0.30",
+        selected_strike: "232000",
+        reason: "entered PE at strike 232000.0",
+        futures_price: "236895",
+        position_state: "flat",
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: [{ strike: 232000, delta: -0.31, oi: 539, ltp: 5400 }],
+        option_expiry: "2026-09-24",
+        created_at: "2026-09-14T15:12:00Z",
+      },
+    ];
+    render(
+      <MCXOptionsClient
+        configs={[config({ symbol: "SILVERM" })]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": selections }}
+        onToggle={vi.fn()}
+      />
+    );
+    // Both rows' expiry is shown, even though neither has a settled leg yet.
+    expect(screen.getAllByText("9/24/2026")).toHaveLength(2);
+    // The two same-day cycles render distinct, non-date-only timestamps.
+    const earlyRow = screen.getByText(/207000/).closest("tr") as HTMLElement;
+    const laterRow = screen.getByText(/232000/).closest("tr") as HTMLElement;
+    const earlyTime = within(earlyRow).getAllByText(/2026/)[0].textContent;
+    const laterTime = within(laterRow).getAllByText(/2026/)[0].textContent;
+    expect(earlyTime).not.toEqual(laterTime);
+  });
+
   it("hides low-OI candidates and caps the evaluated list at the 10 closest to target delta", () => {
     // Mirrors a real thin-market cycle: lots of near-zero-OI strikes far from
     // the target delta, plus a handful of liquid ones actually worth showing.
@@ -338,6 +402,7 @@ describe("MCXOptionsClient", () => {
         position_basis: null,
         position_unrealized_pnl: null,
         candidates_considered: [...farOtmNoise, ...liquidCandidates],
+        option_expiry: "2026-09-24",
         created_at: "2026-09-14T00:00:00Z",
       },
     ];

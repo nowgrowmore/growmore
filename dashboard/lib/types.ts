@@ -378,6 +378,11 @@ export interface MCXOptionsSelection {
   // Every OI-surviving candidate evaluated this cycle (not just the
   // winner), null on cycles where entry isn't even attempted.
   candidates_considered: MCXOptionsCandidate[] | null;
+  // The expiry actually being considered this cycle (migration 0025) --
+  // populated even on a SKIPPED cycle, unlike MCXOptionsLeg.cycle_expiry
+  // which only exists for a cycle that wrote a leg. Null on rows written
+  // before this migration.
+  option_expiry: string | null;
   created_at: string;
 }
 
