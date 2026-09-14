@@ -118,23 +118,38 @@ class _FakeResponse:
         return self._json_body
 
 
-def test_fetch_live_json_posts_the_expected_request_and_returns_data(monkeypatch):
-    captured = {}
+def _fake_session(post_fn, warmup_status_code=200):
+    """A fake `requests.Session` whose `.get` (the warm-up call
+    `_fetch_live_json_raw` always makes first) succeeds by default, and
+    whose `.post` (the actual API call) is supplied per test.
+    """
 
     class _FakeSession:
         def __init__(self):
             self.trust_env = True
 
+        def get(self, url, headers, timeout):
+            return _FakeResponse(warmup_status_code)
+
         def post(self, url, headers, data, timeout):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["data"] = data
-            captured["timeout"] = timeout
-            return _FakeResponse(200, {"d": {"Data": CANNED_RECORDS}})
+            return post_fn(url, headers, data, timeout)
+
+    return _FakeSession
+
+
+def test_fetch_live_json_posts_the_expected_request_and_returns_data(monkeypatch):
+    captured = {}
+
+    def post_fn(url, headers, data, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["data"] = data
+        captured["timeout"] = timeout
+        return _FakeResponse(200, {"d": {"Data": CANNED_RECORDS}})
 
     import requests
 
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(requests, "Session", _fake_session(post_fn))
 
     result = fetch._fetch_live_json(date(2026, 9, 4))
 
@@ -147,31 +162,22 @@ def test_fetch_live_json_posts_the_expected_request_and_returns_data(monkeypatch
 
 
 def test_fetch_live_json_returns_none_on_http_failure(monkeypatch):
-    class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
-
-        def post(self, url, headers, data, timeout):
-            return _FakeResponse(403)
-
     import requests
 
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        requests, "Session", _fake_session(lambda *a, **k: _FakeResponse(403))
+    )
 
     assert fetch._fetch_live_json(date(2026, 9, 4)) is None
 
 
 def test_fetch_live_json_returns_none_when_data_is_empty(monkeypatch):
-    class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
-
-        def post(self, url, headers, data, timeout):
-            return _FakeResponse(200, {"d": {"Data": []}})
-
     import requests
 
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        requests, "Session",
+        _fake_session(lambda *a, **k: _FakeResponse(200, {"d": {"Data": []}})),
+    )
 
     assert fetch._fetch_live_json(date(2026, 9, 4)) is None
 
@@ -183,32 +189,25 @@ def test_fetch_live_json_returns_none_when_data_is_empty(monkeypatch):
 def test_fetch_live_json_raw_reports_the_exception(monkeypatch):
     import requests
 
-    class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
+    def post_fn(url, headers, data, timeout):
+        raise requests.ConnectionError("boom")
 
-        def post(self, url, headers, data, timeout):
-            raise requests.ConnectionError("boom")
-
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(requests, "Session", _fake_session(post_fn))
 
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
     assert isinstance(result.exception, requests.ConnectionError)
     assert result.json_body is None
+    assert result.warmup_status_code == 200
 
 
 def test_fetch_live_json_raw_reports_http_failure_with_body(monkeypatch):
-    class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
-
-        def post(self, url, headers, data, timeout):
-            return _FakeResponse(403, text="<HTML>Access Denied</HTML>")
-
     import requests
 
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        requests, "Session",
+        _fake_session(lambda *a, **k: _FakeResponse(403, text="<HTML>Access Denied</HTML>")),
+    )
 
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
@@ -219,22 +218,40 @@ def test_fetch_live_json_raw_reports_http_failure_with_body(monkeypatch):
 
 
 def test_fetch_live_json_raw_reports_a_successful_but_empty_day(monkeypatch):
-    class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
-
-        def post(self, url, headers, data, timeout):
-            return _FakeResponse(200, {"d": {"Data": []}})
-
     import requests
 
-    monkeypatch.setattr(requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        requests, "Session",
+        _fake_session(lambda *a, **k: _FakeResponse(200, {"d": {"Data": []}})),
+    )
 
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
     assert result.exception is None
     assert result.status_code == 200
     assert result.json_body == {"d": {"Data": []}}
+
+
+def test_fetch_live_json_raw_still_posts_when_warmup_itself_fails(monkeypatch):
+    """A non-2xx (or exception-raising) warm-up GET must not prevent the
+    POST from being attempted -- some of the cookies Akamai cares about can
+    still land on a non-2xx response, and even if not, failing outright here
+    would hide the more informative POST-level diagnostic from `--probe`.
+    """
+    import requests
+
+    monkeypatch.setattr(
+        requests, "Session",
+        _fake_session(
+            lambda *a, **k: _FakeResponse(200, {"d": {"Data": CANNED_RECORDS}}),
+            warmup_status_code=403,
+        ),
+    )
+
+    result = fetch._fetch_live_json_raw(date(2026, 9, 4))
+
+    assert result.warmup_status_code == 403
+    assert result.json_body == {"d": {"Data": CANNED_RECORDS}}
 
 
 def test_fetch_and_cache_day_is_a_noop_write_when_fetcher_has_nothing(tmp_path, monkeypatch):

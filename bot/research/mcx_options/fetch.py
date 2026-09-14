@@ -75,28 +75,61 @@ Fetcher = Callable[[date], Optional[list]]
 #: tried and both still 403).
 MCX_BHAVCOPY_URL = "https://www.mcxindia.com/backpage.aspx/GetDateWiseBhavCopy"
 
-_HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "X-Requested-With": "XMLHttpRequest",
-    "Origin": "https://www.mcxindia.com",
-    "Referer": "https://www.mcxindia.com/market-data/bhavcopy",
+#: The page to GET first, to acquire Akamai Bot Manager's session cookies
+#: (`_abck`, `bm_sz`, `ak_bmsc`) organically before the API POST -- the same
+#: "warm up a session on a real HTML page, then reuse it" pattern the NSE-
+#: scraping community (`nsepython`, `jugaad-data`) uses against the
+#: identical Akamai setup on nseindia.com. A cold POST with no prior page
+#: visit in the session was confirmed (both from this environment and the
+#: account owner's own machine/network) to get a 403 -- this warm-up step is
+#: the standard next thing to try before reaching for anything heavier
+#: (e.g. TLS-fingerprint-impersonating clients like `curl_cffi`).
+MCX_WARMUP_URL = "https://www.mcxindia.com/market-data/bhavcopy"
+
+_BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
     ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
+
+_HTML_GET_HEADERS = {
+    **_BROWSER_HEADERS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+_API_POST_HEADERS = {
+    **_BROWSER_HEADERS,
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://www.mcxindia.com",
+    "Referer": MCX_WARMUP_URL,
+}
+
+#: Back-compat alias -- some callers/tests referred to the POST headers by
+#: this name before the warm-up GET was added.
+_HEADERS = _API_POST_HEADERS
 
 
 class _RawFetchResult:
     """Everything `--probe` needs to show a REAL diagnostic instead of a
     swallowed "no data" message -- see `_fetch_live_json_raw`."""
 
-    def __init__(self, status_code=None, body_text=None, exception=None, json_body=None):
+    def __init__(
+        self, status_code=None, body_text=None, exception=None, json_body=None,
+        warmup_status_code=None,
+    ):
         self.status_code = status_code
         self.body_text = body_text
         self.exception = exception
         self.json_body = json_body
+        #: HTTP status of the warm-up GET (see `MCX_WARMUP_URL`), so a
+        #: `--probe` failure can be pinned to "the warm-up itself was
+        #: blocked" versus "the warm-up succeeded but the API POST still
+        #: wasn't accepted."
+        self.warmup_status_code = warmup_status_code
 
 
 def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResult:
@@ -106,23 +139,47 @@ def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResu
     this module needs; `--probe` uses THIS instead, specifically so "the
     request failed" and "MCX genuinely has nothing for this day" never look
     identical to whoever's debugging a live run.
+
+    Warms the session up with a GET to `MCX_WARMUP_URL` first (see its
+    docstring) so Akamai's cookies are set organically before the API call,
+    rather than POSTing cold. The warm-up's own failure doesn't short-circuit
+    -- the POST is still attempted with whatever cookies (if any) the
+    session picked up, since a non-2xx warm-up page load doesn't necessarily
+    mean the cookies Akamai cares about weren't still set on the response.
     """
     import requests  # local import: never needed unless this path is taken
 
     session = requests.Session()
     session.trust_env = False
+
+    warmup_status_code = None
+    try:
+        warmup_resp = session.get(MCX_WARMUP_URL, headers=_HTML_GET_HEADERS, timeout=30)
+        warmup_status_code = warmup_resp.status_code
+    except requests.RequestException:
+        pass  # still attempt the POST below with whatever cookies exist
+
     payload = json.dumps({"Date": day.strftime("%Y%m%d"), "InstrumentName": instrument})
     try:
-        resp = session.post(MCX_BHAVCOPY_URL, headers=_HEADERS, data=payload, timeout=30)
+        resp = session.post(MCX_BHAVCOPY_URL, headers=_API_POST_HEADERS, data=payload, timeout=30)
     except requests.RequestException as exc:
-        return _RawFetchResult(exception=exc)
+        return _RawFetchResult(exception=exc, warmup_status_code=warmup_status_code)
     if not resp.ok:
-        return _RawFetchResult(status_code=resp.status_code, body_text=resp.text)
+        return _RawFetchResult(
+            status_code=resp.status_code, body_text=resp.text,
+            warmup_status_code=warmup_status_code,
+        )
     try:
         body = resp.json()
     except ValueError as exc:
-        return _RawFetchResult(status_code=resp.status_code, body_text=resp.text, exception=exc)
-    return _RawFetchResult(status_code=resp.status_code, json_body=body)
+        return _RawFetchResult(
+            status_code=resp.status_code, body_text=resp.text, exception=exc,
+            warmup_status_code=warmup_status_code,
+        )
+    return _RawFetchResult(
+        status_code=resp.status_code, json_body=body,
+        warmup_status_code=warmup_status_code,
+    )
 
 
 def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
@@ -205,6 +262,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.probe:
         day = date.fromisoformat(args.probe_date)
         result = _fetch_live_json_raw(day)
+        print(f"(warm-up GET to {MCX_WARMUP_URL}: HTTP {result.warmup_status_code})",
+              file=sys.stderr)
         if result.exception is not None:
             print(f"REQUEST FAILED: {type(result.exception).__name__}: {result.exception}",
                   file=sys.stderr)
