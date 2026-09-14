@@ -88,6 +88,43 @@ _HEADERS = {
 }
 
 
+class _RawFetchResult:
+    """Everything `--probe` needs to show a REAL diagnostic instead of a
+    swallowed "no data" message -- see `_fetch_live_json_raw`."""
+
+    def __init__(self, status_code=None, body_text=None, exception=None, json_body=None):
+        self.status_code = status_code
+        self.body_text = body_text
+        self.exception = exception
+        self.json_body = json_body
+
+
+def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResult:
+    """The actual HTTP call, with nothing swallowed -- returns the status
+    code / raw body / exception exactly as they happened. `_fetch_live_json`
+    (below) wraps this into the simple `Optional[list]` contract the rest of
+    this module needs; `--probe` uses THIS instead, specifically so "the
+    request failed" and "MCX genuinely has nothing for this day" never look
+    identical to whoever's debugging a live run.
+    """
+    import requests  # local import: never needed unless this path is taken
+
+    session = requests.Session()
+    session.trust_env = False
+    payload = json.dumps({"Date": day.strftime("%Y%m%d"), "InstrumentName": instrument})
+    try:
+        resp = session.post(MCX_BHAVCOPY_URL, headers=_HEADERS, data=payload, timeout=30)
+    except requests.RequestException as exc:
+        return _RawFetchResult(exception=exc)
+    if not resp.ok:
+        return _RawFetchResult(status_code=resp.status_code, body_text=resp.text)
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        return _RawFetchResult(status_code=resp.status_code, body_text=resp.text, exception=exc)
+    return _RawFetchResult(status_code=resp.status_code, json_body=body)
+
+
 def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
     """Real fetcher -- POSTs to `MCX_BHAVCOPY_URL`, see module docstring for
     exactly what's verified (the endpoint/request shape, via `mcxlib`) versus
@@ -101,23 +138,17 @@ def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
     case. Does raise if the response's *rows* don't match the expected
     field names (via `parse_bhavcopy_json`, called by `fetch_day`), since
     that's a real problem worth surfacing immediately, not a benign holiday.
-    """
-    import requests  # local import: never needed unless this path is taken
 
-    session = requests.Session()
-    session.trust_env = False
-    payload = json.dumps({"Date": day.strftime("%Y%m%d"), "InstrumentName": instrument})
-    try:
-        resp = session.post(MCX_BHAVCOPY_URL, headers=_HEADERS, data=payload, timeout=30)
-    except requests.RequestException:
+    This collapses a real failure (blocked, timed out, wrong shape) and a
+    genuine "MCX has nothing today" into the same `None` -- by design, for
+    the backfill loop, where a resumable day-by-day run needs to treat both
+    the same way (cache an empty day, move on). Use `--probe` (which calls
+    `_fetch_live_json_raw` directly) to tell those two cases apart.
+    """
+    result = _fetch_live_json_raw(day, instrument)
+    if result.json_body is None:
         return None
-    if not resp.ok:
-        return None
-    try:
-        body = resp.json()
-    except ValueError:
-        return None
-    rows = (body or {}).get("d", {}).get("Data")
+    rows = (result.json_body or {}).get("d", {}).get("Data")
     return rows or None
 
 
@@ -173,11 +204,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.probe:
         day = date.fromisoformat(args.probe_date)
-        records = _fetch_live_json(day)
-        if not records:
-            print(f"no data returned for {day} (holiday, not yet published, "
-                  "or the request failed -- rerun with a recent weekday)",
+        result = _fetch_live_json_raw(day)
+        if result.exception is not None:
+            print(f"REQUEST FAILED: {type(result.exception).__name__}: {result.exception}",
                   file=sys.stderr)
+            if result.status_code is not None:
+                print(f"(HTTP {result.status_code} received before the failure; "
+                      f"body: {(result.body_text or '')[:500]!r})", file=sys.stderr)
+            return 1
+        if result.status_code is not None and not (200 <= result.status_code < 300):
+            print(f"HTTP {result.status_code} -- NOT a benign holiday, the request "
+                  "itself was rejected. Body (first 500 chars):", file=sys.stderr)
+            print((result.body_text or "")[:500], file=sys.stderr)
+            return 1
+        records = ((result.json_body or {}).get("d", {}) or {}).get("Data")
+        if not records:
+            print(f"HTTP {result.status_code}, but no rows in the response for {day} "
+                  "(likely a genuine holiday/not-yet-published day -- try a recent "
+                  "weekday, or inspect the full response below).", file=sys.stderr)
+            print(json.dumps(result.json_body, indent=2)[:2000], file=sys.stderr)
             return 1
         print(json.dumps(records[:3], indent=2))
         print(f"\n... ({len(records)} rows total; showing first 3). "

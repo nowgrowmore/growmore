@@ -106,10 +106,11 @@ def test_fetch_and_cache_day_flows_through_to_the_cache(tmp_path, monkeypatch):
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, json_body=None):
+    def __init__(self, status_code=200, json_body=None, text=""):
         self.ok = 200 <= status_code < 300
         self.status_code = status_code
         self._json_body = json_body
+        self.text = text
 
     def json(self):
         if self._json_body is None:
@@ -173,6 +174,67 @@ def test_fetch_live_json_returns_none_when_data_is_empty(monkeypatch):
     monkeypatch.setattr(requests, "Session", _FakeSession)
 
     assert fetch._fetch_live_json(date(2026, 9, 4)) is None
+
+
+# --- _fetch_live_json_raw -- the un-swallowed diagnostic path `--probe`
+# uses, so a real failure and a genuine empty day never look the same. ---
+
+
+def test_fetch_live_json_raw_reports_the_exception(monkeypatch):
+    import requests
+
+    class _FakeSession:
+        def __init__(self):
+            self.trust_env = True
+
+        def post(self, url, headers, data, timeout):
+            raise requests.ConnectionError("boom")
+
+    monkeypatch.setattr(requests, "Session", _FakeSession)
+
+    result = fetch._fetch_live_json_raw(date(2026, 9, 4))
+
+    assert isinstance(result.exception, requests.ConnectionError)
+    assert result.json_body is None
+
+
+def test_fetch_live_json_raw_reports_http_failure_with_body(monkeypatch):
+    class _FakeSession:
+        def __init__(self):
+            self.trust_env = True
+
+        def post(self, url, headers, data, timeout):
+            return _FakeResponse(403, text="<HTML>Access Denied</HTML>")
+
+    import requests
+
+    monkeypatch.setattr(requests, "Session", _FakeSession)
+
+    result = fetch._fetch_live_json_raw(date(2026, 9, 4))
+
+    assert result.exception is None
+    assert result.status_code == 403
+    assert "Access Denied" in result.body_text
+    assert result.json_body is None
+
+
+def test_fetch_live_json_raw_reports_a_successful_but_empty_day(monkeypatch):
+    class _FakeSession:
+        def __init__(self):
+            self.trust_env = True
+
+        def post(self, url, headers, data, timeout):
+            return _FakeResponse(200, {"d": {"Data": []}})
+
+    import requests
+
+    monkeypatch.setattr(requests, "Session", _FakeSession)
+
+    result = fetch._fetch_live_json_raw(date(2026, 9, 4))
+
+    assert result.exception is None
+    assert result.status_code == 200
+    assert result.json_body == {"d": {"Data": []}}
 
 
 def test_fetch_and_cache_day_is_a_noop_write_when_fetcher_has_nothing(tmp_path, monkeypatch):
