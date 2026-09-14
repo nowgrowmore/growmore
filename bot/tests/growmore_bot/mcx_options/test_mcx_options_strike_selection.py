@@ -23,7 +23,11 @@ import pytest
 
 from growmore_bot.broker.dhan_client import OptionChainRow, OptionChainSnapshot
 from growmore_bot.mcx_options.pricing import black76_delta, black76_price
-from growmore_bot.mcx_options.strike_selection import select_strike_by_target_delta
+from growmore_bot.mcx_options.strike_selection import (
+    CandidateEvaluation,
+    evaluate_candidates,
+    select_strike_by_target_delta,
+)
 
 F = 100.0
 T = 30 / 365
@@ -140,3 +144,62 @@ def test_empty_chain_returns_none():
         target_delta=0.30, min_open_interest=0,
     )
     assert picked is None
+
+
+def test_evaluate_candidates_returns_every_oi_surviving_row_sorted_by_strike():
+    chain = OptionChainSnapshot(spot=F, rows=[_row(k, "PE") for k in _PE_STRIKES])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert [c.strike for c in candidates] == sorted(_PE_STRIKES)
+    for c in candidates:
+        assert isinstance(c, CandidateEvaluation)
+        expected_delta = black76_delta("PE", F, c.strike, T, SIGMA, R)
+        assert c.delta == pytest.approx(expected_delta)
+        assert c.oi == _DEFAULT_OI
+
+
+def test_evaluate_candidates_excludes_other_opt_type_and_thin_oi():
+    thin_strike = _PE_STRIKES[0]
+    chain = OptionChainSnapshot(
+        spot=F,
+        rows=[_row(k, "PE", oi=(50 if k == thin_strike else _DEFAULT_OI)) for k in _PE_STRIKES]
+        + [_row(97.0, "CE")],
+    )
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1_000,
+    )
+
+    strikes = [c.strike for c in candidates]
+    assert thin_strike not in strikes
+    assert 97.0 not in strikes  # CE row, wrong opt_type
+
+
+def test_evaluate_candidates_empty_when_nothing_survives():
+    chain = OptionChainSnapshot(spot=F, rows=[_row(k, "PE", oi=10) for k in _PE_STRIKES])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1_000,
+    )
+
+    assert candidates == []
+
+
+def test_select_strike_agrees_with_evaluate_candidates_winner():
+    chain = OptionChainSnapshot(spot=F, rows=[_row(k, "PE") for k in _PE_STRIKES])
+    target_delta = 0.30
+
+    picked = select_strike_by_target_delta(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+        target_delta=target_delta, min_open_interest=1,
+    )
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+    best = min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+
+    assert picked is not None
+    assert picked.strike == pytest.approx(best.strike)

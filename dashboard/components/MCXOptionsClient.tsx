@@ -3,6 +3,7 @@
 import { formatCurrency, formatPercent, formatPositionAge, toNumber } from "@/lib/format";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import type {
+  MCXOptionsCandidate,
   MCXOptionsConfig,
   MCXOptionsLeg,
   MCXOptionsPosition,
@@ -44,6 +45,41 @@ function regimeLabel(regime: string | null): string {
     default:
       return "No opinion";
   }
+}
+
+function CandidatesEvaluated({
+  candidates,
+  selectedStrike,
+}: {
+  candidates: MCXOptionsCandidate[] | null;
+  selectedStrike: string | null;
+}) {
+  if (candidates === null) {
+    return <span className="text-[color:var(--text-muted)]">—</span>;
+  }
+  if (candidates.length === 0) {
+    return <span className="text-[color:var(--text-muted)]">none cleared filters</span>;
+  }
+  const selected = selectedStrike !== null ? toNumber(selectedStrike) : null;
+  return (
+    <ul className="flex flex-wrap gap-x-2 gap-y-1">
+      {candidates.map((c) => {
+        const isPicked = selected !== null && c.strike === selected;
+        return (
+          <li
+            key={c.strike}
+            className={
+              isPicked
+                ? "rounded bg-[color:var(--success-text)]/15 px-1.5 py-0.5 font-semibold text-[color:var(--success-text)]"
+                : "text-[color:var(--text-secondary)]"
+            }
+          >
+            {formatCurrency(c.strike)} (Δ{c.delta.toFixed(2)}, OI {c.oi.toLocaleString()})
+          </li>
+        );
+      })}
+    </ul>
+  );
 }
 
 export function MCXOptionsClient({
@@ -183,13 +219,18 @@ export function MCXOptionsClient({
                 <p className="text-sm text-[color:var(--text-muted)]">No selection cycle recorded yet.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
-                  <table className="w-full min-w-[720px] text-sm">
+                  <table className="w-full min-w-[1100px] text-sm">
                     <thead>
                       <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
                         <th className="px-3 py-2 font-medium">Date</th>
                         <th className="px-3 py-2 font-medium">Regime</th>
                         <th className="px-3 py-2 font-medium text-right">Target delta</th>
                         <th className="px-3 py-2 font-medium text-right">Selected strike</th>
+                        <th className="px-3 py-2 font-medium text-right">Futures price</th>
+                        <th className="px-3 py-2 font-medium">Position</th>
+                        <th className="px-3 py-2 font-medium text-right">Basis</th>
+                        <th className="px-3 py-2 font-medium text-right">Unrealized P&amp;L</th>
+                        <th className="px-3 py-2 font-medium">Candidates evaluated</th>
                         <th className="px-3 py-2 font-medium">Reason</th>
                       </tr>
                     </thead>
@@ -213,6 +254,26 @@ export function MCXOptionsClient({
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {s.selected_strike ? formatCurrency(toNumber(s.selected_strike)) : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {s.futures_price ? formatCurrency(toNumber(s.futures_price)) : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            {s.position_state ? stateLabel(s.position_state) : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {s.position_basis ? formatCurrency(toNumber(s.position_basis)) : "—"}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {s.position_unrealized_pnl
+                              ? formatCurrency(toNumber(s.position_unrealized_pnl), { signDisplay: true })
+                              : "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            <CandidatesEvaluated
+                              candidates={s.candidates_considered}
+                              selectedStrike={s.selected_strike}
+                            />
                           </td>
                           <td className="px-3 py-2 text-[color:var(--text-secondary)]">{s.reason}</td>
                         </tr>

@@ -77,6 +77,15 @@ describe("MCXOptionsClient", () => {
         target_delta: "0.30",
         selected_strike: "61000",
         reason: "Consolidating regime, target delta 0.30 -- sold 61000 PE",
+        futures_price: "61500.25",
+        position_state: "flat",
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: [
+          { strike: 60500, delta: 0.18, oi: 4200, ltp: 120.5 },
+          { strike: 61000, delta: 0.3, oi: 5000, ltp: 210.0 },
+          { strike: 61500, delta: 0.45, oi: 3100, ltp: 340.25 },
+        ],
         created_at: "2026-09-01T00:00:00Z",
       },
       {
@@ -87,6 +96,11 @@ describe("MCXOptionsClient", () => {
         target_delta: null,
         selected_strike: null,
         reason: "Trend unfavorable -- no entry",
+        futures_price: "60800.00",
+        position_state: null,
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: null,
         created_at: "2026-08-25T00:00:00Z",
       },
     ];
@@ -103,6 +117,62 @@ describe("MCXOptionsClient", () => {
     expect(screen.getByText(/no entry/)).toBeInTheDocument();
     expect(screen.getByText("Consolidating")).toBeInTheDocument();
     expect(screen.getByText("Trend unfavorable")).toBeInTheDocument();
+  });
+
+  it("renders the daily snapshot fields and every evaluated candidate, with the picked one distinguished", () => {
+    const selections: MCXOptionsSelection[] = [
+      {
+        id: "sel-1",
+        config_id: "config-1",
+        cycle_date: "2026-09-01",
+        regime: "consolidating",
+        target_delta: "0.30",
+        selected_strike: "61000",
+        reason: "entered PE at 61000",
+        futures_price: "61500.25",
+        position_state: "flat",
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: [
+          { strike: 60500, delta: 0.18, oi: 4200, ltp: 120.5 },
+          { strike: 61000, delta: 0.3, oi: 5000, ltp: 210.0 },
+        ],
+        created_at: "2026-09-01T00:00:00Z",
+      },
+      {
+        id: "sel-2",
+        config_id: "config-1",
+        cycle_date: "2026-08-31",
+        regime: "consolidating",
+        target_delta: null,
+        selected_strike: null,
+        reason: "position already has an open leg, not due for settlement today",
+        futures_price: "61200.00",
+        position_state: "long_futures",
+        position_basis: "61000",
+        position_unrealized_pnl: "1250.5",
+        candidates_considered: null,
+        created_at: "2026-08-31T00:00:00Z",
+      },
+    ];
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": selections }}
+        onToggle={vi.fn()}
+      />
+    );
+
+    // Every evaluated candidate is shown, not just the winner.
+    expect(screen.getByText(/60,500/)).toBeInTheDocument();
+    const pickedEntry = screen.getByText(/61,000.*Δ0\.30/);
+    expect(pickedEntry).toBeInTheDocument();
+    expect(pickedEntry.className).toMatch(/font-semibold/);
+
+    // Hold-day row's position snapshot is populated.
+    expect(screen.getByText("Long futures (covered)")).toBeInTheDocument();
   });
 
   it("renders trade history rows with outcome labels", () => {

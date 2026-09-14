@@ -65,6 +65,16 @@
     each cycle as `(futures_price - basis) * futures_qty` rather than booking day-by-day M2M
     deltas — the same total unrealized P&L at any point in time, just without a per-day event
     trail. See `mcx_options_engine.py`'s module docstring.
+  - **(Resolved 2026-09-14) `MCXOptionsSelection` is now a genuine daily snapshot, not just an
+    entry-decision audit trail.** Migration `0024_mcx_options_selection_snapshot` adds
+    `futures_price`/`position_state`/`position_basis`/`position_unrealized_pnl` (populated on
+    EVERY cycle, entry or hold) and `candidates_considered` (every OI-surviving candidate strike
+    `strike_selection.evaluate_candidates` returned that cycle, not just the winner — populated
+    whenever the engine reached the strike-selection step, including cycles where nothing
+    qualified). `run_cycle`'s hold-day early-return also now computes `regime_module.
+    classify_today` purely for display, even though it drives no decision that day. Surfaced on
+    `/mcx-options` (`MCXOptionsClient.tsx`'s selection-log table). Still not applied to production
+    — see `docs/pending-actions.md`'s "MCX options schema migration" section.
 
 - **(OPEN, found 2026-09-05) The Dhan token can be dead while the bot believes it is valid, and
   the bot cannot self-heal.** `DhanClient.refresh_access_token_if_needed` decides whether a token

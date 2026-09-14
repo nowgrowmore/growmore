@@ -166,6 +166,18 @@ def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
     assert selections[0].regime == "consolidating"
     assert float(selections[0].target_delta) == 0.30
     assert selections[0].selected_strike == leg.strike
+    # Entered path: futures_price/position snapshot, plus every evaluated
+    # candidate (not just the winner), recorded alongside the winner.
+    assert float(selections[0].futures_price) == F
+    assert selections[0].position_state == "flat"  # freshly opened this cycle
+    assert selections[0].position_basis is None
+    candidates = selections[0].candidates_considered
+    assert candidates is not None
+    assert len(candidates) == 5  # every PE strike in _chain's default set
+    picked_entries = [c for c in candidates if float(c["strike"]) == float(leg.strike)]
+    assert len(picked_entries) == 1
+    for c in candidates:
+        assert set(c.keys()) == {"strike", "delta", "oi", "ltp"}
 
 
 def test_skips_entry_when_no_regime_label(session):
@@ -185,6 +197,13 @@ def test_skips_entry_when_no_regime_label(session):
     assert selections[0].target_delta is None
     assert selections[0].selected_strike is None
     assert "no regime" in selections[0].reason.lower()
+    # No position exists yet on this config -- still get a futures price and
+    # a "None" position-state snapshot, not left blank.
+    assert float(selections[0].futures_price) == F
+    assert selections[0].position_state is None
+    assert selections[0].position_basis is None
+    assert selections[0].position_unrealized_pnl is None
+    assert selections[0].candidates_considered is None
 
 
 def test_skips_entry_when_trend_unfavorable_for_put_side(session):
@@ -203,6 +222,9 @@ def test_skips_entry_when_trend_unfavorable_for_put_side(session):
     assert len(selections) == 1
     assert selections[0].regime == "trend_unfavorable"
     assert selections[0].target_delta is None
+    assert float(selections[0].futures_price) == pytest.approx(F)
+    assert selections[0].position_state is None
+    assert selections[0].candidates_considered is None
 
 
 def test_put_expires_otm_closes_the_position(session):
@@ -332,7 +354,9 @@ def test_marks_to_market_when_leg_not_yet_due(session):
         cycle_expiry=TODAY + timedelta(days=5), basis=6000.0, futures_qty=100,
     )
     F = 6300.0
-    cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25)
+    cycle_data = _cycle_data(
+        _consolidating_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
+    )
 
     run_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
@@ -347,7 +371,46 @@ def test_marks_to_market_when_leg_not_yet_due(session):
 
     selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
     assert len(selections) == 1
-    assert selections[0].regime is None  # no entry decision made this cycle
+    # No ENTRY decision was made this cycle (target_delta/selected_strike
+    # stay null), but today's regime read IS still computed and recorded
+    # purely for dashboard transparency -- see run_cycle's "not due yet"
+    # early-return.
+    assert selections[0].regime == "consolidating"
+    assert selections[0].target_delta is None
+    assert selections[0].selected_strike is None
+    # Daily-snapshot fields ARE populated even on a hold day -- see
+    # mcx_options_engine.run_cycle's "not due yet" early-return.
+    assert float(selections[0].futures_price) == F
+    assert selections[0].position_state == "long_futures"
+    assert float(selections[0].position_basis) == 6000.0
+    assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
+    assert selections[0].candidates_considered is None
+
+
+def test_marks_to_market_when_leg_not_yet_due_and_regime_undetermined(session):
+    """Same hold-day path, but with too little bar history to warm up the
+    regime classifier -- the daily-snapshot fields must still be populated
+    even though `regime` genuinely has "no opinion" to record.
+    """
+    cfg = _config(session)
+    position, leg = _open_position_with_leg(
+        session, cfg, state="long_futures", opt_type="CE", strike=6300.0,
+        cycle_expiry=TODAY + timedelta(days=5), basis=6000.0, futures_qty=100,
+    )
+    F = 6300.0
+    cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25)
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+
+    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    assert len(selections) == 1
+    assert selections[0].regime is None  # genuinely no opinion -- insufficient warm-up
+    assert float(selections[0].futures_price) == F
+    assert selections[0].position_state == "long_futures"
+    assert float(selections[0].position_basis) == 6000.0
+    assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
+    assert selections[0].candidates_considered is None
 
 
 def test_no_strike_clears_oi_filter_skips_entry(session):
@@ -368,6 +431,12 @@ def test_no_strike_clears_oi_filter_skips_entry(session):
     assert float(selections[0].target_delta) == 0.30
     assert selections[0].selected_strike is None
     assert "no strike" in selections[0].reason.lower()
+    # The chain WAS fetched and evaluated (every candidate failed the OI
+    # floor) -- that's still valuable transparency, so this is an empty
+    # list, not null.
+    assert selections[0].candidates_considered == []
+    assert float(selections[0].futures_price) == F
+    assert selections[0].position_state is None
 
 
 def _expected_roll_cost(notional: float, lots: int, per_lot: float = 0.0) -> float:

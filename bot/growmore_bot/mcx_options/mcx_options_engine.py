@@ -137,7 +137,10 @@ from growmore_bot.costs import DEFAULT_COST_MODEL, leg_cost
 from growmore_bot.mcx_options import regime as regime_module
 from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.regime import Regime
-from growmore_bot.mcx_options.strike_selection import select_strike_by_target_delta
+from growmore_bot.mcx_options.strike_selection import (
+    evaluate_candidates,
+    select_strike_by_target_delta,
+)
 from growmore_bot.persistence.models import MCXOptionsLeg, MCXOptionsPosition, MCXOptionsSelection
 
 #: Fallback vol used when a candidate strike's own quoted IV is missing --
@@ -276,6 +279,24 @@ def _floor_chain_for_covered_call(
     )
 
 
+def _position_snapshot(position: Optional[MCXOptionsPosition]) -> dict:
+    """The (state, basis, unrealized_pnl) fields `MCXOptionsSelection`
+    records every cycle -- a snapshot of `position`'s CURRENT values (post
+    whatever this cycle's `_settle_leg`/`_mark_to_market`/
+    `_roll_futures_position` already did to it), so a hold-day row is
+    self-contained without a join back through position history (which only
+    tracks CURRENT state, not day-by-day history). `None` for every field
+    when no position exists at all yet.
+    """
+    if position is None:
+        return {"position_state": None, "position_basis": None, "position_unrealized_pnl": None}
+    return {
+        "position_state": position.state,
+        "position_basis": position.basis,
+        "position_unrealized_pnl": position.unrealized_pnl,
+    }
+
+
 def run_cycle(
     session: Any, config: Any, cycle_data: MCXCycleData, today: date,
 ) -> None:
@@ -325,11 +346,27 @@ def run_cycle(
     active_position = position if (position is not None and position.status == "open") else None
 
     if not entry_needed:
+        opt_type = (
+            "CE" if (active_position is not None and active_position.state == "long_futures") else "PE"
+        )
+        # No entry decision is made on a hold day, but today's regime read is
+        # still cheap and side-effect-free to compute -- recorded purely so
+        # the dashboard can show "today's regime read was X" for every day,
+        # not just entry days.
+        hold_regime_label = regime_module.classify_today(cycle_data.futures_bars)
+        hold_side_regime = hold_regime_label.for_option_type(opt_type) if hold_regime_label else None
+        basis = active_position.basis if active_position is not None else None
+        unrealized = active_position.unrealized_pnl if active_position is not None else None
+        reason = "position already has an open leg, not due for settlement today"
+        if basis is not None and unrealized is not None:
+            reason += f" (basis {float(basis):g}, unrealized P&L {float(unrealized):.2f})"
         session.add(
             MCXOptionsSelection(
-                id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=None,
-                target_delta=None, selected_strike=None,
-                reason="position already has an open leg, not due for settlement today",
+                id=uuid.uuid4(), config_id=config.id, cycle_date=today,
+                regime=hold_side_regime.value if hold_side_regime is not None else None,
+                target_delta=None, selected_strike=None, reason=reason,
+                futures_price=cycle_data.futures_price,
+                **_position_snapshot(active_position),
             )
         )
         return
@@ -343,6 +380,8 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=None,
                 target_delta=None, selected_strike=None,
                 reason="No regime label for today (insufficient warm-up data) -- skipped entry",
+                futures_price=cycle_data.futures_price,
+                **_position_snapshot(active_position),
             )
         )
         return
@@ -354,6 +393,8 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
                 target_delta=None, selected_strike=None,
                 reason=f"{side_regime.value} regime for {opt_type} -- skipped entry",
+                futures_price=cycle_data.futures_price,
+                **_position_snapshot(active_position),
             )
         )
         return
@@ -368,6 +409,14 @@ def run_cycle(
     if opt_type == "CE" and active_position is not None and active_position.basis is not None:
         chain = _floor_chain_for_covered_call(chain, float(active_position.basis))
 
+    candidates = evaluate_candidates(
+        chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
+        T_years=cycle_data.T_years, sigma=DEFAULT_SIGMA, r=RISK_FREE_RATE,
+        min_open_interest=int(config.min_open_interest),
+    )
+    candidates_considered = [
+        {"strike": c.strike, "delta": c.delta, "oi": c.oi, "ltp": c.ltp} for c in candidates
+    ]
     picked = select_strike_by_target_delta(
         chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
         T_years=cycle_data.T_years, sigma=DEFAULT_SIGMA, r=RISK_FREE_RATE,
@@ -380,6 +429,9 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
                 target_delta=target_delta, selected_strike=None,
                 reason="No strike cleared the OI/basis filter -- skipped entry",
+                futures_price=cycle_data.futures_price,
+                candidates_considered=candidates_considered,
+                **_position_snapshot(active_position),
             )
         )
         return
@@ -409,6 +461,9 @@ def run_cycle(
                 f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
                 f"entered {opt_type} at strike {picked.strike}"
             ),
+            futures_price=cycle_data.futures_price,
+            candidates_considered=candidates_considered,
+            **_position_snapshot(active_position),
         )
     )
 

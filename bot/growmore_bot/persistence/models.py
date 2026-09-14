@@ -831,6 +831,26 @@ class MCXOptionsSelection(Base):
     target_delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     selected_strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Daily-snapshot fields (migration 0024) -- turn this table into a
+    # genuine per-cycle market/position snapshot rather than only an
+    # entry-decision audit trail. Populated on EVERY cycle (entry or hold),
+    # unlike regime/target_delta/selected_strike above which stay null on
+    # cycles where entry isn't attempted at all.
+    futures_price: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Snapshot of MCXOptionsPosition.state at this cycle (flat|long_futures|
+    # closed|None if no position exists yet) -- recorded here because
+    # MCXOptionsPosition only tracks CURRENT state, not day-by-day history,
+    # so a hold-day row would otherwise be unable to show it without this.
+    position_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    position_basis: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    position_unrealized_pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Every OI-surviving candidate `evaluate_candidates` returned this cycle
+    # (not just the winner), as a JSON array of {strike, delta, oi, ltp}
+    # objects -- populated whenever the engine reached the strike-selection
+    # step (including cycles where nothing was picked), null on cycles where
+    # entry isn't even attempted (unfavorable regime, no regime label, or a
+    # position not yet due for settlement).
+    candidates_considered: Mapped[list | None] = mapped_column(JSONType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

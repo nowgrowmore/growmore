@@ -346,6 +346,15 @@ export interface MCXOptionsLeg {
   pnl: string | null;
 }
 
+// One candidate strike evaluate_candidates() looked at during strike
+// selection -- see MCXOptionsSelection.candidates_considered below.
+export interface MCXOptionsCandidate {
+  strike: number;
+  delta: number;
+  oi: number;
+  ltp: number;
+}
+
 export interface MCXOptionsSelection {
   id: string;
   config_id: string;
@@ -356,6 +365,19 @@ export interface MCXOptionsSelection {
   target_delta: string | null;
   selected_strike: string | null;
   reason: string;
+  // Daily-snapshot fields (migration 0024) -- populated on EVERY cycle
+  // (entry or hold), unlike regime/target_delta/selected_strike above which
+  // stay null on cycles where entry isn't attempted at all. Null on rows
+  // written before this migration.
+  futures_price: string | null;
+  // Snapshot of MCXOptionsPosition.state at this cycle (flat|long_futures|
+  // closed), null if no position existed yet.
+  position_state: string | null;
+  position_basis: string | null;
+  position_unrealized_pnl: string | null;
+  // Every OI-surviving candidate evaluated this cycle (not just the
+  // winner), null on cycles where entry isn't even attempted.
+  candidates_considered: MCXOptionsCandidate[] | null;
   created_at: string;
 }
 

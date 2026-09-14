@@ -367,3 +367,13 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   As with wheel_basket, this strategy places no real orders anywhere — it is a self-contained paper
   ledger — so enabling it is a paper-trading-only decision, but still one for the account owner to
   make deliberately, and only after the migration has been applied.
+
+- [ ] **(Added 2026-09-14) A third migration, `0024_mcx_options_selection_snapshot`, also needs
+  `alembic upgrade head` against the real Neon database before it can take effect.** It adds five
+  nullable columns to `mcx_options_selections` (`futures_price`, `position_state`,
+  `position_basis`, `position_unrealized_pnl`, `candidates_considered`) so that table becomes a
+  genuine daily snapshot log (dashboard: "why did/didn't it enter, and what's it holding") rather
+  than only recording context on entry-decision days. Purely additive/nullable, same low-risk shape
+  as `0022`/`0023` — but per this repo's rules, nobody ran it against Neon as part of this change;
+  it needs to be applied in the same `alembic upgrade head` pass as the still-outstanding `0022`/
+  `0023` above before this new data starts showing up on `/mcx-options`.
