@@ -18,9 +18,10 @@ flowchart LR
         Broker["Dhan client wrapper\n(Data API only)"]
         OrderClient["Dhan order client\n(the ONLY module allowed\nto call the Order API)"]
         WheelBasket["Wheel-basket engine\n(paper only, rotating\nhigh-IV stock basket,\nonce-daily cycle after\nNSE close)"]
+        MCXOptions["MCX options-selling engine\n(paper only, put-sell/covered-call\ncycle on GOLDM/SILVERM,\nonce-daily, no scheduler\nwiring yet)"]
     end
 
-    DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log,\nwheel_basket_configs/positions/\nlegs/selections")]
+    DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log,\nwheel_basket_configs/positions/\nlegs/selections,\nmcx_options_configs/positions/\nlegs/selections")]
 
     subgraph Vercel["Vercel"]
         Dashboard["Next.js dashboard\n(Overview, Backtests, Trade Log,\nStrategy Config, Wheel Basket)"]
@@ -30,10 +31,12 @@ flowchart LR
     Scheduler --> Strategies --> Paper
     Strategies --> Live
     Broker --> WheelBasket
+    Broker --> MCXOptions
     Backtest --> DB
     Paper --> DB
     Live --> DB
     WheelBasket --> DB
+    MCXOptions --> DB
     Live --> OrderClient
     OrderClient -. "gated: live_trading_enabled AND\nbot_config.mode=live, both required" .-> OrderAPI
     DB --> Dashboard
@@ -47,6 +50,17 @@ intraday. It is **paper-only**: no live options order-placement path exists, and
 strategy it runs (ATM put wheel, RSI-scaled basis buffer, restricted each cycle to a real per-stock
 IV ranking) and `docs/pending-actions.md` for what's still unverified before trusting it further
 (Dhan's real-time option-chain response shape has not yet been checked against a real call).
+
+The MCX options-selling engine (`bot/growmore_bot/mcx_options/`) mirrors the wheel-basket engine's
+shape one level down: `regime.py` (hand-rolled ADX/Bollinger-Bandwidth regime classification, no
+`pandas_ta_classic` dependency — that library stays a `research`-only optional extra),
+`pricing.py`/`strike_selection.py` (Black-76 pricing and delta-targeted strike selection),
+`live_data.py` (the only module calling `DhanClient`), and `mcx_options_engine.py` (the
+put-sell -> assignment -> covered-call state machine, no stop-loss by design). Also **paper-only**
+— `mcx_options_configs.mode` stays `"paper"`, and there is no scheduler wiring for it yet (see
+`docs/pending-actions.md`). Futures contract rollover is a known, loudly-flagged gap (see
+`docs/technical-debt.md`) — do not enable this strategy across a contract-month boundary until
+that is built.
 
 ## Components
 

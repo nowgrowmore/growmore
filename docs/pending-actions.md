@@ -344,3 +344,13 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   new tables (no changes to existing ones), so it's low-risk, but per this repo's rules that
   promotion is never automatic — nobody ran it against Neon as part of this change. No engine code
   reads/writes these tables yet either (schema-only, ahead of a later live/paper engine phase).
+
+- [ ] **(Update 2026-09-14) The live paper-trading engine now exists** (`bot/growmore_bot/
+  mcx_options/` — see `docs/technical-debt.md`'s new entry for what it still defers, notably
+  futures contract rollover), but nothing runs it yet: there is no scheduler job wiring it into
+  `growmore_bot/scheduler/run.py` (wheel_basket has `growmore_bot/wheel_basket/scheduler_job.py`
+  as the template for what this would look like), and no `mcx_options_configs` rows have been
+  created for GOLDM/SILVERM in any environment. As with wheel_basket, this strategy places no real
+  orders anywhere — it is a self-contained paper ledger — so enabling it is a paper-trading-only
+  decision, but still one for the account owner to make deliberately once the migration above has
+  been applied.

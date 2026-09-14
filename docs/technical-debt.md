@@ -32,6 +32,29 @@
   None of this blocks the code from running or being tested — it blocks trusting any CAGR/Sharpe
   number this produces as a real trading conclusion until the above are sourced/verified.
 
+- **(OPEN, 2026-09-14) MCX options-selling LIVE paper-trading engine (phase 2) is built
+  (`bot/growmore_bot/mcx_options/`: `pricing.py`, `regime.py`, `strike_selection.py`,
+  `live_data.py`, `mcx_options_engine.py`) and unit-tested, but carries two open items forward
+  from phase 1/the offline backtest, plus one new deferral of its own:
+  - **Futures contract rollover is NOT implemented.** If an assigned `long_futures` position's
+    contract month expires before its covered-call cycle resolves, `mcx_options_engine.py` does
+    nothing — `MCXOptionsPosition.futures_contract_expiry` is never set on assignment, and there is
+    no roll logic. This is flagged loudly with a `TODO(mcx-options-futures-rollover)` comment at
+    the exact spot in `mcx_options_engine._settle_leg` where assignment happens. Do not enable this
+    strategy live across a contract-month boundary until this is built and tested (the offline
+    backtest's `research/mcx_options/engine.py` has a documented, if simplified, version of this
+    that could inform the live one).
+  - **`DhanClient.get_option_chain`/`get_expiry_list` response-shape parsing is still unverified
+    against a real Dhan call** (same open item as `growmore_bot/wheel_basket/live_iv_rank.py`
+    already lives with in production — see that module's docstring). `growmore_bot/mcx_options/
+    live_data.py` does not paper over this: a shape mismatch is left to raise a loud `KeyError`/
+    `ValueError` rather than being silently coerced into a wrong number.
+  - **Daily futures mark-to-market is a simplification, not a true incremental ledger.**
+    `MCXOptionsPosition` has no persisted "last mark" column, so `unrealized_pnl` is recomputed
+    each cycle as `(futures_price - basis) * futures_qty` rather than booking day-by-day M2M
+    deltas — the same total unrealized P&L at any point in time, just without a per-day event
+    trail. See `mcx_options_engine.py`'s module docstring.
+
 - **(OPEN, found 2026-09-05) The Dhan token can be dead while the bot believes it is valid, and
   the bot cannot self-heal.** `DhanClient.refresh_access_token_if_needed` decides whether a token
   needs refreshing by decoding the JWT `exp` claim and nothing else. But Dhan allows only one
