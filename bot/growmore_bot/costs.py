@@ -71,6 +71,24 @@ class CostModel:
     gst_pct: float = 0.18
     slippage_ticks: float = 2.0
     stop_slippage_ticks: float = 2.0
+    #: Safety gate, not a rate. True for every model whose numbers have
+    #: actually been checked against a real tariff/circular; every compute
+    #: entry point below (`leg_cost`, `slippage_cost`, `slippage_price`, and
+    #: therefore `round_trip_cost`) refuses to run when this is False. Exists
+    #: because `MCX_COMMODITY_OPTION_COST_MODEL` needs to exist as a
+    #: placeholder -- so the shape of an eventual model is visible in code
+    #: review and callers can start writing against its name -- without ever
+    #: producing a plausible-looking number nobody sourced.
+    reviewed: bool = True
+
+
+def _require_reviewed(model: "CostModel") -> None:
+    if not model.reviewed:
+        raise NotImplementedError(
+            "MCX_COMMODITY_OPTION_COST_MODEL rates are unverified placeholders "
+            "-- source real Dhan commodity-options tariff / MCX circular "
+            "figures before using this for backtest conclusions."
+        )
 
 
 #: Shared default so callers don't each construct their own and drift.
@@ -145,6 +163,48 @@ NSE_OPTION_COST_MODEL = CostModel(
 )
 
 
+#: MCX COMMODITY OPTION costs -- **UNREVIEWED PLACEHOLDER, DO NOT USE FOR
+#: BACKTEST CONCLUSIONS.** Unlike every other model in this file, none of
+#: these figures come from a checked Dhan tariff sheet or MCX circular --
+#: MCX commodity options are new enough, and different enough from both the
+#: NSE stock-option and MCX-futures rate cards above, that guessing a
+#: plausible-sounding STT/CTT/brokerage/GST split here would be worse than
+#: leaving it unimplemented: a guess that happens to look reasonable gets
+#: trusted exactly like a sourced number, silently, by anyone who calls
+#: `leg_cost`/`round_trip_cost` with this model.
+#:
+#: So this constant exists ONLY to reserve the name and the shape (a
+#: `CostModel`, so its eventual real fields slot in without an interface
+#: change) for when the rates ARE sourced. Two independent safety nets stop
+#: it from being usable before that:
+#:   1. `reviewed=False` makes `leg_cost`, `slippage_cost`, `slippage_price`
+#:      (and therefore `round_trip_cost`, which calls the first two) raise
+#:      `NotImplementedError` immediately -- see `_require_reviewed`.
+#:   2. Every rate field is `float("nan")` rather than 0.0 or a real-looking
+#:      number, so even a caller who reads the fields directly, bypassing
+#:      the functions above, gets NaN propagating through their own
+#:      arithmetic rather than a silently-wrong finite answer.
+#:
+#: To promote this to a real model: source the actual rates (Dhan's
+#: commodity-options tariff page and/or the relevant MCX circular), replace
+#: the NaNs with checked numbers dated like every other model here, and flip
+#: `reviewed` to True.
+MCX_COMMODITY_OPTION_COST_MODEL = CostModel(
+    brokerage_per_order=float("nan"),
+    brokerage_pct=float("nan"),
+    exchange_txn_pct=float("nan"),
+    ctt_sell_pct=float("nan"),
+    stt_both_pct=float("nan"),
+    stt_sell_pct=float("nan"),
+    stamp_buy_pct=float("nan"),
+    sebi_pct=float("nan"),
+    gst_pct=float("nan"),
+    slippage_ticks=float("nan"),
+    stop_slippage_ticks=float("nan"),
+    reviewed=False,
+)
+
+
 #: A model that charges nothing -- the explicit way to reproduce the
 #: pre-cost behaviour of every existing backtest, rather than passing None
 #: around and branching on it.
@@ -187,6 +247,7 @@ def leg_cost(notional: float, side: Side, model: CostModel = DEFAULT_COST_MODEL)
         raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
     if notional < 0:
         raise ValueError("notional must not be negative")
+    _require_reviewed(model)
 
     brokerage = min(model.brokerage_per_order, notional * model.brokerage_pct)
     exchange = notional * model.exchange_txn_pct
@@ -207,6 +268,7 @@ def slippage_cost(
     is_stop: bool = False,
 ) -> float:
     """Rupee cost of slippage on ONE leg, in ticks scaled to the position."""
+    _require_reviewed(model)
     ticks = model.slippage_ticks + (model.stop_slippage_ticks if is_stop else 0.0)
     return ticks * tick_size * lot_size * abs(lots)
 
@@ -240,6 +302,7 @@ def slippage_price(
     """
     if side not in _VALID_SIDES:
         raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+    _require_reviewed(model)
     ticks = model.slippage_ticks + (model.stop_slippage_ticks if is_stop else 0.0)
     offset = ticks * tick_size
     return ref_price + offset if side == "buy" else ref_price - offset
@@ -249,6 +312,7 @@ __all__ = [
     "CostModel",
     "DEFAULT_COST_MODEL",
     "FREE_COST_MODEL",
+    "MCX_COMMODITY_OPTION_COST_MODEL",
     "RoundTripCost",
     "leg_cost",
     "slippage_cost",

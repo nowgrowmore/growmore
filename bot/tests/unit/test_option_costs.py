@@ -22,10 +22,13 @@ import pytest
 
 from growmore_bot.costs import (
     DEFAULT_COST_MODEL,
+    MCX_COMMODITY_OPTION_COST_MODEL,
     NSE_EQUITY_DELIVERY_COST_MODEL,
     NSE_OPTION_COST_MODEL,
-    CostModel,
     leg_cost,
+    round_trip_cost,
+    slippage_cost,
+    slippage_price,
 )
 
 
@@ -121,6 +124,57 @@ def test_the_flat_fee_holds_across_every_realistic_premium():
     for turnover in (25.0, 1_000.0, 11_250.0, 5_000_000.0):
         brokerage_component = min(m.brokerage_per_order, turnover * m.brokerage_pct)
         assert brokerage_component == pytest.approx(20.0)
+
+
+class TestMCXCommodityOptionCostModelIsAnUnreviewedPlaceholder:
+    """MCX commodity-options STT/CTT/brokerage/GST figures are not sourced
+    yet -- unlike every other model in this file, `MCX_COMMODITY_OPTION_COST_MODEL`
+    must NEVER produce a number, because a plausible-looking guess here would
+    be silently trusted by a backtest the same way a sourced rate is. The
+    safety gate (`reviewed=False`) is the thing under test, so these
+    assertions must hold BEFORE any real rate is ever filled in.
+    """
+
+    def test_leg_cost_refuses_to_compute_with_the_mcx_option_placeholder(self):
+        with pytest.raises(NotImplementedError, match="MCX_COMMODITY_OPTION_COST_MODEL"):
+            leg_cost(100_000.0, "sell", MCX_COMMODITY_OPTION_COST_MODEL)
+
+    def test_slippage_cost_also_refuses(self):
+        with pytest.raises(NotImplementedError, match="MCX_COMMODITY_OPTION_COST_MODEL"):
+            slippage_cost(0.05, 100, 1, MCX_COMMODITY_OPTION_COST_MODEL)
+
+    def test_slippage_price_also_refuses(self):
+        with pytest.raises(NotImplementedError, match="MCX_COMMODITY_OPTION_COST_MODEL"):
+            slippage_price(100.0, "buy", 0.05, MCX_COMMODITY_OPTION_COST_MODEL)
+
+    def test_round_trip_cost_also_refuses(self):
+        # The composite entry point every backtest actually calls -- the gate
+        # must hold there too, not just on the leaf functions.
+        with pytest.raises(NotImplementedError, match="MCX_COMMODITY_OPTION_COST_MODEL"):
+            round_trip_cost(100_000.0, 0.05, 100, 1, MCX_COMMODITY_OPTION_COST_MODEL)
+
+    def test_every_other_published_model_is_unaffected(self):
+        # The control: adding the gate must not touch any reviewed model.
+        assert DEFAULT_COST_MODEL.reviewed is True
+        assert NSE_EQUITY_DELIVERY_COST_MODEL.reviewed is True
+        assert NSE_OPTION_COST_MODEL.reviewed is True
+        leg_cost(100_000.0, "sell", NSE_OPTION_COST_MODEL)  # must not raise
+
+    def test_the_placeholder_is_marked_unreviewed(self):
+        assert MCX_COMMODITY_OPTION_COST_MODEL.reviewed is False
+
+    def test_belt_and_suspenders_every_rate_is_nan_not_a_plausible_guess(self):
+        # Even a caller that bypasses leg_cost/round_trip_cost and reads the
+        # fields directly must not get a plausible-looking number back.
+        import math
+
+        m = MCX_COMMODITY_OPTION_COST_MODEL
+        for field in (
+            "brokerage_per_order", "brokerage_pct", "exchange_txn_pct",
+            "ctt_sell_pct", "stt_both_pct", "stt_sell_pct", "stamp_buy_pct",
+            "sebi_pct", "gst_pct", "slippage_ticks", "stop_slippage_ticks",
+        ):
+            assert math.isnan(getattr(m, field)), f"{field} is not NaN"
 
 
 def test_below_twenty_rupees_of_turnover_the_flat_fee_degrades_and_that_is_known():
