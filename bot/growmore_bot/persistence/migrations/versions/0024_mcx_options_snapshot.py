@@ -1,6 +1,6 @@
 """mcx options selection daily snapshot
 
-Revision ID: 0024_mcx_options_selection_snapshot
+Revision ID: 0024_mcx_options_snapshot
 Revises: 0023_mcx_options_rollover
 
 Turns `mcx_options_selections` into a genuine daily snapshot log, not just
@@ -30,7 +30,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0024_mcx_options_selection_snapshot"
+revision = "0024_mcx_options_snapshot"
 down_revision = "0023_mcx_options_rollover"
 branch_labels = None
 depends_on = None
