@@ -76,6 +76,21 @@
     classify_today` purely for display, even though it drives no decision that day. Surfaced on
     `/mcx-options` (`MCXOptionsClient.tsx`'s selection-log table). Still not applied to production
     — see `docs/pending-actions.md`'s "MCX options schema migration" section.
+  - **(OPEN, found 2026-09-14) The 23:59 IST cron time is fine for paper mode, but would block
+    same-day entry if this strategy is ever switched to live.** `_mcx_options_job` runs
+    deliberately AFTER MCX's session close (23:30 IST summer / 23:55 IST winter — see
+    `market_hours.MCX_CLOSE_TIME_SUMMER`/`WINTER`), so it always sees that day's final settlement
+    price. That's correct and harmless for paper trading, since no real order needs to go out —
+    the engine just books a simulated fill against the closing price. It would NOT work for live
+    trading: Dhan's Order API only accepts orders while the exchange is open, so a decision to
+    write a NEW short put/covered call made at 23:59 could only actually be placed at the NEXT
+    day's open (~09:00 IST) — an overnight gap between "decided at yesterday's close" and
+    "executed at tomorrow's open," with the underlying free to move in between. Settlement/
+    assignment itself is NOT affected (the exchange determines ITM/OTM automatically; nothing
+    needs to be ordered for that half) — only the "open a new leg" step needs same-session
+    execution. Same pre-existing gap as `wheel_basket` (also decided at 15:45, after NSE's 15:30
+    close) — not new to this strategy, but must be resolved (e.g. re-time the entry decision to
+    run shortly BEFORE close instead of after) before `mode="live"` is ever considered here.
 
 - **(OPEN, found 2026-09-05) The Dhan token can be dead while the bot believes it is valid, and
   the bot cannot self-heal.** `DhanClient.refresh_access_token_if_needed` decides whether a token
