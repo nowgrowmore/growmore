@@ -193,6 +193,11 @@ def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
     assert float(selections[0].futures_price) == F
     assert selections[0].position_state == "flat"  # freshly opened this cycle
     assert selections[0].position_basis is None
+    # The expiry actually being considered this cycle -- recorded even on an
+    # entered cycle, but the real point is that it's ALSO recorded on a
+    # SKIPPED cycle (see test_skips_entry_when_no_regime_label below), where
+    # no MCXOptionsLeg exists at all to carry it any other way.
+    assert selections[0].option_expiry == expiry
     candidates = selections[0].candidates_considered
     assert candidates is not None
     assert len(candidates) == 5  # every PE strike in _chain's default set
@@ -234,6 +239,10 @@ def test_skips_entry_when_no_regime_label(session):
     assert selections[0].position_basis is None
     assert selections[0].position_unrealized_pnl is None
     assert selections[0].candidates_considered is None
+    # The whole point of this field: a SKIPPED cycle writes no MCXOptionsLeg
+    # at all, so without this the expiry being considered would be lost
+    # entirely -- this is the only record of it.
+    assert selections[0].option_expiry == expiry
 
 
 def test_skips_entry_when_trend_unfavorable_for_put_side(session):

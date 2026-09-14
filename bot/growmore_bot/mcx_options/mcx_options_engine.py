@@ -447,7 +447,7 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today,
                 regime=hold_side_regime.value if hold_side_regime is not None else None,
                 target_delta=None, selected_strike=None, reason=reason,
-                futures_price=cycle_data.futures_price,
+                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
                 **_position_snapshot(active_position),
             )
         )
@@ -462,7 +462,7 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=None,
                 target_delta=None, selected_strike=None,
                 reason="No regime label for today (insufficient warm-up data) -- skipped entry",
-                futures_price=cycle_data.futures_price,
+                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
                 **_position_snapshot(active_position),
             )
         )
@@ -475,7 +475,7 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
                 target_delta=None, selected_strike=None,
                 reason=f"{side_regime.value} regime for {opt_type} -- skipped entry",
-                futures_price=cycle_data.futures_price,
+                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
                 **_position_snapshot(active_position),
             )
         )
@@ -511,7 +511,7 @@ def run_cycle(
                 id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
                 target_delta=target_delta, selected_strike=None,
                 reason="No strike cleared the OI/basis filter -- skipped entry",
-                futures_price=cycle_data.futures_price,
+                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
                 candidates_considered=candidates_considered,
                 **_position_snapshot(active_position),
             )
@@ -555,7 +555,7 @@ def run_cycle(
                 f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
                 f"entered {opt_type} at strike {picked.strike}"
             ),
-            futures_price=cycle_data.futures_price,
+            futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
             candidates_considered=candidates_considered,
             **_position_snapshot(active_position),
         )

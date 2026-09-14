@@ -851,6 +851,14 @@ class MCXOptionsSelection(Base):
     # entry isn't even attempted (unfavorable regime, no regime label, or a
     # position not yet due for settlement).
     candidates_considered: Mapped[list | None] = mapped_column(JSONType, nullable=True)
+    # The expiry the engine was actually considering this cycle (migration
+    # 0025), from MCXCycleData.option_expiry -- always computed by
+    # live_data.fetch_cycle_data regardless of whether an entry happens, so
+    # this is populated even on a SKIPPED cycle (unfavorable regime, no
+    # strike cleared the executability filter, etc.), unlike
+    # MCXOptionsLeg.cycle_expiry which only exists for a cycle that actually
+    # wrote a leg.
+    option_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
