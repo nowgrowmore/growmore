@@ -12,39 +12,53 @@ day-by-day loop, caching, and parsing can all be exercised with a canned
 fake in unit tests. `fetch_day`/`fetch_and_cache_day` only reach the network
 through `_fetch_live_json` below, and only when no `fetcher` is injected.
 
-**How the real fetch works.** MCX's public bhavcopy page
-(https://www.mcxindia.com/market-data/bhavcopy) is NOT a static-URL archive
-like NSE's -- but it is also not the scrape-only ASP.NET-viewstate form this
-module originally assumed. Inspecting the third-party `mcxlib` PyPI
-package's source (since the site itself returns HTTP 403 -- an Akamai edge
-block -- to every request attempted *from this development environment*,
-confirmed via plain `curl`, a cookie-establishing session, and a real
-headless-Chromium Playwright browser, all blocked identically, while the
-account owner confirmed the exact same URL loads fine in their own Brave
-browser) shows the real mechanism is a same-origin JSON POST against an
-ASP.NET PageMethod:
+**How the real fetch works -- CONFIRMED live, not guessed.** MCX's public
+bhavcopy page (https://www.mcxindia.com/market-data/bhavcopy) sits behind
+Akamai Bot Manager, which was confirmed (across two separate machines/
+networks) to block plain `requests`/`curl` -- even a cold GET of
+`robots.txt` -- purely on TLS/JA3 fingerprint, not IP or headers: a real
+browser passes every time, `requests` never does, and a real *headless*
+Chromium (via Playwright) was ALSO blocked, narrowing it further to
+TLS-handshake-level detection rather than a JS/behavioral challenge.
+`curl_cffi` (see `pyproject.toml`'s `research` extra) replays an actual
+Chrome TLS handshake and gets a clean 200 where `requests` cannot --
+confirmed live.
 
-    POST https://www.mcxindia.com/backpage.aspx/GetDateWiseBhavCopy
-    Content-Type: application/json
-    X-Requested-With: XMLHttpRequest
-    body: {"Date": "YYYYMMDD", "InstrumentName": "OPTFUT"}
-    -> {"d": {"Data": [ {...one dict per row...}, ... ]}}
+The endpoint itself (discovered from a HAR capture of the account owner's
+own real browser session against mcxindia.com -- NOT from reverse-engineering
+their client-side code, which this project deliberately did not do) is a
+plain JSON GET, not the ASP.NET-viewstate form or the `mcxlib` PageMethod
+this module originally guessed at:
 
-`_fetch_live_json` below implements exactly this (verified against
-`mcxlib`'s published source, not against a live response -- see next
-paragraph). This is a considerably stronger starting point than the
-original viewstate-replay guess: there's no `__VIEWSTATE`/postback dance to
-get right, just one POST. What's still unverified is the *shape of each row
-dict* in the response (field names) -- see `bhavcopy.py`'s
-`_FIELD_ALIASES` and `parse_bhavcopy_json`'s loud-failure-on-first-row
-diagnostic for how that gets caught and fixed quickly once someone with a
-working network path (i.e. NOT this environment -- run this from the
-account owner's own machine/network, where mcxindia.com is reachable) sees
-a real response.
+    GET https://www.mcxindia.com/market-data/bhavcopy/GetDateWiseBhavCopy
+        ?InstrumentName=ALL&fromDate=DD/MM/YYYY
+    -> {"IsSuccess": true, "Message": "...", "Data": [ {...one dict per row...}, ... ]}
+
+`InstrumentName` only accepts `"ALL"` on this endpoint (confirmed: `"OPTCOM"`
+alone returns `IsSuccess: false`), so every instrument (futures and options,
+every commodity) comes back in one ~5-15k-row response per day; this module
+filters to options client-side the same way `parse_bhavcopy_json` already
+does (via `OptionType` being `CE`/`PE`, not `"-"`). Confirmed real field
+names are documented in `bhavcopy.py`'s `_FIELD_ALIASES` comment.
+
+A companion endpoint, `GetCommoditywiseBhavCopy?InstrumentName=OPTCOM&
+Symbol=...&Expiry=DDMMMYYYY&fromDate=&toDate=`, returns one contract's ENTIRE
+settlement history in a single call (confirmed: 7758 rows for one GOLDM
+expiry) -- a much more efficient way to backfill one known contract's full
+life than looping day-by-day, but it requires already knowing which expiries
+exist; not wired up here since this module's day-by-day design (matching
+`chain_cache.py`'s day-file layout) naturally discovers every expiry that
+was listed on each day as it goes.
+
+A same-origin warm-up GET to the bhavcopy page happens before the data call,
+on the same session -- picked up Akamai's cookies organically in testing
+even though the TLS fingerprint was already what made the difference; kept
+as cheap insurance since it's exactly the "warm up on a real page, then
+reuse the session" pattern NSE-scraping libraries (`nsepython`,
+`jugaad-data`) use against the identical Akamai setup on nseindia.com.
 
 Use `--probe` to fetch and print ONE real day's raw JSON without touching
-the cache, specifically to confirm/fix the field-name mapping on a machine
-that can actually reach MCX.
+the cache.
 
 Resumable like the NSE fetcher: a day already cached (even an empty one, for
 a day MCX genuinely had nothing) is skipped on a later run.
@@ -61,36 +75,21 @@ from research.mcx_options import chain_cache
 from research.mcx_options.bhavcopy import parse_bhavcopy_json
 
 #: A fetcher takes the trading day and returns one day's raw MCX bhavcopy
-#: records (a list of dicts, straight out of the JSON response's
-#: `d.Data`), or None if MCX has nothing for that day.
+#: records (a list of dicts, straight out of the JSON response's `Data`),
+#: or None if MCX has nothing for that day.
 Fetcher = Callable[[date], Optional[list]]
 
-#: Verified against `mcxlib`'s published source (see module docstring) --
-#: NOT verified against a live response, since this environment cannot
-#: reach mcxindia.com (Akamai edge block, confirmed site-wide: even
-#: `robots.txt` 403s here, while the same URLs load fine in the account
-#: owner's own browser -- this looks like a block on this environment's
-#: specific outbound network path, not a bot-detection or IP-reputation
-#: issue that better headers/a real browser can route around; both were
-#: tried and both still 403).
-MCX_BHAVCOPY_URL = "https://www.mcxindia.com/backpage.aspx/GetDateWiseBhavCopy"
+#: CONFIRMED live (see module docstring) -- `InstrumentName` only accepts
+#: `"ALL"` on this endpoint; asking for `"OPTCOM"` directly returns
+#: `IsSuccess: false`, so every instrument comes back and options are
+#: filtered out client-side.
+MCX_BHAVCOPY_URL = "https://www.mcxindia.com/market-data/bhavcopy/GetDateWiseBhavCopy"
 
-#: The page to GET first, to acquire Akamai Bot Manager's session cookies
-#: (`_abck`, `bm_sz`, `ak_bmsc`) organically before the API POST -- the same
-#: "warm up a session on a real HTML page, then reuse it" pattern the NSE-
-#: scraping community (`nsepython`, `jugaad-data`) uses against the
-#: identical Akamai setup on nseindia.com. A cold POST with no prior page
-#: visit in the session was confirmed (both from this environment and the
-#: account owner's own machine/network) to get a 403 -- this warm-up step is
-#: the standard next thing to try before reaching for anything heavier
-#: (e.g. TLS-fingerprint-impersonating clients like `curl_cffi`).
+#: The page to GET first, on the same session, before the data call -- see
+#: module docstring. Also doubles as the `Referer` header value below.
 MCX_WARMUP_URL = "https://www.mcxindia.com/market-data/bhavcopy"
 
 _BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
-    ),
     "Accept-Language": "en-US,en;q=0.9",
 }
 
@@ -99,18 +98,17 @@ _HTML_GET_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-_API_POST_HEADERS = {
+_API_GET_HEADERS = {
     **_BROWSER_HEADERS,
-    "Content-Type": "application/json",
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "X-Requested-With": "XMLHttpRequest",
-    "Origin": "https://www.mcxindia.com",
     "Referer": MCX_WARMUP_URL,
 }
 
-#: Back-compat alias -- some callers/tests referred to the POST headers by
-#: this name before the warm-up GET was added.
-_HEADERS = _API_POST_HEADERS
+#: `curl_cffi`'s Chrome-TLS-handshake impersonation profile -- confirmed
+#: live against mcxindia.com; see module docstring for why plain `requests`
+#: doesn't work here regardless of headers.
+_IMPERSONATE = "chrome124"
 
 
 class _RawFetchResult:
@@ -127,12 +125,12 @@ class _RawFetchResult:
         self.json_body = json_body
         #: HTTP status of the warm-up GET (see `MCX_WARMUP_URL`), so a
         #: `--probe` failure can be pinned to "the warm-up itself was
-        #: blocked" versus "the warm-up succeeded but the API POST still
+        #: blocked" versus "the warm-up succeeded but the data GET still
         #: wasn't accepted."
         self.warmup_status_code = warmup_status_code
 
 
-def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResult:
+def _fetch_live_json_raw(day: date, instrument: str = "ALL") -> _RawFetchResult:
     """The actual HTTP call, with nothing swallowed -- returns the status
     code / raw body / exception exactly as they happened. `_fetch_live_json`
     (below) wraps this into the simple `Optional[list]` contract the rest of
@@ -140,29 +138,28 @@ def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResu
     request failed" and "MCX genuinely has nothing for this day" never look
     identical to whoever's debugging a live run.
 
-    Warms the session up with a GET to `MCX_WARMUP_URL` first (see its
-    docstring) so Akamai's cookies are set organically before the API call,
-    rather than POSTing cold. The warm-up's own failure doesn't short-circuit
-    -- the POST is still attempted with whatever cookies (if any) the
-    session picked up, since a non-2xx warm-up page load doesn't necessarily
-    mean the cookies Akamai cares about weren't still set on the response.
+    Warms the session up with a GET to `MCX_WARMUP_URL` first (see module
+    docstring) before the data call, on one `curl_cffi` session (the TLS
+    impersonation is what actually gets past Akamai; the warm-up is cheap
+    extra insurance). The warm-up's own failure doesn't short-circuit -- the
+    data GET is still attempted with whatever cookies (if any) the session
+    picked up.
     """
-    import requests  # local import: never needed unless this path is taken
+    from curl_cffi import requests as cffi_requests  # local import: only needed here
 
-    session = requests.Session()
-    session.trust_env = False
+    session = cffi_requests.Session(impersonate=_IMPERSONATE)
 
     warmup_status_code = None
     try:
         warmup_resp = session.get(MCX_WARMUP_URL, headers=_HTML_GET_HEADERS, timeout=30)
         warmup_status_code = warmup_resp.status_code
-    except requests.RequestException:
-        pass  # still attempt the POST below with whatever cookies exist
+    except cffi_requests.exceptions.RequestException:
+        pass  # still attempt the data GET below with whatever cookies exist
 
-    payload = json.dumps({"Date": day.strftime("%Y%m%d"), "InstrumentName": instrument})
+    params = {"InstrumentName": instrument, "fromDate": day.strftime("%d/%m/%Y")}
     try:
-        resp = session.post(MCX_BHAVCOPY_URL, headers=_API_POST_HEADERS, data=payload, timeout=30)
-    except requests.RequestException as exc:
+        resp = session.get(MCX_BHAVCOPY_URL, params=params, headers=_API_GET_HEADERS, timeout=30)
+    except cffi_requests.exceptions.RequestException as exc:
         return _RawFetchResult(exception=exc, warmup_status_code=warmup_status_code)
     if not resp.ok:
         return _RawFetchResult(
@@ -182,19 +179,18 @@ def _fetch_live_json_raw(day: date, instrument: str = "OPTFUT") -> _RawFetchResu
     )
 
 
-def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
-    """Real fetcher -- POSTs to `MCX_BHAVCOPY_URL`, see module docstring for
-    exactly what's verified (the endpoint/request shape, via `mcxlib`) versus
-    still unverified (the response row schema, since no real response has
-    been seen from this environment). Not used by any test in this repo;
-    `fetch_day`/`fetch_and_cache_day` always take an explicit `fetcher` in
-    tests instead.
+def _fetch_live_json(day: date, instrument: str = "ALL") -> Optional[list]:
+    """Real fetcher -- GETs `MCX_BHAVCOPY_URL`, see module docstring for the
+    confirmed-live request/response shape. Not used by any test in this
+    repo; `fetch_day`/`fetch_and_cache_day` always take an explicit
+    `fetcher` in tests instead.
 
     Returns None (treated as "nothing for this day", e.g. a holiday) on any
-    HTTP failure or an empty/missing `Data` list -- never raises for that
-    case. Does raise if the response's *rows* don't match the expected
-    field names (via `parse_bhavcopy_json`, called by `fetch_day`), since
-    that's a real problem worth surfacing immediately, not a benign holiday.
+    HTTP failure, a non-`IsSuccess` response, or an empty/missing `Data`
+    list -- never raises for that case. Does raise if the response's *rows*
+    don't match the expected field names (via `parse_bhavcopy_json`, called
+    by `fetch_day`), since that's a real problem worth surfacing
+    immediately, not a benign holiday.
 
     This collapses a real failure (blocked, timed out, wrong shape) and a
     genuine "MCX has nothing today" into the same `None` -- by design, for
@@ -205,7 +201,10 @@ def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
     result = _fetch_live_json_raw(day, instrument)
     if result.json_body is None:
         return None
-    rows = (result.json_body or {}).get("d", {}).get("Data")
+    body = result.json_body or {}
+    if not body.get("IsSuccess"):
+        return None
+    rows = body.get("Data")
     return rows or None
 
 
@@ -276,17 +275,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   "itself was rejected. Body (first 500 chars):", file=sys.stderr)
             print((result.body_text or "")[:500], file=sys.stderr)
             return 1
-        records = ((result.json_body or {}).get("d", {}) or {}).get("Data")
-        if not records:
-            print(f"HTTP {result.status_code}, but no rows in the response for {day} "
-                  "(likely a genuine holiday/not-yet-published day -- try a recent "
-                  "weekday, or inspect the full response below).", file=sys.stderr)
-            print(json.dumps(result.json_body, indent=2)[:2000], file=sys.stderr)
+        body = result.json_body or {}
+        if not body.get("IsSuccess"):
+            print(f"HTTP {result.status_code}, IsSuccess={body.get('IsSuccess')!r}, "
+                  f"Message={body.get('Message')!r} -- no rows for {day} (likely a "
+                  "genuine holiday/not-yet-published day, try a recent weekday).",
+                  file=sys.stderr)
             return 1
-        print(json.dumps(records[:3], indent=2))
-        print(f"\n... ({len(records)} rows total; showing first 3). "
-              "If bhavcopy.py's parse_bhavcopy_json raises on this data, "
-              "the error message names the exact keys seen above -- update "
+        records = body.get("Data")
+        if not records:
+            print(f"HTTP {result.status_code}, IsSuccess=True, but no rows for {day} "
+                  "-- inspect the full response below.", file=sys.stderr)
+            print(json.dumps(body, indent=2)[:2000], file=sys.stderr)
+            return 1
+        options_only = [r for r in records if r.get("OptionType") in ("CE", "PE")]
+        print(json.dumps(options_only[:3] or records[:3], indent=2))
+        print(f"\n... ({len(records)} rows total, {len(options_only)} are options; "
+              "showing first 3). If bhavcopy.py's parse_bhavcopy_json raises on this "
+              "data, the error message names the exact keys seen above -- update "
               "_FIELD_ALIASES to match.", file=sys.stderr)
         return 0
 

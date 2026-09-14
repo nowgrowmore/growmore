@@ -49,6 +49,18 @@ research = [
     # accessor (ADX_14/DMP_14/DMN_14, BBB_20_2.0, etc.) that `pandas_ta`
     # always did. See research/mcx_options/regime.py's docstring.
     "pandas-ta-classic",
+    # TLS-fingerprint-impersonating HTTP client for research/mcx_options/fetch.py.
+    # mcxindia.com sits behind Akamai Bot Manager, which blocks plain `requests`/
+    # `curl` (confirmed: even a cold GET of robots.txt 403s) purely on TLS/JA3
+    # fingerprint -- a real browser passes, `requests`'s OpenSSL-based handshake
+    # doesn't. `curl_cffi` replays an actual Chrome TLS handshake and gets a
+    # clean 200 where `requests` cannot, confirmed live against
+    # market-data/bhavcopy and its GetDateWiseBhavCopy/GetCommoditywiseBhavCopy
+    # JSON endpoints. See fetch.py's docstring for the full story (including
+    # what NOT to do: this project does not attempt to reverse-engineer
+    # Akamai's own sensor/challenge script -- TLS impersonation plus a
+    # same-origin warm-up GET, both well short of that, are what's used here).
+    "curl_cffi",
 ]
 
 [project.scripts]

@@ -131,21 +131,36 @@ def parse_bhavcopy(csv_text: str, trade_date: date) -> list[MCXOptionRow]:
     return rows
 
 
-#: *** ALSO UNVERIFIED -- see module docstring. *** MCX's actual public
-#: bhavcopy delivery mechanism (discovered from the third-party `mcxlib`
-#: package's source, since MCX's own site is unreachable for direct
-#: inspection from this environment -- see `fetch.py`'s docstring) is not a
-#: CSV file at all: it's a JSON POST to `backpage.aspx/GetDateWiseBhavCopy`,
-#: an ASP.NET PageMethod, returning `{"d": {"Data": [ {...one dict per
-#: row...} ]}}`. The *field names inside each row dict* are still unknown --
-#: `mcxlib` just hands the raw dicts to `pandas.DataFrame.from_dict` without
-#: documenting them. The alias lists below are best-guess candidates (MCX's
-#: ASP.NET backend conventionally uses PascalCase); `parse_bhavcopy_json`
-#: tries each in turn per field and raises a `ValueError` naming the exact
-#: keys it actually saw on the first row it can't map, rather than silently
-#: returning nothing -- so a real response (fetched from a machine that can
-#: actually reach mcxindia.com, see `fetch.py`) turns into a one-line fix
-#: here instead of a silent wrong parse.
+#: *** CONFIRMED -- unlike the CSV schema above, this one IS verified. ***
+#: MCX's actual public bhavcopy delivery mechanism (confirmed from a HAR
+#: capture of the account owner's own real browser session -- NOT the
+#: `mcxlib` package's `backpage.aspx/GetDateWiseBhavCopy` endpoint, which
+#: returns a soft-404 and appears to be obsolete) is a plain JSON GET:
+#:
+#:     GET market-data/bhavcopy/GetDateWiseBhavCopy?InstrumentName=ALL&fromDate=DD/MM/YYYY
+#:     GET market-data/bhavcopy/GetCommoditywiseBhavCopy?InstrumentName=OPTCOM&Symbol=...&Expiry=DDMMMYYYY&fromDate=&toDate=
+#:
+#: returning `{"IsSuccess": true, "Message": "...", "Data": [ {...one dict
+#: per row...} ] }` (flat, not the `{"d": {"Data": [...]}}` ASP.NET
+#: PageMethod envelope `mcxlib` uses for its OTHER endpoints -- this one is a
+#: different, plain MVC-style JSON action). Confirmed real keys per row (a
+#: `GetCommoditywiseBhavCopy?InstrumentName=OPTCOM&Symbol=GOLDM&Expiry=03NOV2021`
+#: call returned 7758 real rows spanning that contract's whole life):
+#: `Date` (a US-style `MM/DD/YYYY` string -- NOT used by this parser, which
+#: takes `trade_date` from the caller instead, same as the CSV path),
+#: `Symbol` (fixed-width, TRAILING-SPACE-PADDED, e.g. `"GOLDM        "` --
+#: `_pick`'s caller `.strip()`s it), `ExpiryDate` (`DDMMMYYYY`, no
+#: separators, e.g. `"30SEP2026"` -- see `_json_date`), `Open`, `High`,
+#: `Low`, `Close`, `PreviousClose`, `Volume`, `Value`, `OpenInterest`,
+#: `InstrumentName` (`"FUTCOM"` for futures rows, `"OPTCOM"` for options --
+#: NOT `"OPTFUT"` as originally guessed), `StrikePrice`, `OptionType`
+#: (`"CE"` / `"PE"` / `"-"` for futures rows, which this module's opt_type
+#: filter already excludes). The alias lists below still carry the old
+#: best-guess candidates too (harmless, and cheap insurance against MCX
+#: renaming something later); `parse_bhavcopy_json` raises a `ValueError`
+#: naming the exact keys it actually saw on the first row it can't map, so
+#: any future drift turns into a one-line fix here instead of a silent
+#: wrong parse.
 _FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "symbol": ("Symbol", "Commodity", "CommodityName", "SYMBOL"),
     "expiry": ("ExpiryDate", "Expiry", "EXPIRY"),
@@ -177,11 +192,13 @@ def _pick(record: dict, field: str) -> object:
 
 
 def _json_date(value: object) -> date:
-    """MCX's JSON endpoints commonly encode dates as ASP.NET's
-    `/Date(epoch_ms)/` wrapper (confirmed elsewhere on the site via
-    `mcxlib`'s `_MCX_DATE_PATTERN`), but this hasn't been confirmed for the
-    bhavcopy endpoint specifically -- also accepts a handful of plain date
-    strings as a fallback in case it turns out to be a normal string field.
+    """MCX's real `ExpiryDate` field (confirmed via a HAR capture of the
+    account owner's own browser session against
+    `market-data/bhavcopy/GetDateWiseBhavCopy` and `GetCommoditywiseBhavCopy`)
+    is a no-separator `DDMMMYYYY` string, e.g. `"30SEP2026"` / `"03NOV2021"`
+    -- that's tried first. The ASP.NET `/Date(epoch_ms)/` wrapper and a
+    handful of separated formats are kept as fallbacks in case a different
+    MCX endpoint (or a future site revision) encodes it differently.
     """
     text = str(value).strip()
     match = _MCX_JSON_DATE_PATTERN.fullmatch(text)
@@ -190,7 +207,7 @@ def _json_date(value: object) -> date:
 
         millis = int(match.group(1))
         return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).date()
-    for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+    for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(text.upper(), fmt).date()
         except ValueError:

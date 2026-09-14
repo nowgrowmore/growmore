@@ -5,6 +5,9 @@
 !.env.example
 !.env.test
 
+# Browser HAR captures -- can carry session cookies/auth headers, never commit
+*.har
+
 # Python
 __pycache__/
 *.pyc

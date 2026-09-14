@@ -1,15 +1,15 @@
 """Tests for research.mcx_options.fetch.
 
 The real fetch mechanism (see the module docstring in
-research/mcx_options/fetch.py) is a JSON POST to
-`backpage.aspx/GetDateWiseBhavCopy`, discovered from the third-party
-`mcxlib` package's source since mcxindia.com is unreachable (an Akamai edge
-block) from this development environment. This module must never make a
-real network call during a unit test regardless -- `fetch_day` and
-`fetch_and_cache_day` both take an injectable fetcher function, and every
-test here injects a fake one returning canned JSON records (a list of
-dicts, matching the shape `_fetch_live_json` would return) instead of
-touching the network.
+research/mcx_options/fetch.py) is a `curl_cffi`-driven JSON GET against
+`market-data/bhavcopy/GetDateWiseBhavCopy`, confirmed live via a HAR capture
+of a real browser session -- `curl_cffi` impersonates a real Chrome TLS
+handshake, which is what gets past mcxindia.com's Akamai Bot Manager where
+plain `requests`/`curl` cannot. This module must never make a real network
+call during a unit test regardless -- `fetch_day` and `fetch_and_cache_day`
+both take an injectable fetcher function, and every test here injects a
+fake one returning canned JSON records (a list of dicts, matching the shape
+`_fetch_live_json` would return) instead of touching the network.
 """
 from __future__ import annotations
 
@@ -118,65 +118,80 @@ class _FakeResponse:
         return self._json_body
 
 
-def _fake_session(post_fn, warmup_status_code=200):
-    """A fake `requests.Session` whose `.get` (the warm-up call
-    `_fetch_live_json_raw` always makes first) succeeds by default, and
-    whose `.post` (the actual API call) is supplied per test.
+class _FakeCurlCffiException(Exception):
+    """Stands in for `curl_cffi.requests.exceptions.RequestException`."""
+
+
+class _FakeExceptionsModule:
+    RequestException = _FakeCurlCffiException
+
+
+def _fake_session(get_fn, warmup_status_code=200):
+    """A fake `curl_cffi.requests.Session` whose warm-up `.get` (the FIRST
+    call `_fetch_live_json_raw` makes, to `MCX_WARMUP_URL`) succeeds by
+    default, and whose data `.get` (the SECOND call, to `MCX_BHAVCOPY_URL`)
+    is supplied per test via `get_fn`. Distinguishes the two by URL, exactly
+    like the real code calls `.get` twice with different arguments.
     """
 
     class _FakeSession:
-        def __init__(self):
-            self.trust_env = True
+        def __init__(self, impersonate=None):
+            self.impersonate = impersonate
 
-        def get(self, url, headers, timeout):
-            return _FakeResponse(warmup_status_code)
-
-        def post(self, url, headers, data, timeout):
-            return post_fn(url, headers, data, timeout)
+        def get(self, url, headers, timeout, params=None):
+            if url == fetch.MCX_WARMUP_URL:
+                return _FakeResponse(warmup_status_code)
+            return get_fn(url, params, headers, timeout)
 
     return _FakeSession
 
 
-def test_fetch_live_json_posts_the_expected_request_and_returns_data(monkeypatch):
+def _patch_curl_cffi(monkeypatch, session_cls):
+    import curl_cffi.requests
+
+    monkeypatch.setattr(curl_cffi.requests, "Session", session_cls)
+    monkeypatch.setattr(curl_cffi.requests, "exceptions", _FakeExceptionsModule)
+
+
+def test_fetch_live_json_gets_the_expected_request_and_returns_data(monkeypatch):
     captured = {}
 
-    def post_fn(url, headers, data, timeout):
+    def get_fn(url, params, headers, timeout):
         captured["url"] = url
+        captured["params"] = params
         captured["headers"] = headers
-        captured["data"] = data
         captured["timeout"] = timeout
-        return _FakeResponse(200, {"d": {"Data": CANNED_RECORDS}})
+        return _FakeResponse(200, {"IsSuccess": True, "Data": CANNED_RECORDS})
 
-    import requests
-
-    monkeypatch.setattr(requests, "Session", _fake_session(post_fn))
+    _patch_curl_cffi(monkeypatch, _fake_session(get_fn))
 
     result = fetch._fetch_live_json(date(2026, 9, 4))
 
     assert result == CANNED_RECORDS
     assert captured["url"] == fetch.MCX_BHAVCOPY_URL
-    import json as _json
-
-    assert _json.loads(captured["data"]) == {"Date": "20260904", "InstrumentName": "OPTFUT"}
+    assert captured["params"] == {"InstrumentName": "ALL", "fromDate": "04/09/2026"}
     assert captured["headers"]["X-Requested-With"] == "XMLHttpRequest"
 
 
 def test_fetch_live_json_returns_none_on_http_failure(monkeypatch):
-    import requests
+    _patch_curl_cffi(monkeypatch, _fake_session(lambda *a, **k: _FakeResponse(403)))
 
-    monkeypatch.setattr(
-        requests, "Session", _fake_session(lambda *a, **k: _FakeResponse(403))
+    assert fetch._fetch_live_json(date(2026, 9, 4)) is None
+
+
+def test_fetch_live_json_returns_none_when_not_is_success(monkeypatch):
+    _patch_curl_cffi(
+        monkeypatch,
+        _fake_session(lambda *a, **k: _FakeResponse(200, {"IsSuccess": False, "Message": "No data found."})),
     )
 
     assert fetch._fetch_live_json(date(2026, 9, 4)) is None
 
 
 def test_fetch_live_json_returns_none_when_data_is_empty(monkeypatch):
-    import requests
-
-    monkeypatch.setattr(
-        requests, "Session",
-        _fake_session(lambda *a, **k: _FakeResponse(200, {"d": {"Data": []}})),
+    _patch_curl_cffi(
+        monkeypatch,
+        _fake_session(lambda *a, **k: _FakeResponse(200, {"IsSuccess": True, "Data": []})),
     )
 
     assert fetch._fetch_live_json(date(2026, 9, 4)) is None
@@ -187,25 +202,21 @@ def test_fetch_live_json_returns_none_when_data_is_empty(monkeypatch):
 
 
 def test_fetch_live_json_raw_reports_the_exception(monkeypatch):
-    import requests
+    def get_fn(url, params, headers, timeout):
+        raise _FakeCurlCffiException("boom")
 
-    def post_fn(url, headers, data, timeout):
-        raise requests.ConnectionError("boom")
-
-    monkeypatch.setattr(requests, "Session", _fake_session(post_fn))
+    _patch_curl_cffi(monkeypatch, _fake_session(get_fn))
 
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
-    assert isinstance(result.exception, requests.ConnectionError)
+    assert isinstance(result.exception, _FakeCurlCffiException)
     assert result.json_body is None
     assert result.warmup_status_code == 200
 
 
 def test_fetch_live_json_raw_reports_http_failure_with_body(monkeypatch):
-    import requests
-
-    monkeypatch.setattr(
-        requests, "Session",
+    _patch_curl_cffi(
+        monkeypatch,
         _fake_session(lambda *a, **k: _FakeResponse(403, text="<HTML>Access Denied</HTML>")),
     )
 
@@ -218,32 +229,29 @@ def test_fetch_live_json_raw_reports_http_failure_with_body(monkeypatch):
 
 
 def test_fetch_live_json_raw_reports_a_successful_but_empty_day(monkeypatch):
-    import requests
-
-    monkeypatch.setattr(
-        requests, "Session",
-        _fake_session(lambda *a, **k: _FakeResponse(200, {"d": {"Data": []}})),
+    _patch_curl_cffi(
+        monkeypatch,
+        _fake_session(lambda *a, **k: _FakeResponse(200, {"IsSuccess": True, "Data": []})),
     )
 
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
     assert result.exception is None
     assert result.status_code == 200
-    assert result.json_body == {"d": {"Data": []}}
+    assert result.json_body == {"IsSuccess": True, "Data": []}
 
 
-def test_fetch_live_json_raw_still_posts_when_warmup_itself_fails(monkeypatch):
+def test_fetch_live_json_raw_still_gets_data_when_warmup_itself_fails(monkeypatch):
     """A non-2xx (or exception-raising) warm-up GET must not prevent the
-    POST from being attempted -- some of the cookies Akamai cares about can
-    still land on a non-2xx response, and even if not, failing outright here
-    would hide the more informative POST-level diagnostic from `--probe`.
+    data GET from being attempted -- some of the cookies Akamai cares about
+    can still land on a non-2xx response, and even if not, failing outright
+    here would hide the more informative data-GET-level diagnostic from
+    `--probe`.
     """
-    import requests
-
-    monkeypatch.setattr(
-        requests, "Session",
+    _patch_curl_cffi(
+        monkeypatch,
         _fake_session(
-            lambda *a, **k: _FakeResponse(200, {"d": {"Data": CANNED_RECORDS}}),
+            lambda *a, **k: _FakeResponse(200, {"IsSuccess": True, "Data": CANNED_RECORDS}),
             warmup_status_code=403,
         ),
     )
@@ -251,7 +259,7 @@ def test_fetch_live_json_raw_still_posts_when_warmup_itself_fails(monkeypatch):
     result = fetch._fetch_live_json_raw(date(2026, 9, 4))
 
     assert result.warmup_status_code == 403
-    assert result.json_body == {"d": {"Data": CANNED_RECORDS}}
+    assert result.json_body == {"IsSuccess": True, "Data": CANNED_RECORDS}
 
 
 def test_fetch_and_cache_day_is_a_noop_write_when_fetcher_has_nothing(tmp_path, monkeypatch):
