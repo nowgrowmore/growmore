@@ -70,11 +70,14 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   `total_virtual_capital=₹1,00,00,000`, `top_iv_frac=0.33`, `rotation_hysteresis_pct=0.10`,
   `call_basis_buffer_tiers` = the code default (`[[60,0.05],[40,0.02],[0,0]]`). Nothing trades until
   you flip `enabled` on via the `/wheel-basket` dashboard toggle.
-- [ ] **Verify Dhan's real-time option-chain response shape (`GET /optionchain`) against an actual
-  call** before trusting `DhanClient.get_option_chain`/`get_expiry_list`'s parsing. Built from Dhan's
-  public v2 API docs, same as every other unverified item on this list — not yet checked against a
-  live response from this codebase. If the shape is wrong, IV/strike/premium parsing will raise
-  clearly (not silently misparse) — the fix is isolated to `growmore_bot/broker/dhan_client.py`.
+- [x] **Verify Dhan's real-time option-chain response shape (`GET /optionchain`) against an actual
+  call** — **confirmed working 2026-09-14**: the MCX options-selling engine's first live production
+  cycle (triggered manually against real `DhanClient.get_option_chain`/`get_expiry_list` calls for
+  GOLDM and SILVERM) parsed the real response correctly — 144 and 176 candidate strikes evaluated
+  respectively, a strike picked and a `MCXOptionsLeg`/`MCXOptionsSelection` row written for each,
+  with no shape-mismatch errors. `wheel_basket`'s use of the same two methods was not itself
+  re-verified by this, but the underlying `dhan_client.py` parsing is now confirmed sound against a
+  real live call.
 - [ ] **Enable the config once the above two are done**, and watch `/wheel-basket` for a few
   cycles before deciding whether the default `top_iv_frac`/rotation-hysteresis/RSI-tier settings
   need adjusting.
@@ -334,46 +337,36 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   Sec 8 for what would be worth trying next.
 
 
-## MCX options schema migration (2026-09-14)
+## MCX options-selling strategy — live in paper mode (2026-09-14)
 
-- [ ] **Run `alembic upgrade head` against the real Neon database, deliberately, when you're ready.**
-  Migration `0022_mcx_options` (adds `mcx_options_configs`/`mcx_options_positions`/
-  `mcx_options_legs`/`mcx_options_selections` — the MCX Goldmini/Silvermini analog of the
-  `wheel_basket_*` tables) has been written and tested against SQLAlchemy models plus (where
-  reachable) a local/dockerized Postgres, but has **not** been applied to production. It only adds
-  new tables (no changes to existing ones), so it's low-risk, but per this repo's rules that
-  promotion is never automatic — nobody ran it against Neon as part of this change. No engine code
-  reads/writes these tables yet either (schema-only, ahead of a later live/paper engine phase).
-
-- [ ] **(Update 2026-09-14) The live paper-trading engine now exists** (`bot/growmore_bot/
-  mcx_options/` — see `docs/technical-debt.md`'s new entry for what it still defers, notably
-  futures contract rollover). It is now wired into the scheduler
-  (`growmore_bot/mcx_options/scheduler_job.py`, called once daily at 23:59 IST from
-  `growmore_bot/scheduler/run.py`'s `_mcx_options_job`, gated on
-  `growmore_bot.scheduler.market_hours.is_mcx_trading_day` — a day-only weekday+holiday check
-  reusing the same 2026 MCX holiday list `is_market_open` uses; it does not yet handle
-  partial-session holidays, the same known gap `market_hours.py`/`nse_equity_hours.py` already
-  carry), and `bot/research/provision_mcx_options_configs.py` is the idempotent
-  `--dry-run`/`--apply` CLI that creates the `mcx_options_configs` rows for GOLDM/SILVERM.
-  **Nobody has run it against production yet, and it always creates rows `enabled=False`.**
-  Two separate deliberate manual steps remain for the account owner, in order:
-  1. Apply migration `0022_mcx_options` to the real Neon database (see the item above — still not
-     done).
-  2. Run `python -m research.provision_mcx_options_configs --apply` against production (creates
-     the disabled GOLDM/SILVERM config rows, seeded at `consolidating_target_delta=0.30`,
-     `trend_favorable_target_delta=0.50`, `lots=1` — the values validated in the offline backtest's
-     "dynamic-0.30-0.50-delta" variant), then flip `enabled=True` on a row only when ready to let it
-     run — the cron job and provisioning script never do this themselves.
-  As with wheel_basket, this strategy places no real orders anywhere — it is a self-contained paper
-  ledger — so enabling it is a paper-trading-only decision, but still one for the account owner to
-  make deliberately, and only after the migration has been applied.
-
-- [ ] **(Added 2026-09-14) A third migration, `0024_mcx_options_selection_snapshot`, also needs
-  `alembic upgrade head` against the real Neon database before it can take effect.** It adds five
-  nullable columns to `mcx_options_selections` (`futures_price`, `position_state`,
-  `position_basis`, `position_unrealized_pnl`, `candidates_considered`) so that table becomes a
-  genuine daily snapshot log (dashboard: "why did/didn't it enter, and what's it holding") rather
-  than only recording context on entry-decision days. Purely additive/nullable, same low-risk shape
-  as `0022`/`0023` — but per this repo's rules, nobody ran it against Neon as part of this change;
-  it needs to be applied in the same `alembic upgrade head` pass as the still-outstanding `0022`/
-  `0023` above before this new data starts showing up on `/mcx-options`.
+- [x] **All three migrations applied to production Neon** (`0022_mcx_options`,
+  `0023_mcx_options_rollover`, `0024_mcx_options_snapshot` — the last renamed from
+  `0024_mcx_options_selection_snapshot`, which exceeded `alembic_version.version_num`'s
+  `VARCHAR(32)` and failed cleanly inside one rolled-back transaction the first time; no partial
+  schema change resulted). `mcx_options_configs`/`_positions`/`_legs`/`_selections` all exist and
+  match the current models.
+- [x] **`provision_mcx_options_configs --apply` run against production.** A `strategies` row
+  (`mcx_options_wheel`/`1.0`) and `mcx_options_configs` rows for GOLDM and SILVERM exist, seeded at
+  `consolidating_target_delta=0.30`, `trend_favorable_target_delta=0.50`, `lots=1` (the offline
+  backtest's validated "dynamic-0.30-0.50-delta" variant).
+- [x] **Both configs flipped to `enabled=True`**, deliberately, by the account owner's explicit
+  request. Paper mode only — no real order placement path exists for this strategy (self-contained
+  ledger, same as `wheel_basket`).
+- [x] **Updated `growmore_bot/` deployed to the production VPS and the service restarted**
+  (`sudo systemctl restart growmore-bot`) — confirmed via the systemd journal/`bot.log` that all
+  three scheduled jobs (`_job`, `_wheel_basket_job`, `_mcx_options_job`) registered cleanly on
+  restart. The VPS deployment is NOT git-based (no `.git` in `/home/growmore/growmore`) — code was
+  synced via `rsync` scoped to `growmore_bot/` only (the files this feature actually touched); keep
+  this in mind for future deploys to that host.
+- [x] **First live cycle run manually (2026-09-14, ~19:13 IST)**, using the exact same code path
+  `_mcx_options_job` uses, ahead of the 23:59 IST cron so the account owner could see real data on
+  `/mcx-options` immediately rather than waiting. Both GOLDM and SILVERM entered a short PE the same
+  cycle (consolidating regime, target delta 0.30): GOLDM strike 149000 (144 candidates evaluated,
+  futures price ~152978), SILVERM strike 207000 (176 candidates evaluated, futures price ~236895).
+  This also **confirms `DhanClient.get_option_chain`/`get_expiry_list` parse a real live response
+  correctly** — see the resolved item above in this file.
+- [ ] **Watch `/mcx-options` over the next several cycles** before drawing any conclusions —
+  one cycle proves the plumbing works, not that the strategy is behaving as intended. In particular
+  confirm: assignment/covered-call writing actually fires correctly if/when a put goes ITM, and the
+  futures-rollover path (`docs/technical-debt.md`) triggers correctly if a position survives to its
+  own contract's expiry — neither has been observed against real data yet, only in tests.

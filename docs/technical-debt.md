@@ -55,11 +55,12 @@
     fully resolved**: `futures_roll_cost_per_lot` remains a flat, un-sourced placeholder for a real
     bid/ask roll spread (same caveat as the offline backtest's `EngineConfig.
     futures_roll_cost_per_lot`) — source real figures before trusting roll-cost drag numbers.
-  - **`DhanClient.get_option_chain`/`get_expiry_list` response-shape parsing is still unverified
-    against a real Dhan call** (same open item as `growmore_bot/wheel_basket/live_iv_rank.py`
-    already lives with in production — see that module's docstring). `growmore_bot/mcx_options/
-    live_data.py` does not paper over this: a shape mismatch is left to raise a loud `KeyError`/
-    `ValueError` rather than being silently coerced into a wrong number.
+  - **`DhanClient.get_option_chain`/`get_expiry_list` response-shape parsing — confirmed working
+    2026-09-14** against a real live call (the first manually-triggered production cycle for GOLDM/
+    SILVERM parsed 144/176 real candidate strikes correctly with no shape errors — see
+    `docs/pending-actions.md`). `wheel_basket/live_iv_rank.py`'s own use of the same two methods was
+    not independently re-verified by this, but the shared `dhan_client.py` parsing is now known
+    sound against a real response, not just Dhan's public docs.
   - **Daily futures mark-to-market is a simplification, not a true incremental ledger.**
     `MCXOptionsPosition` has no persisted "last mark" column, so `unrealized_pnl` is recomputed
     each cycle as `(futures_price - basis) * futures_qty` rather than booking day-by-day M2M
