@@ -24,7 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from growmore_bot.broker.dhan_client import Bar, OptionChainRow, OptionChainSnapshot
-from growmore_bot.costs import DEFAULT_COST_MODEL, leg_cost
+from growmore_bot.costs import DEFAULT_COST_MODEL, FREE_COST_MODEL, leg_cost
 from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.mcx_options_engine import run_cycle
 from growmore_bot.mcx_options.pricing import black76_price
@@ -117,7 +117,7 @@ def _cycle_data(
 
 def _open_position_with_leg(
     session, cfg, *, state, opt_type, strike, cycle_expiry, basis=None, futures_qty=0,
-    futures_contract_expiry=None, realized_pnl=0,
+    futures_contract_expiry=None, realized_pnl=0, premium=50.0,
 ):
     now = datetime.now(timezone.utc)
     position = MCXOptionsPosition(
@@ -129,12 +129,25 @@ def _open_position_with_leg(
     session.flush()
     leg = MCXOptionsLeg(
         id=uuid.uuid4(), position_id=position.id, cycle_expiry=cycle_expiry, opt_type=opt_type,
-        strike=strike, premium=50.0, lots=cfg.lots,
+        strike=strike, premium=premium, lots=cfg.lots,
         action="sell_put" if opt_type == "PE" else "sell_call", opened_at=now - timedelta(days=1),
     )
     session.add(leg)
     session.flush()
     return position, leg
+
+
+def _entry_leg_amount(premium: float, lots: float, lot_size: int) -> float:
+    """Reference formula for what an option leg's entry premium credit
+    (net of the zero-cost `FREE_COST_MODEL`) should be -- mirrors
+    `research/mcx_options/engine.py`'s `add_leg`: `credit = premium * qty`,
+    `cost = leg_cost(credit, "sell", option_cost_model)`,
+    `leg_amount = credit - cost`.
+    """
+    qty = float(lots) * lot_size
+    credit = premium * qty
+    cost = leg_cost(credit, "sell", FREE_COST_MODEL)
+    return credit - cost
 
 
 def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
@@ -178,6 +191,14 @@ def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
     assert len(picked_entries) == 1
     for c in candidates:
         assert set(c.keys()) == {"strike", "delta", "oi", "ltp"}
+
+    # The premium collected for selling this put is real cash credited
+    # immediately -- it must be booked into realized_pnl right away, not
+    # deferred to settlement (see module docstring's new "Option premium
+    # booking" section).
+    expected_credit = _entry_leg_amount(float(leg.premium), leg.lots, cycle_data.lot_size)
+    assert expected_credit == pytest.approx(float(leg.premium) * cfg.lots * cycle_data.lot_size)
+    assert float(position.realized_pnl) == pytest.approx(expected_credit)
 
 
 def test_skips_entry_when_no_regime_label(session):
@@ -229,8 +250,10 @@ def test_skips_entry_when_trend_unfavorable_for_put_side(session):
 
 def test_put_expires_otm_closes_the_position(session):
     cfg = _config(session)
+    entry_credit = _entry_leg_amount(50.0, cfg.lots, 100)
     position, leg = _open_position_with_leg(
         session, cfg, state="flat", opt_type="PE", strike=5900.0, cycle_expiry=TODAY,
+        realized_pnl=entry_credit,  # already booked at entry, on a prior cycle
     )
     F = 6050.0  # F >= strike -> OTM
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=1), 10 / 365.25)
@@ -247,11 +270,19 @@ def test_put_expires_otm_closes_the_position(session):
     assert position.state == "flat"
     assert position.closed_at is not None
 
+    # The premium was already credited at entry -- expiring OTM must not
+    # double-count it, but the leg's own row should still show what it
+    # earned (informational, for the dashboard trade-history table).
+    assert float(position.realized_pnl) == pytest.approx(entry_credit)
+    assert float(leg.pnl) == pytest.approx(entry_credit)
+
 
 def test_put_expires_itm_assigns_and_writes_covered_call_same_day(session):
     cfg = _config(session)
+    entry_credit = _entry_leg_amount(50.0, cfg.lots, 100)
     position, leg = _open_position_with_leg(
         session, cfg, state="flat", opt_type="PE", strike=6100.0, cycle_expiry=TODAY,
+        realized_pnl=entry_credit,  # already booked at entry, on a prior cycle
     )
     F = 6050.0  # F < strike -> ITM, assigned
     expiry = TODAY + timedelta(days=10)
@@ -287,12 +318,25 @@ def test_put_expires_itm_assigns_and_writes_covered_call_same_day(session):
     assert selections[0].regime == "consolidating"
     assert float(selections[0].target_delta) == 0.30
 
+    # The put's own entry credit was already booked, unaffected by
+    # assignment (informational leg.pnl mirrors it); assignment itself adds
+    # a SEPARATE, genuinely new debit -- the futures buy-in cost -- and the
+    # freshly-written covered call's own entry credit is booked immediately
+    # too (all hand-computed independently below).
+    assert float(leg.pnl) == pytest.approx(entry_credit)
+    qty = cfg.lots * cycle_data.lot_size
+    assignment_cost = leg_cost(6100.0 * qty, "buy", DEFAULT_COST_MODEL)
+    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
+    expected_realized_pnl = entry_credit - assignment_cost + new_call_credit
+    assert float(position.realized_pnl) == pytest.approx(expected_realized_pnl)
+
 
 def test_call_expires_otm_stays_long_futures_and_writes_new_call(session):
     cfg = _config(session)
+    prior_realized = _entry_leg_amount(50.0, cfg.lots, 100)  # put + old call's entry credits
     position, leg = _open_position_with_leg(
         session, cfg, state="long_futures", opt_type="CE", strike=6200.0,
-        cycle_expiry=TODAY, basis=6000.0, futures_qty=100,
+        cycle_expiry=TODAY, basis=6000.0, futures_qty=100, realized_pnl=prior_realized,
     )
     F = 6100.0  # F <= strike -> OTM, keep futures
     expiry = TODAY + timedelta(days=10)
@@ -324,12 +368,26 @@ def test_call_expires_otm_stays_long_futures_and_writes_new_call(session):
     assert open_legs[0].opt_type == "CE"
     assert open_legs[0].action == "sell_call"
 
+    # The just-settled call's own entry credit was already booked when it
+    # was written (on the prior cycle, folded into `prior_realized` here) --
+    # expiring OTM must not double-book it, only record it informationally
+    # on the leg row. The freshly-written call's entry credit IS a new
+    # credit, on top of everything already in realized_pnl.
+    assert float(leg.pnl) == pytest.approx(prior_realized)
+    new_leg = open_legs[0]
+    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
+    assert float(position.realized_pnl) == pytest.approx(prior_realized + new_call_credit)
+
 
 def test_call_expires_itm_closes_position_called_away(session):
     cfg = _config(session)
+    basis = 6000.0
+    strike = 6100.0
+    qty = cfg.lots * 100
+    prior_realized = _entry_leg_amount(50.0, cfg.lots, 100)  # everything credited so far
     position, leg = _open_position_with_leg(
-        session, cfg, state="long_futures", opt_type="CE", strike=6100.0,
-        cycle_expiry=TODAY, basis=6000.0, futures_qty=100,
+        session, cfg, state="long_futures", opt_type="CE", strike=strike,
+        cycle_expiry=TODAY, basis=basis, futures_qty=100, realized_pnl=prior_realized,
     )
     F = 6200.0  # F > strike -> ITM, called away
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=1), 10 / 365.25)
@@ -345,6 +403,19 @@ def test_call_expires_itm_closes_position_called_away(session):
     assert position.status == "closed"
     assert position.state == "closed"
     assert position.closed_at is not None
+    assert float(position.unrealized_pnl) == 0.0
+
+    # The call's own entry credit was already booked when it was written --
+    # informational on the leg row here. Being called away crystallizes a
+    # SEPARATE, genuinely new gain: the futures move from basis to the call
+    # strike, net of the futures sell-leg cost -- this is the gain the bug
+    # discarded via `position.unrealized_pnl = 0` with nothing booked
+    # anywhere else.
+    assert float(leg.pnl) == pytest.approx(prior_realized)
+    exit_mtm = (strike - basis) * qty
+    exit_cost = leg_cost(strike * qty, "sell", DEFAULT_COST_MODEL)
+    expected_realized_pnl = prior_realized + exit_mtm - exit_cost
+    assert float(position.realized_pnl) == pytest.approx(expected_realized_pnl)
 
 
 def test_marks_to_market_when_leg_not_yet_due(session):
@@ -565,7 +636,6 @@ def test_roll_and_same_day_covered_call_settlement_both_happen(session):
 
     # Roll happened.
     assert position.futures_contract_expiry == new_expiry
-    assert float(position.realized_pnl) == pytest.approx(mtm - roll_cost)
     roll_legs = (
         session.query(MCXOptionsLeg)
         .filter_by(position_id=position.id, action="roll")
@@ -586,6 +656,132 @@ def test_roll_and_same_day_covered_call_settlement_both_happen(session):
         .all()
     )
     assert len(open_legs) == 1
-    assert open_legs[0].opt_type == "CE"
-    assert open_legs[0].action == "sell_call"
-    assert open_legs[0].strike >= float(position.basis)  # floored at post-roll basis
+    new_leg = open_legs[0]
+    assert new_leg.opt_type == "CE"
+    assert new_leg.action == "sell_call"
+    assert new_leg.strike >= float(position.basis)  # floored at post-roll basis
+
+    # Composition check: realized_pnl reflects the roll's own crystallized
+    # mtm/cost (`mtm - roll_cost`), the just-settled call's own entry credit
+    # (already booked on the prior cycle -- folded into this fixture's
+    # realized_pnl=0 default, since it never had a real entry), AND the
+    # freshly-written call's entry credit on top -- all three composing
+    # rather than conflicting.
+    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
+    expected_realized_pnl = 0.0 + (mtm - roll_cost) + new_call_credit
+    assert float(position.realized_pnl) == pytest.approx(expected_realized_pnl)
+    assert float(leg.pnl) == pytest.approx(_entry_leg_amount(float(leg.premium), leg.lots, cycle_data.lot_size))
+
+
+def test_full_scenario_put_sold_assigned_covered_call_called_away(session):
+    """End-to-end walk through the whole state machine over three cycles --
+    put sold, assigned ITM, covered call written, call called away ITM --
+    running the real `run_cycle` three times in sequence and hand-computing
+    the expected final `position.realized_pnl` independently of the
+    implementation, using the SAME formulas `research/mcx_options/engine.py`
+    uses (see module docstring's "Option premium booking" section):
+
+        realized_pnl = put_entry_credit
+                      - assignment_cost
+                      + call_entry_credit
+                      + (call_strike - basis) * qty
+                      - call_exit_cost
+
+    where `assignment_cost`/`call_exit_cost` are real DEFAULT_COST_MODEL
+    futures-leg costs and the two `*_entry_credit` terms are zero-cost
+    (FREE_COST_MODEL) option premiums -- exactly `picked.ltp * qty` here,
+    since FREE_COST_MODEL charges nothing.
+    """
+    cfg = _config(session)
+    lot_size = 100
+    qty = cfg.lots * lot_size
+
+    # --- Day 1: sell a fresh put -------------------------------------------
+    day1 = TODAY
+    put_expiry = day1 + timedelta(days=10)
+    T1 = (put_expiry - day1).days / 365.25
+    F1 = 6000.0
+    cycle_data_1 = _cycle_data(_consolidating_bars(), F1, _chain(F1, T1), put_expiry, T1, lot_size=lot_size)
+
+    run_cycle(session, cfg, cycle_data_1, day1)
+    session.commit()
+
+    position = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).one()
+    put_leg = session.query(MCXOptionsLeg).filter_by(position_id=position.id).one()
+    assert put_leg.opt_type == "PE"
+    put_strike = float(put_leg.strike)
+    put_premium = float(put_leg.premium)
+    put_entry_credit = _entry_leg_amount(put_premium, put_leg.lots, lot_size)
+    assert float(position.realized_pnl) == pytest.approx(put_entry_credit)
+
+    # --- Day 2: put expiry day, deep ITM -> assigned; covered call written -
+    day2 = put_expiry
+    call_expiry = day2 + timedelta(days=10)
+    T2 = (call_expiry - day2).days / 365.25
+    F2 = put_strike - 200.0  # comfortably ITM against the put
+    chain_2 = _chain(
+        F2, T2,
+        ce_strikes=[put_strike, put_strike + 50, put_strike + 100, put_strike + 150, put_strike + 200],
+    )
+    cycle_data_2 = _cycle_data(_consolidating_bars(), F2, chain_2, call_expiry, T2, lot_size=lot_size)
+
+    run_cycle(session, cfg, cycle_data_2, day2)
+    session.commit()
+    session.refresh(position)
+    session.refresh(put_leg)
+
+    assert put_leg.action == "assigned"
+    assert float(position.basis) == put_strike
+
+    call_leg = (
+        session.query(MCXOptionsLeg)
+        .filter_by(position_id=position.id, settled_at=None)
+        .one()
+    )
+    assert call_leg.opt_type == "CE"
+    call_strike = float(call_leg.strike)
+    call_premium = float(call_leg.premium)
+    call_entry_credit = _entry_leg_amount(call_premium, call_leg.lots, lot_size)
+    assignment_cost = leg_cost(put_strike * qty, "buy", DEFAULT_COST_MODEL)
+
+    expected_after_day2 = put_entry_credit - assignment_cost + call_entry_credit
+    assert float(position.realized_pnl) == pytest.approx(expected_after_day2)
+    assert float(put_leg.pnl) == pytest.approx(put_entry_credit)
+
+    # --- Day 3: call expiry day, deep ITM -> called away, position closes --
+    day3 = call_expiry
+    F3 = call_strike + 200.0  # comfortably ITM against the call
+    cycle_data_3 = _cycle_data(
+        _too_short_bars(), F3, _chain(F3, 1 / 365.25), day3 + timedelta(days=10), 1 / 365.25,
+        lot_size=lot_size,
+    )
+
+    run_cycle(session, cfg, cycle_data_3, day3)
+    session.commit()
+    session.refresh(position)
+    session.refresh(call_leg)
+
+    assert call_leg.action == "called_away"
+    assert position.status == "closed"
+    assert position.state == "closed"
+    assert float(position.unrealized_pnl) == 0.0
+    assert float(call_leg.pnl) == pytest.approx(call_entry_credit)
+
+    exit_mtm = (call_strike - put_strike) * qty  # basis is still the put's assignment strike
+    exit_cost = leg_cost(call_strike * qty, "sell", DEFAULT_COST_MODEL)
+    expected_final = expected_after_day2 + exit_mtm - exit_cost
+
+    assert float(position.realized_pnl) == pytest.approx(expected_final)
+
+    # Fully independent recomputation from scratch, spelled out term by
+    # term, so this number can be checked by hand against the report:
+    #   realized_pnl = put_entry_credit - assignment_cost + call_entry_credit
+    #                  + (call_strike - put_strike) * qty - exit_cost
+    fully_independent = (
+        (put_premium * qty)
+        - leg_cost(put_strike * qty, "buy", DEFAULT_COST_MODEL)
+        + (call_premium * qty)
+        + (call_strike - put_strike) * qty
+        - leg_cost(call_strike * qty, "sell", DEFAULT_COST_MODEL)
+    )
+    assert float(position.realized_pnl) == pytest.approx(fully_independent)

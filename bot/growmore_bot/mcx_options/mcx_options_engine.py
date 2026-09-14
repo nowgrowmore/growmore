@@ -118,6 +118,42 @@ not prevent that settlement (or a fresh entry) from also running: the roll
 is checked and executed FIRST (see `run_cycle`), then the ordinary
 settle/decide logic proceeds using the now-current contract/basis.
 
+**Option premium booking -- credited at entry, never at settlement.** Selling
+an option is a real cash credit the moment it happens, exactly as
+`research/mcx_options/engine.py`'s `add_leg` books it: `credit = premium *
+qty`, `cost = leg_cost(credit, "sell", FREE_COST_MODEL)` (`FREE_COST_MODEL`,
+not `MCX_COMMODITY_OPTION_COST_MODEL` -- see `growmore_bot/costs.py`'s own
+docstring for why the latter raises rather than pretending a plausible rate
+is known), `leg_amount = credit - cost`. `run_cycle`'s "entered" code path
+adds `leg_amount` into `active_position.realized_pnl` immediately, for BOTH
+a fresh `sell_put` and a covered `sell_call` -- before the leg even has a
+chance to settle. This mirrors real trading: the premium is yours whether
+the option later expires worthless, gets assigned, or is called away.
+`MCXOptionsLeg.pnl` is deliberately left `None` at entry -- it represents
+the leg's fully-RESOLVED outcome once settled, not the entry credit; the
+raw `premium` column already shows what an open leg collected (see the
+dashboard's trade-history table, which shows "P&L: --" for an open leg and
+falls back to `premium` elsewhere).
+
+`_settle_leg` recomputes that same `leg_amount` (via `_entry_leg_amount`,
+from `leg.premium`/`leg.lots`, mathematically identical to the entry-time
+value since neither changes) purely to populate `leg.pnl` once the leg
+settles -- informational, NOT a second booking into `realized_pnl`, since
+that already happened at entry. On top of that, two branches book a
+genuinely NEW realized event at settlement, separate from the option
+premium entirely:
+  - `assigned` (PE ITM): the futures BUY-IN at the strike is a real new
+    debit -- `leg_cost(strike * qty, "buy", DEFAULT_COST_MODEL)` (the real,
+    reviewed MCX-futures rate card, same one `_roll_futures_position` uses
+    for the futures leg) -- subtracted from `realized_pnl`.
+  - `called_away` (CE ITM): the futures position's move from `basis` to the
+    call `strike` is crystallized -- `exit_mtm = (strike - basis) * qty`
+    minus `leg_cost(strike * qty, "sell", DEFAULT_COST_MODEL)` -- added to
+    `realized_pnl`. `unrealized_pnl` is still zeroed (the position is
+    closing, so it carries no more unrealized exposure), but the gain is no
+    longer simply discarded the way it was before this accounting was
+    added: it is captured as realized P&L instead.
+
 **No PaperOrder/DhanOrderClient/PaperTradingEngine anywhere.** Like
 wheel_basket, this is a self-contained ledger writing
 `MCXOptionsPosition`/`MCXOptionsLeg`/`MCXOptionsSelection` rows directly.
@@ -133,7 +169,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from growmore_bot.broker.dhan_client import OptionChainSnapshot
-from growmore_bot.costs import DEFAULT_COST_MODEL, leg_cost
+from growmore_bot.costs import DEFAULT_COST_MODEL, FREE_COST_MODEL, leg_cost
 from growmore_bot.mcx_options import regime as regime_module
 from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.regime import Regime
@@ -155,6 +191,25 @@ DEFAULT_SIGMA = 0.20
 RISK_FREE_RATE = 0.0
 
 
+def _entry_leg_amount(premium: float, lots: float, lot_size: int) -> float:
+    """The net premium credit an option leg earned at the moment it was
+    written -- `credit = premium * qty`, `cost = leg_cost(credit, "sell",
+    FREE_COST_MODEL)`, `leg_amount = credit - cost`, exactly matching
+    `research/mcx_options/engine.py`'s `add_leg` formula for `sell_put`/
+    `sell_call` (see that module's docstring). Recomputed here from
+    `leg.premium`/`leg.lots` rather than stored on the leg row at entry time
+    -- mathematically identical, since neither input changes between entry
+    and settlement, and avoids a fourth schema migration for this feature.
+    Used both to book `realized_pnl` at entry and to populate the settled
+    leg's own informational `pnl` column later (see module docstring's
+    "Option premium booking" section).
+    """
+    qty = float(lots) * lot_size
+    credit = premium * qty
+    cost = leg_cost(credit, "sell", FREE_COST_MODEL)
+    return credit - cost
+
+
 def _settle_leg(
     position: MCXOptionsPosition, leg: MCXOptionsLeg, cycle_data: MCXCycleData, now: datetime,
 ) -> None:
@@ -172,6 +227,18 @@ def _settle_leg(
     # option leg (run_cycle never calls it on a roll leg), which always has
     # one, so this narrows the type back down for the comparisons below.
     assert leg.strike is not None, "an option leg being settled must have a strike"
+    # `premium` is nullable for the same reason (a "roll" leg) -- narrows
+    # back down for `_entry_leg_amount` below, same reasoning as `strike`.
+    assert leg.premium is not None, "an option leg being settled must have a premium"
+
+    # The premium this leg earned when it was WRITTEN was already credited
+    # into `position.realized_pnl` at entry time (see run_cycle's "entered"
+    # code path) -- never re-book it here. `leg.pnl` is set to that same
+    # figure purely so the settled leg's own row shows a resolved outcome
+    # instead of staying blank (the dashboard trade-history table renders
+    # `leg.pnl`, not `leg.premium`, once a leg is settled).
+    entry_leg_amount = _entry_leg_amount(float(leg.premium), leg.lots, cycle_data.lot_size)
+    leg.pnl = entry_leg_amount
 
     if leg.opt_type == "PE":
         if F < leg.strike:  # ITM: assigned into a futures position at the strike
@@ -185,6 +252,12 @@ def _settle_leg(
             # (see module docstring); run_cycle compares this against a
             # fresh read of it every cycle to detect when a roll is due.
             position.futures_contract_expiry = cycle_data.instrument_contract_expiry
+            # A SEPARATE, genuinely new realized cost: buying into the
+            # futures position at the strike -- not a duplicate of the
+            # premium credit above (which is the option leg's own income,
+            # already booked at entry and unaffected by assignment).
+            assignment_cost = leg_cost(float(leg.strike) * qty, "buy", DEFAULT_COST_MODEL)
+            position.realized_pnl = float(position.realized_pnl) - assignment_cost
         else:  # OTM: worthless, position closes
             leg.action = "put_expired_otm"
             position.status = "closed"
@@ -198,6 +271,15 @@ def _settle_leg(
             position.state = "closed"
             position.closed_at = now
             position.unrealized_pnl = 0
+            # Crystallize the futures gain from basis to the call strike --
+            # this is what the position's daily M2M would have shown had it
+            # been marked at F=strike, now locked in for good since the
+            # position is closing. A SEPARATE realized event from the call's
+            # own premium credit (already booked at entry, above).
+            if position.basis is not None:
+                exit_mtm = (float(leg.strike) - float(position.basis)) * qty
+                exit_cost = leg_cost(float(leg.strike) * qty, "sell", DEFAULT_COST_MODEL)
+                position.realized_pnl = float(position.realized_pnl) + exit_mtm - exit_cost
         else:  # OTM: keep the futures position, mark it to market
             leg.action = "call_expired_otm"
             if position.basis is not None:
@@ -443,6 +525,18 @@ def run_cycle(
         )
         session.add(active_position)
         session.flush()
+
+    # The premium collected for selling this option is real cash credited
+    # the moment it is sold -- book it into realized_pnl right here, at
+    # entry, not deferred to settlement. See module docstring's "Option
+    # premium booking" section and `_entry_leg_amount`'s docstring for the
+    # formula (matches research/mcx_options/engine.py's `add_leg` exactly).
+    # `leg.pnl` is deliberately left unset here -- it represents the leg's
+    # fully-resolved outcome once SETTLED (see `_settle_leg`), not the
+    # entry credit; the raw `premium` column already shows what an open
+    # leg collected.
+    entry_leg_amount = _entry_leg_amount(picked.ltp, config.lots, cycle_data.lot_size)
+    active_position.realized_pnl = float(active_position.realized_pnl) + entry_leg_amount
 
     action = "sell_call" if opt_type == "CE" else "sell_put"
     session.add(
