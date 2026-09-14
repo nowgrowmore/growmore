@@ -115,6 +115,17 @@ class OptionChainRow:
     iv: Optional[float]
     oi: float
     volume: float
+    #: Best two-sided market at the time of the snapshot, straight from
+    #: Dhan's `top_bid_price`/`top_ask_price` -- None (not 0.0) when Dhan
+    #: doesn't supply them for this row. These exist so callers can verify a
+    #: row's `ltp` is an executable price rather than a stale/phantom one:
+    #: confirmed 2026-09-14 against a real production pick, Dhan's
+    #: `last_price` can sit WAY outside the row's own bid-ask (e.g. a
+    #: SILVERM PE quoting last_price=27409.5 against a real market of
+    #: 38-2044.5, oi=0, volume=0) -- see
+    #: growmore_bot.mcx_options.strike_selection's executability gate.
+    top_bid_price: Optional[float] = None
+    top_ask_price: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +372,8 @@ class DhanClient:
                 if not leg:
                     continue
                 raw_iv = leg.get("implied_volatility")
+                raw_bid = leg.get("top_bid_price")
+                raw_ask = leg.get("top_ask_price")
                 rows.append(
                     OptionChainRow(
                         strike=strike,
@@ -369,6 +382,8 @@ class DhanClient:
                         iv=(float(raw_iv) / 100.0) if raw_iv else None,
                         oi=float(leg.get("oi", 0) or 0),
                         volume=float(leg.get("volume", 0) or 0),
+                        top_bid_price=float(raw_bid) if raw_bid is not None else None,
+                        top_ask_price=float(raw_ask) if raw_ask is not None else None,
                     )
                 )
         return OptionChainSnapshot(spot=float(payload["last_price"]), rows=rows)

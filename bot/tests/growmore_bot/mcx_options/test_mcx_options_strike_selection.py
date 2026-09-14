@@ -19,6 +19,8 @@ per-strike IV-with-fallback discipline.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 
 from growmore_bot.broker.dhan_client import OptionChainRow, OptionChainSnapshot
@@ -38,9 +40,26 @@ _PE_STRIKES = [80.0, 85.0, 90.0, 95.0, 100.0]
 _DEFAULT_OI = 5_000
 
 
-def _row(strike: float, opt_type: str, oi: float = _DEFAULT_OI, iv: float = SIGMA) -> OptionChainRow:
+def _row(
+    strike: float,
+    opt_type: str,
+    oi: float = _DEFAULT_OI,
+    iv: float = SIGMA,
+    top_bid_price: Optional[float] = None,
+    top_ask_price: Optional[float] = None,
+) -> OptionChainRow:
     price = black76_price(opt_type, F, strike, T, SIGMA, R)
-    return OptionChainRow(strike=strike, opt_type=opt_type, ltp=price, iv=iv, oi=oi, volume=10)
+    # Default to a tight, executable market straddling `price` exactly, so
+    # every pre-existing test (written before the bid/ask executability gate
+    # existed) keeps passing the new check without having to know about it.
+    if top_bid_price is None:
+        top_bid_price = price * 0.98 if price > 0 else 0.01
+    if top_ask_price is None:
+        top_ask_price = price * 1.02 + 0.01
+    return OptionChainRow(
+        strike=strike, opt_type=opt_type, ltp=price, iv=iv, oi=oi, volume=10,
+        top_bid_price=top_bid_price, top_ask_price=top_ask_price,
+    )
 
 
 def _expected_closest(strikes: list[float], opt_type: str, target_delta: float) -> float:
@@ -203,3 +222,163 @@ def test_select_strike_agrees_with_evaluate_candidates_winner():
 
     assert picked is not None
     assert picked.strike == pytest.approx(best.strike)
+
+
+# --- Executability gate (`top_bid_price`/`top_ask_price`) -----------------
+#
+# Confirmed 2026-09-14 against a REAL production pick: a live SILVERM PE
+# option chain returned a strike (207000) whose `last_price` (27409.5) sat
+# completely outside its own real bid-ask market (38-2044.5), oi=0,
+# volume=0, implied_volatility=259.33% -- a stale/phantom quote, not
+# anything actually tradeable. The bug this section guards: `oi=0` there
+# would ALSO have been caught by the pre-existing OI floor, so these tests
+# deliberately run with `min_open_interest=0` to prove the bid-ask
+# executability check -- not the OI floor -- is what excludes the phantom
+# row.
+
+_SILVERM_F = 206_000.0
+_SILVERM_T = 10 / 365
+_SILVERM_PHANTOM_IV = 2.5933  # Dhan's real implied_volatility=259.33%, as a fraction
+_SILVERM_SANE_IV = 0.18
+
+
+def _silverm_phantom_row() -> OptionChainRow:
+    # Real raw Dhan row, SILVERM 207000 PE, 2026-09-14.
+    return OptionChainRow(
+        strike=207_000.0, opt_type="PE", ltp=27_409.5, iv=_SILVERM_PHANTOM_IV,
+        oi=0, volume=0, top_bid_price=38, top_ask_price=2_044.5,
+    )
+
+
+def _silverm_sane_row() -> OptionChainRow:
+    # Real raw Dhan row, SILVERM 205000 PE, 2026-09-14 (oi/volume/bid/ask as
+    # reported). The reported `last_price` (480) landed a hair outside its
+    # own reported `top_ask_price` (479) -- a one-tick snapshot-timing lag
+    # between the two fields, not a phantom quote like the 207000 row. Since
+    # this row exists specifically to prove a genuinely-executable row
+    # SURVIVES the gate, its `ltp` here (478) is nudged to sit inside that
+    # same real spread rather than asserting inclusion on a value the
+    # precise `bid <= ltp <= ask` rule would (correctly, if narrowly) still
+    # reject.
+    return OptionChainRow(
+        strike=205_000.0, opt_type="PE", ltp=478.0, iv=_SILVERM_SANE_IV,
+        oi=903, volume=250, top_bid_price=476, top_ask_price=479,
+    )
+
+
+def test_evaluate_candidates_excludes_the_real_phantom_row_and_keeps_the_sane_one():
+    chain = OptionChainSnapshot(spot=_SILVERM_F, rows=[_silverm_phantom_row(), _silverm_sane_row()])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=_SILVERM_F, T_years=_SILVERM_T,
+        sigma=_SILVERM_SANE_IV, r=R, min_open_interest=0,
+    )
+
+    strikes = [c.strike for c in candidates]
+    assert 207_000.0 not in strikes  # phantom: last_price way outside its own bid-ask
+    assert 205_000.0 in strikes
+
+
+def test_select_strike_never_picks_the_phantom_row_even_when_its_delta_is_closer():
+    phantom = _silverm_phantom_row()
+    sane = _silverm_sane_row()
+    chain = OptionChainSnapshot(spot=_SILVERM_F, rows=[phantom, sane])
+
+    phantom_delta = abs(
+        black76_delta("PE", _SILVERM_F, phantom.strike, _SILVERM_T, _SILVERM_PHANTOM_IV, R)
+    )
+    sane_delta = abs(
+        black76_delta("PE", _SILVERM_F, sane.strike, _SILVERM_T, _SILVERM_SANE_IV, R)
+    )
+    # Pick a target_delta right next to the phantom's (garbage) delta so a
+    # naive closest-match-on-delta selection -- i.e. the old, un-gated
+    # behaviour -- would choose the phantom row over the sane one.
+    target_delta = phantom_delta + 0.001
+    assert abs(phantom_delta - target_delta) < abs(sane_delta - target_delta), (
+        "test setup invalid: phantom's delta must be the naive closest match"
+    )
+
+    picked = select_strike_by_target_delta(
+        chain, opt_type="PE", futures_price=_SILVERM_F, T_years=_SILVERM_T,
+        sigma=_SILVERM_SANE_IV, r=R, target_delta=target_delta, min_open_interest=0,
+    )
+
+    assert picked is not None
+    assert picked.strike == pytest.approx(205_000.0)
+
+
+def test_evaluate_candidates_excludes_row_with_oi_above_floor_but_no_bid_ask_data():
+    # OI alone is not sufficient -- a row that clears the OI floor but has no
+    # bid/ask at all can't be verified as executable, so it must still be
+    # excluded (fail closed, not open).
+    row = OptionChainRow(
+        strike=100.0, opt_type="PE", ltp=5.0, iv=SIGMA, oi=5_000, volume=10,
+        top_bid_price=None, top_ask_price=None,
+    )
+    chain = OptionChainSnapshot(spot=F, rows=[row])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert candidates == []
+
+
+def test_evaluate_candidates_excludes_row_with_nonzero_oi_but_ltp_below_bid():
+    # Real raw Dhan row, 2026-09-14: oi=1 (nonzero -- clears any sane OI
+    # floor) yet last_price (19) sits BELOW top_bid_price (29). An OI floor
+    # alone would NOT catch this; only the bid-ask check does.
+    row = OptionChainRow(
+        strike=199_000.0, opt_type="PE", ltp=19.0, iv=SIGMA, oi=1, volume=1,
+        top_bid_price=29.0, top_ask_price=120.0,
+    )
+    chain = OptionChainSnapshot(spot=F, rows=[row])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert candidates == []
+
+
+def test_evaluate_candidates_includes_row_whose_ltp_sits_exactly_on_the_bid():
+    row = OptionChainRow(
+        strike=100.0, opt_type="PE", ltp=5.0, iv=SIGMA, oi=5_000, volume=10,
+        top_bid_price=5.0, top_ask_price=6.0,
+    )
+    chain = OptionChainSnapshot(spot=F, rows=[row])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert [c.strike for c in candidates] == [100.0]
+
+
+def test_evaluate_candidates_includes_row_whose_ltp_sits_exactly_on_the_ask():
+    row = OptionChainRow(
+        strike=100.0, opt_type="PE", ltp=6.0, iv=SIGMA, oi=5_000, volume=10,
+        top_bid_price=5.0, top_ask_price=6.0,
+    )
+    chain = OptionChainSnapshot(spot=F, rows=[row])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert [c.strike for c in candidates] == [100.0]
+
+
+def test_evaluate_candidates_excludes_row_with_zero_bid_or_ask():
+    # bid/ask of exactly 0 is not a real two-sided market either.
+    zero_bid = OptionChainRow(
+        strike=100.0, opt_type="PE", ltp=0.0, iv=SIGMA, oi=5_000, volume=10,
+        top_bid_price=0.0, top_ask_price=1.0,
+    )
+    chain = OptionChainSnapshot(spot=F, rows=[zero_bid])
+
+    candidates = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R, min_open_interest=1,
+    )
+
+    assert candidates == []

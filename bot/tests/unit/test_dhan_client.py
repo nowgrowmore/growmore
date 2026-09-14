@@ -346,6 +346,80 @@ def test_get_option_chain_treats_a_missing_iv_as_unavailable_not_zero():
 
 
 @responses.activate
+def test_get_option_chain_parses_top_bid_and_ask_prices():
+    # Real (confirmed 2026-09-14) raw Dhan option-chain rows for SILVERM
+    # 207000 PE and GOLDM 149000 PE -- the phantom-`last_price` production
+    # bug that motivated adding these fields at all. Parsing top_bid_price/
+    # top_ask_price is what lets strike_selection later reject the phantom
+    # row (last_price 27409.5, miles outside its own 38-2044.5 market).
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain",
+        json={
+            "status": "success",
+            "data": {
+                "last_price": 61234.0,
+                "oc": {
+                    "207000.000000": {
+                        "pe": {
+                            "last_price": 27409.5, "oi": 0, "volume": 0,
+                            "top_bid_price": 38, "top_ask_price": 2044.5,
+                            "implied_volatility": 259.33,
+                        },
+                    },
+                    "149000.000000": {
+                        "pe": {
+                            "last_price": 2078.5, "oi": 888, "volume": 4197,
+                            "top_bid_price": 2083, "top_ask_price": 2093,
+                            "implied_volatility": 18.5,
+                        },
+                    },
+                },
+            },
+        },
+        status=200,
+    )
+    client = _make_client()
+    from types import SimpleNamespace
+    instrument = SimpleNamespace(exchange_segment="MCX_COMM", security_id="999999")
+    chain = client.get_option_chain(instrument, expiry="2026-09-24")
+
+    phantom = next(r for r in chain.rows if r.strike == 207000.0)
+    assert phantom.top_bid_price == pytest.approx(38)
+    assert phantom.top_ask_price == pytest.approx(2044.5)
+
+    sane = next(r for r in chain.rows if r.strike == 149000.0)
+    assert sane.top_bid_price == pytest.approx(2083)
+    assert sane.top_ask_price == pytest.approx(2093)
+
+
+@responses.activate
+def test_get_option_chain_treats_missing_bid_ask_as_none_not_zero():
+    responses.add(
+        responses.POST,
+        f"{API_BASE}/optionchain",
+        json={
+            "status": "success",
+            "data": {
+                "last_price": 100.0,
+                "oc": {
+                    "100.000000": {
+                        "ce": {"last_price": 3.0, "oi": 10, "volume": 5},
+                    },
+                },
+            },
+        },
+        status=200,
+    )
+    client = _make_client()
+    from types import SimpleNamespace
+    instrument = SimpleNamespace(exchange_segment="MCX_COMM", security_id="999999")
+    chain = client.get_option_chain(instrument, expiry="2026-09-24")
+    assert chain.rows[0].top_bid_price is None
+    assert chain.rows[0].top_ask_price is None
+
+
+@responses.activate
 def test_get_option_chain_raises_on_api_failure_status(instrument):
     responses.add(
         responses.POST,

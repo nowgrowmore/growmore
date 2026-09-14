@@ -92,7 +92,16 @@ def _too_short_bars(n: int = 5) -> tuple[Bar, ...]:
 
 def _chain_row(strike: float, opt_type: str, F: float, T: float, oi: float = 5000.0) -> OptionChainRow:
     price = black76_price(opt_type, F, strike, T, SIGMA, R)
-    return OptionChainRow(strike=strike, opt_type=opt_type, ltp=price, iv=SIGMA, oi=oi, volume=10)
+    # A tight, executable market straddling the theoretical price -- these
+    # fixtures pre-date the bid/ask executability gate in strike_selection
+    # and just need to clear it, not exercise it (see
+    # test_mcx_options_strike_selection.py for that).
+    bid = price * 0.98 if price > 0 else 0.01
+    ask = price * 1.02 + 0.01
+    return OptionChainRow(
+        strike=strike, opt_type=opt_type, ltp=price, iv=SIGMA, oi=oi, volume=10,
+        top_bid_price=bid, top_ask_price=ask,
+    )
 
 
 def _chain(F: float, T: float, *, pe_strikes=None, ce_strikes=None, oi: float = 5000.0) -> OptionChainSnapshot:
