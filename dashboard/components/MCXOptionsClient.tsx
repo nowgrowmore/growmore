@@ -410,7 +410,15 @@ export function MCXOptionsClient({
                                   : "Open"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {leg.pnl ? formatCurrency(toNumber(leg.pnl), { signDisplay: true }) : "—"}
+                            {leg.settled_at === null ? (
+                              <span className="text-xs italic text-[color:var(--text-muted)]">
+                                open — premium already in Realized P&amp;L
+                              </span>
+                            ) : leg.pnl !== null ? (
+                              formatCurrency(toNumber(leg.pnl), { signDisplay: true })
+                            ) : (
+                              "—"
+                            )}
                           </td>
                         </tr>
                       ))}

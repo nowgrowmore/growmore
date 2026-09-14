@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MCXOptionsClient } from "./MCXOptionsClient";
 import type {
   MCXOptionsConfig,
@@ -250,6 +250,64 @@ describe("MCXOptionsClient", () => {
     );
     expect(screen.getByText("sell put")).toBeInTheDocument();
     expect(screen.getByText("Assigned")).toBeInTheDocument();
+  });
+
+  it("clarifies an open leg's P&L instead of a bare dash, and shows a settled zero P&L", () => {
+    // Regression: the top-level Realized P&L card credits an option's
+    // premium the moment it's sold, but the leg itself only gets a `pnl`
+    // once it settles -- so an open leg's P&L cell showing a bare "--" next
+    // to a nonzero Realized P&L card looked like a contradiction (reported
+    // directly against real GOLDM data: Realized P&L +21,065.00, but the
+    // still-open leg's row showed "--"). Also covers the sibling bug where
+    // `leg.pnl ? ... : "--"` would wrongly show "--" for an exactly-zero
+    // settled P&L, since 0 is falsy.
+    const openLeg: MCXOptionsLeg = {
+      id: "leg-open",
+      position_id: "pos-1",
+      cycle_expiry: "2026-09-25",
+      opt_type: "PE",
+      strike: "149000",
+      premium: "2106.50",
+      lots: "1",
+      action: "sell_put",
+      opened_at: "2026-09-14T00:00:00Z",
+      settled_at: null,
+      assigned: false,
+      called_away: false,
+      pnl: null,
+    };
+    const settledZeroLeg: MCXOptionsLeg = {
+      id: "leg-zero",
+      position_id: "pos-1",
+      cycle_expiry: "2026-08-24",
+      opt_type: "PE",
+      strike: "140000",
+      premium: "1500",
+      lots: "1",
+      action: "sell_put",
+      opened_at: "2026-07-27T00:00:00Z",
+      settled_at: "2026-08-24T00:00:00Z",
+      assigned: false,
+      called_away: false,
+      pnl: "0",
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{ "config-1": [openLeg, settledZeroLeg] }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/open — premium already in Realized P&L/)).toBeInTheDocument();
+    // The settled zero-P&L leg's row must show a real "₹0.00", not a bare
+    // "--" (the old `leg.pnl ? ... : "--"` treated 0 as falsy) -- there are
+    // other legitimate ₹0.00s on the page (e.g. the Unrealized P&L card), so
+    // scope the check to this leg's own table row.
+    const zeroRow = screen.getByText("Expired OTM").closest("tr");
+    expect(zeroRow).not.toBeNull();
+    expect(within(zeroRow as HTMLElement).getByText("₹0.00")).toBeInTheDocument();
   });
 
   it("hides low-OI candidates and caps the evaluated list at the 10 closest to target delta", () => {
