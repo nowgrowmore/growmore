@@ -2,24 +2,49 @@
 
     python -m research.mcx_options.fetch [--from 2026-01-01] [--to ...]
     python -m research.mcx_options.fetch --consolidate
+    python -m research.mcx_options.fetch --probe --date 2026-09-04
 
-**THIS PHASE DOES NOT SCRAPE THE LIVE SITE, AND `pytest` MUST NEVER MAKE A
-REAL NETWORK CALL THROUGH THIS MODULE.** Unlike NSE (`research/stock_options/fetch.py`),
-which downloads a fixed-URL zip per day, MCX has no static-URL daily bhavcopy
-archive. Its public bhavcopy page (https://www.mcxindia.com/market-data/bhavcopy,
-as of the research behind this module) is an ASP.NET Web Forms UI: getting a
-day's CSV out of it means an initial GET to collect `__VIEWSTATE` /
-`__EVENTVALIDATION` hidden fields, then a POST that replays them alongside the
-requested date and any postback target -- classic ASP.NET scrape mechanics,
-not a documented API.
+**`pytest` MUST NEVER MAKE A REAL NETWORK CALL THROUGH THIS MODULE.**
+Everything in this module is designed around one seam: a caller-supplied
+`fetcher(day) -> Optional[list[dict]]` that returns one day's raw MCX
+bhavcopy records (or None if MCX has nothing for that day), so the
+day-by-day loop, caching, and parsing can all be exercised with a canned
+fake in unit tests. `fetch_day`/`fetch_and_cache_day` only reach the network
+through `_fetch_live_json` below, and only when no `fetcher` is injected.
 
-`_scrape_live_site` below sketches that flow so the shape exists for later,
-but it is UNVERIFIED -- NEEDS TESTING AGAINST THE LIVE SITE -- and this phase
-deliberately does not wire it up as the default fetcher or call it from any
-test. Everything in this module is designed around one seam instead: a
-caller-supplied `fetcher(day) -> Optional[str]` that returns raw bhavcopy CSV
-text (or None if MCX has nothing for that day), so the day-by-day loop,
-caching, and parsing can all be exercised with a canned fake in unit tests.
+**How the real fetch works.** MCX's public bhavcopy page
+(https://www.mcxindia.com/market-data/bhavcopy) is NOT a static-URL archive
+like NSE's -- but it is also not the scrape-only ASP.NET-viewstate form this
+module originally assumed. Inspecting the third-party `mcxlib` PyPI
+package's source (since the site itself returns HTTP 403 -- an Akamai edge
+block -- to every request attempted *from this development environment*,
+confirmed via plain `curl`, a cookie-establishing session, and a real
+headless-Chromium Playwright browser, all blocked identically, while the
+account owner confirmed the exact same URL loads fine in their own Brave
+browser) shows the real mechanism is a same-origin JSON POST against an
+ASP.NET PageMethod:
+
+    POST https://www.mcxindia.com/backpage.aspx/GetDateWiseBhavCopy
+    Content-Type: application/json
+    X-Requested-With: XMLHttpRequest
+    body: {"Date": "YYYYMMDD", "InstrumentName": "OPTFUT"}
+    -> {"d": {"Data": [ {...one dict per row...}, ... ]}}
+
+`_fetch_live_json` below implements exactly this (verified against
+`mcxlib`'s published source, not against a live response -- see next
+paragraph). This is a considerably stronger starting point than the
+original viewstate-replay guess: there's no `__VIEWSTATE`/postback dance to
+get right, just one POST. What's still unverified is the *shape of each row
+dict* in the response (field names) -- see `bhavcopy.py`'s
+`_FIELD_ALIASES` and `parse_bhavcopy_json`'s loud-failure-on-first-row
+diagnostic for how that gets caught and fixed quickly once someone with a
+working network path (i.e. NOT this environment -- run this from the
+account owner's own machine/network, where mcxindia.com is reachable) sees
+a real response.
+
+Use `--probe` to fetch and print ONE real day's raw JSON without touching
+the cache, specifically to confirm/fix the field-name mapping on a machine
+that can actually reach MCX.
 
 Resumable like the NSE fetcher: a day already cached (even an empty one, for
 a day MCX genuinely had nothing) is skipped on a later run.
@@ -27,91 +52,87 @@ a day MCX genuinely had nothing) is skipped on a later run.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date, timedelta
 from typing import Callable, Optional, Sequence
 
 from research.mcx_options import chain_cache
-from research.mcx_options.bhavcopy import parse_bhavcopy
+from research.mcx_options.bhavcopy import parse_bhavcopy_json
 
-#: A fetcher takes the trading day and returns raw bhavcopy CSV text, or None
-#: if MCX has nothing for that day (holiday, or not yet published).
-Fetcher = Callable[[date], Optional[str]]
+#: A fetcher takes the trading day and returns one day's raw MCX bhavcopy
+#: records (a list of dicts, straight out of the JSON response's
+#: `d.Data`), or None if MCX has nothing for that day.
+Fetcher = Callable[[date], Optional[list]]
 
-#: UNVERIFIED - needs testing against the live site. Reconstructed from
-#: public documentation of MCX's bhavcopy page structure, not confirmed by
-#: actually driving it. Do not point real traffic at this without checking
-#: the current page's field names first -- ASP.NET Web Forms postback field
-#: names and the report's own query-string parameters are exactly the kind
-#: of thing that silently changes between site revisions.
-MCX_BHAVCOPY_URL = "https://www.mcxindia.com/market-data/bhavcopy"
+#: Verified against `mcxlib`'s published source (see module docstring) --
+#: NOT verified against a live response, since this environment cannot
+#: reach mcxindia.com (Akamai edge block, confirmed site-wide: even
+#: `robots.txt` 403s here, while the same URLs load fine in the account
+#: owner's own browser -- this looks like a block on this environment's
+#: specific outbound network path, not a bot-detection or IP-reputation
+#: issue that better headers/a real browser can route around; both were
+#: tried and both still 403).
+MCX_BHAVCOPY_URL = "https://www.mcxindia.com/backpage.aspx/GetDateWiseBhavCopy"
+
+_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://www.mcxindia.com",
+    "Referer": "https://www.mcxindia.com/market-data/bhavcopy",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    ),
+}
 
 
-def _scrape_live_site(day: date) -> Optional[str]:
-    """Best-effort real fetcher -- UNVERIFIED, NEEDS TESTING AGAINST THE LIVE
-    SITE. Not used as the default fetcher and not exercised by any test in
-    this repo; `fetch_day`/`fetch_and_cache_day` always take an explicit
-    `fetcher` in tests instead.
+def _fetch_live_json(day: date, instrument: str = "OPTFUT") -> Optional[list]:
+    """Real fetcher -- POSTs to `MCX_BHAVCOPY_URL`, see module docstring for
+    exactly what's verified (the endpoint/request shape, via `mcxlib`) versus
+    still unverified (the response row schema, since no real response has
+    been seen from this environment). Not used by any test in this repo;
+    `fetch_day`/`fetch_and_cache_day` always take an explicit `fetcher` in
+    tests instead.
 
-    The general shape a scrape-only ASP.NET report page needs:
-      1. GET the report page to pick up `__VIEWSTATE`, `__VIEWSTATEGENERATOR`,
-         and `__EVENTVALIDATION` hidden-field values, which the server
-         validates on the following POST.
-      2. POST back to the same URL with those fields replayed verbatim,
-         plus the requested date and whatever the page's actual form-field
-         names for "date" and "submit" turn out to be (placeholders below).
-      3. The response is either the CSV directly, or another HTML page with
-         a download link/button that needs a second request -- unconfirmed
-         which, without having driven the real page.
+    Returns None (treated as "nothing for this day", e.g. a holiday) on any
+    HTTP failure or an empty/missing `Data` list -- never raises for that
+    case. Does raise if the response's *rows* don't match the expected
+    field names (via `parse_bhavcopy_json`, called by `fetch_day`), since
+    that's a real problem worth surfacing immediately, not a benign holiday.
     """
     import requests  # local import: never needed unless this path is taken
 
     session = requests.Session()
-    get_resp = session.get(MCX_BHAVCOPY_URL, timeout=30)
-    get_resp.raise_for_status()
-    # TODO_VERIFY: real field names/regex for extracting these from the HTML.
-    viewstate = _extract_hidden_field(get_resp.text, "__VIEWSTATE")
-    event_validation = _extract_hidden_field(get_resp.text, "__EVENTVALIDATION")
-
-    post_resp = session.post(
-        MCX_BHAVCOPY_URL,
-        data={
-            "__VIEWSTATE": viewstate,
-            "__EVENTVALIDATION": event_validation,
-            # TODO_VERIFY: the real form field name(s) for the requested
-            # date and the submit/download trigger.
-            "ctl00$ContentPlaceHolder1$txtDate": day.strftime("%d/%m/%Y"),
-            "ctl00$ContentPlaceHolder1$btnSubmit": "Submit",
-        },
-        timeout=30,
-    )
-    if post_resp.status_code != 200 or not post_resp.text:
+    session.trust_env = False
+    payload = json.dumps({"Date": day.strftime("%Y%m%d"), "InstrumentName": instrument})
+    try:
+        resp = session.post(MCX_BHAVCOPY_URL, headers=_HEADERS, data=payload, timeout=30)
+    except requests.RequestException:
         return None
-    return post_resp.text
-
-
-def _extract_hidden_field(html: str, field_name: str) -> str:
-    """UNVERIFIED - needs testing against the live site's real markup."""
-    import re
-
-    match = re.search(
-        rf'id="{field_name}"[^>]*value="([^"]*)"', html
-    )
-    return match.group(1) if match else ""
+    if not resp.ok:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    rows = (body or {}).get("d", {}).get("Data")
+    return rows or None
 
 
 def fetch_day(day: date, fetcher: Optional[Fetcher] = None) -> list:
-    """One day's MCX option rows, via `fetcher` (default: the real,
-    UNVERIFIED live-site scraper).
+    """One day's MCX option rows, via `fetcher` (default: the real fetcher,
+    `_fetch_live_json` -- see module docstring on what's verified there).
 
     Never call this in a test without passing an injected `fetcher` -- the
     default hits the network.
     """
-    fetch_fn = fetcher if fetcher is not None else _scrape_live_site
-    csv_text = fetch_fn(day)
-    if csv_text is None:
+    fetch_fn = fetcher if fetcher is not None else _fetch_live_json
+    records = fetch_fn(day)
+    if not records:
         return []
-    return parse_bhavcopy(csv_text, trade_date=day)
+    return parse_bhavcopy_json(records, trade_date=day)
 
 
 def fetch_and_cache_day(day: date, fetcher: Optional[Fetcher] = None) -> int:
@@ -134,7 +155,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--consolidate", action="store_true",
         help="Rewrite cached days as one parquet per underlying, then exit.",
     )
+    parser.add_argument(
+        "--probe", action="store_true",
+        help=(
+            "Fetch ONE real day (see --date) and print the raw JSON response "
+            "verbatim, without touching the cache or parsing it. Run this "
+            "from a machine that can actually reach mcxindia.com to confirm "
+            "(and if needed, fix) the field-name guesses in "
+            "research/mcx_options/bhavcopy.py's _FIELD_ALIASES."
+        ),
+    )
+    parser.add_argument(
+        "--date", dest="probe_date", default=date.today().isoformat(),
+        help="Day to fetch for --probe (YYYY-MM-DD, default: today).",
+    )
     args = parser.parse_args(argv)
+
+    if args.probe:
+        day = date.fromisoformat(args.probe_date)
+        records = _fetch_live_json(day)
+        if not records:
+            print(f"no data returned for {day} (holiday, not yet published, "
+                  "or the request failed -- rerun with a recent weekday)",
+                  file=sys.stderr)
+            return 1
+        print(json.dumps(records[:3], indent=2))
+        print(f"\n... ({len(records)} rows total; showing first 3). "
+              "If bhavcopy.py's parse_bhavcopy_json raises on this data, "
+              "the error message names the exact keys seen above -- update "
+              "_FIELD_ALIASES to match.", file=sys.stderr)
+        return 0
 
     if args.consolidate:
         print(f"consolidating {len(chain_cache.cached_days())} days -> per-symbol ...",
@@ -145,17 +195,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if not args.from_date:
-        parser.error("--from is required unless --consolidate is given")
+        parser.error("--from is required unless --consolidate or --probe is given")
 
     from_date = date.fromisoformat(args.from_date)
     to_date = date.fromisoformat(args.to_date)
-
-    print(
-        "NOTE: the live-site fetcher in this module is UNVERIFIED -- see the "
-        "module docstring. This will likely fail until it has been tested "
-        "and fixed against the real MCX bhavcopy page.",
-        file=sys.stderr,
-    )
 
     day = from_date
     fetched = skipped = 0
