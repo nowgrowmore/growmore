@@ -58,17 +58,65 @@ ledger. This is called out explicitly rather than silently doing nothing
 `wheel_basket_engine.py` at all -- this at least keeps `unrealized_pnl`
 live).
 
-**TODO -- futures contract rollover is NOT implemented.** If
-`futures_contract_expiry` ever needs rolling (the assigned futures contract's
-own expiry arriving before the covered-call cycle resolves), this engine
-does nothing: it never sets `futures_contract_expiry` on assignment (left
-`None`), and there is no logic here to detect or execute a roll. This is the
-single deepest/most complex piece of the offline backtest's state machine
-(see research/mcx_options/engine.py's module docstring on rollover cost
-placeholders) and was deliberately cut last, per the phase-2 build's
-explicit scope-cutting instruction. Before this strategy is trusted to hold
-a `long_futures` position across a contract-month boundary, this MUST be
-built and tested -- see docs/technical-debt.md.
+**Futures contract rollover -- implemented by reusing the existing
+Instrument-level rollover mechanism, not by re-deriving next-contract logic
+here.** `growmore_bot.scheduler.contract_rollover.roll_to_next_contract`
+already keeps `Instrument.contract_expiry` current (called earlier in the
+same tick, gated by `is_past_close_out_cutoff` -- see `run.py`). On
+assignment, `_settle_leg`'s PE-ITM branch now records the CURRENT front-month
+contract on `MCXOptionsPosition.futures_contract_expiry` (from
+`cycle_data.instrument_contract_expiry`, populated by `live_data.
+fetch_cycle_data` straight off `Instrument.contract_expiry`). Every cycle a
+`long_futures` position is held, `run_cycle` compares that stored value
+against `cycle_data.instrument_contract_expiry` (the FRESH read this cycle):
+a mismatch means the Instrument's own contract has already rolled out from
+under this position, and `_roll_futures_position` executes the position's
+own roll --
+
+  1. Mark-to-market the OLD exposure: `mtm = (F - old_basis) * futures_qty`
+     (the same formula `_mark_to_market` uses), where `F` is today's futures
+     price (already the NEW contract's price, since the Instrument's
+     `security_id` was already rolled this tick -- there is no old-contract
+     quote left to mark against, which is also why this matches
+     `research/mcx_options/engine.py`'s own "close and reopen at the same
+     price" framing: F stands in for both the old contract's exit print and
+     the new contract's entry print).
+  2. Charge a round-trip futures leg cost on that notional
+     (`growmore_bot.costs.leg_cost`, `DEFAULT_COST_MODEL` -- the real,
+     reviewed MCX-futures rate card, same model
+     `research/mcx_options/engine.py` defaults `futures_cost_model` to) plus
+     the flat `config.futures_roll_cost_per_lot` placeholder.
+  3. **Basis semantics (this is the crux of correctness here).**
+     `position.basis` is not a per-day mark -- it is the reference price
+     `unrealized_pnl` is computed fresh against every cycle
+     (`(F - basis) * qty`, see `_mark_to_market`). If a roll simply reset
+     `basis = F` without first crystallizing `mtm` above, the entire
+     price move accrued since assignment/last roll would silently vanish
+     from every future P&L reading -- neither realized nor unrealized would
+     ever reflect it again. So `mtm` is added to `position.realized_pnl`
+     (crystallizing it -- the roll is the event that locks it in, exactly
+     as `research/mcx_options/engine.py`'s own roll adds `mtm - roll_cost`
+     into its running `total_pnl`, since that offline model has no separate
+     realized/unrealized split at all), the roll cost is subtracted from
+     `realized_pnl` too, and ONLY THEN is `basis` reset to `F`. This keeps
+     total P&L (realized + unrealized) conserved across the roll, net of
+     the actual transaction cost paid -- no gain is created or destroyed by
+     the roll itself, only cost. `position.futures_contract_expiry` is then
+     advanced to `cycle_data.instrument_contract_expiry`.
+  4. A `MCXOptionsLeg` row records the event: `opt_type="ROLL"`,
+     `strike`/`premium` both `None` (a roll is not an option leg -- see
+     migration 0023, which is what made these columns nullable),
+     `action="roll"`, `cycle_expiry` = the NEW contract's expiry (a
+     documented repurposing of that column -- see the model's own
+     docstring), and `pnl` = the roll cost alone (negated) -- the leg
+     row's `pnl` is the TRANSACTION COST booked, not the mtm gain/loss
+     (which lands in `position.realized_pnl` as described above, not on
+     this leg row).
+
+A roll happening on the same cycle as a leg's own due-today settlement does
+not prevent that settlement (or a fresh entry) from also running: the roll
+is checked and executed FIRST (see `run_cycle`), then the ordinary
+settle/decide logic proceeds using the now-current contract/basis.
 
 **No PaperOrder/DhanOrderClient/PaperTradingEngine anywhere.** Like
 wheel_basket, this is a self-contained ledger writing
@@ -85,6 +133,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from growmore_bot.broker.dhan_client import OptionChainSnapshot
+from growmore_bot.costs import DEFAULT_COST_MODEL, leg_cost
 from growmore_bot.mcx_options import regime as regime_module
 from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.regime import Regime
@@ -115,6 +164,12 @@ def _settle_leg(
     qty = float(leg.lots) * cycle_data.lot_size
     leg.settled_at = now
 
+    # `strike` is nullable at the schema level only to accommodate a "roll"
+    # leg (migration 0023) -- this function only ever settles a genuine PE/CE
+    # option leg (run_cycle never calls it on a roll leg), which always has
+    # one, so this narrows the type back down for the comparisons below.
+    assert leg.strike is not None, "an option leg being settled must have a strike"
+
     if leg.opt_type == "PE":
         if F < leg.strike:  # ITM: assigned into a futures position at the strike
             leg.action = "assigned"
@@ -122,9 +177,11 @@ def _settle_leg(
             position.state = "long_futures"
             position.basis = leg.strike
             position.futures_qty = qty
-            # TODO(mcx-options-futures-rollover): futures_contract_expiry is
-            # deliberately left unset here -- see module docstring. Real
-            # contract-month bookkeeping is not implemented yet.
+            # The CURRENT front-month contract as of assignment day -- kept
+            # fresh going forward by the Instrument-level rollover mechanism
+            # (see module docstring); run_cycle compares this against a
+            # fresh read of it every cycle to detect when a roll is due.
+            position.futures_contract_expiry = cycle_data.instrument_contract_expiry
         else:  # OTM: worthless, position closes
             leg.action = "put_expired_otm"
             position.status = "closed"
@@ -151,6 +208,58 @@ def _mark_to_market(position: MCXOptionsPosition, cycle_data: MCXCycleData) -> N
         position.unrealized_pnl = (
             (cycle_data.futures_price - float(position.basis)) * float(position.futures_qty)
         )
+
+
+def _roll_futures_position(
+    session: Any, config: Any, position: MCXOptionsPosition, cycle_data: MCXCycleData, now: datetime,
+) -> None:
+    """Executes a mid-cycle futures contract roll for `position` -- called
+    when `run_cycle` detects `position.futures_contract_expiry` has fallen
+    behind `cycle_data.instrument_contract_expiry` (the Instrument-level
+    rollover mechanism has already advanced the underlying contract). See
+    the module docstring's "Futures contract rollover" section for the full
+    reasoning behind the basis/cost semantics used here.
+    """
+    F = cycle_data.futures_price
+    qty = float(position.futures_qty)
+    old_basis = float(position.basis) if position.basis is not None else F
+
+    # 1. Crystallize the exposure accrued against the OLD basis -- this is
+    # exactly `_mark_to_market`'s formula, but booked into `realized_pnl`
+    # (not `unrealized_pnl`) because resetting `basis` below would otherwise
+    # silently erase it from every future P&L reading.
+    mtm = (F - old_basis) * qty
+
+    # 2. Round-trip futures leg cost on the roll notional, plus the flat
+    # per-lot placeholder -- a REALIZED transaction cost, unlike the mtm
+    # above which is just relabeled from unrealized to realized.
+    notional = abs(F * qty)
+    roll_cost = (
+        leg_cost(notional, "sell", DEFAULT_COST_MODEL)
+        + leg_cost(notional, "buy", DEFAULT_COST_MODEL)
+        + float(config.futures_roll_cost_per_lot) * float(config.lots)
+    )
+
+    position.realized_pnl = float(position.realized_pnl) + mtm - roll_cost
+
+    # 3. Reopen at today's price -- the roll itself has no price effect
+    # (see module docstring). unrealized_pnl is recomputed fresh next mark;
+    # setting it to 0 here keeps it consistent with the new basis in the
+    # meantime (F - new_basis == 0).
+    new_expiry = cycle_data.instrument_contract_expiry
+    assert new_expiry is not None  # guarded by the caller before invoking this
+    position.basis = F
+    position.futures_contract_expiry = new_expiry
+    position.unrealized_pnl = 0.0
+
+    lots = qty / cycle_data.lot_size if cycle_data.lot_size else 0.0
+    session.add(
+        MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=new_expiry,
+            opt_type="ROLL", strike=None, premium=None, lots=lots, action="roll",
+            opened_at=now, settled_at=now, pnl=-roll_cost,
+        )
+    )
 
 
 def _floor_chain_for_covered_call(
@@ -182,6 +291,20 @@ def run_cycle(
     position: Optional[MCXOptionsPosition] = (
         session.query(MCXOptionsPosition).filter_by(config_id=config.id, status="open").first()
     )
+
+    # Roll a held futures position FIRST, before any settle/entry decision --
+    # see module docstring. A mismatch means the Instrument-level rollover
+    # mechanism (contract_rollover.roll_to_next_contract, run earlier in the
+    # same tick) has already advanced the underlying contract out from under
+    # this position.
+    if (
+        position is not None
+        and position.state == "long_futures"
+        and position.futures_contract_expiry is not None
+        and cycle_data.instrument_contract_expiry is not None
+        and position.futures_contract_expiry != cycle_data.instrument_contract_expiry
+    ):
+        _roll_futures_position(session, config, position, cycle_data, now)
 
     entry_needed = True
     if position is not None:

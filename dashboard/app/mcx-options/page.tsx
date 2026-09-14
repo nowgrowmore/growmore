@@ -34,13 +34,14 @@ export default async function MCXOptionsPage() {
         for this strategy.
       </p>
       <p className="max-w-2xl text-sm text-[color:var(--text-secondary)]">
-        <strong className="text-[color:var(--critical-text)]">Futures contract rollover is
-        not implemented.</strong> If an assigned long-futures position&apos;s contract month
-        expires before its covered-call cycle resolves, the engine does nothing today — do not
-        enable this strategy live across a contract-month boundary until that is built and
-        tested (see <code className="rounded bg-[color:var(--gridline)] px-1">
+        Futures contract rollover is implemented: if an assigned long-futures
+        position&apos;s contract month expires before its covered-call cycle resolves, the
+        engine marks the old exposure, charges a round-trip roll cost, and rolls it to the
+        new contract automatically (shown below as a &quot;roll&quot; leg). The flat
+        per-lot roll-cost placeholder is still not a real sourced roll-spread figure — see{" "}
+        <code className="rounded bg-[color:var(--gridline)] px-1">
           docs/technical-debt.md
-        </code>).
+        </code>.
       </p>
       {configs.length === 0 ? (
         <p className="text-sm text-[color:var(--text-muted)]">

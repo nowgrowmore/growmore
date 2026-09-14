@@ -38,14 +38,23 @@
   into the scheduler (`growmore_bot/mcx_options/scheduler_job.py`, a once-daily 23:59 IST cron —
   see `docs/architecture.md`), but carries two open items forward from phase 1/the offline
   backtest, plus one new deferral of its own:
-  - **Futures contract rollover is NOT implemented.** If an assigned `long_futures` position's
-    contract month expires before its covered-call cycle resolves, `mcx_options_engine.py` does
-    nothing — `MCXOptionsPosition.futures_contract_expiry` is never set on assignment, and there is
-    no roll logic. This is flagged loudly with a `TODO(mcx-options-futures-rollover)` comment at
-    the exact spot in `mcx_options_engine._settle_leg` where assignment happens. Do not enable this
-    strategy live across a contract-month boundary until this is built and tested (the offline
-    backtest's `research/mcx_options/engine.py` has a documented, if simplified, version of this
-    that could inform the live one).
+  - **Futures contract rollover is now implemented (2026-09-14), by reusing the existing
+    Instrument-level rollover mechanism rather than re-deriving next-contract logic.**
+    `MCXOptionsPosition.futures_contract_expiry` is set on assignment
+    (`mcx_options_engine._settle_leg`'s PE-ITM branch) and compared every cycle against a fresh
+    read of `Instrument.contract_expiry` (via `MCXCycleData.instrument_contract_expiry`, populated
+    by `live_data.fetch_cycle_data`); a mismatch means
+    `growmore_bot/scheduler/contract_rollover.py`'s `roll_to_next_contract` (already running in the
+    main tick job) has advanced the Instrument's own contract out from under the position, and
+    `mcx_options_engine._roll_futures_position` executes the roll — mark-to-market the old exposure
+    into `realized_pnl`, charge a round-trip futures leg cost (`growmore_bot.costs.leg_cost`,
+    `DEFAULT_COST_MODEL`) plus the flat `MCXOptionsConfig.futures_roll_cost_per_lot` placeholder,
+    rebase `basis` to today's futures price, and record a `MCXOptionsLeg` row
+    (`opt_type="ROLL"`/`action="roll"`, migration `0023_mcx_options_rollover`). See that engine's
+    module docstring for the full basis/cost reasoning. **Still a documented simplification, not
+    fully resolved**: `futures_roll_cost_per_lot` remains a flat, un-sourced placeholder for a real
+    bid/ask roll spread (same caveat as the offline backtest's `EngineConfig.
+    futures_roll_cost_per_lot`) — source real figures before trusting roll-cost drag numbers.
   - **`DhanClient.get_option_chain`/`get_expiry_list` response-shape parsing is still unverified
     against a real Dhan call** (same open item as `growmore_bot/wheel_basket/live_iv_rank.py`
     already lives with in production — see that module's docstring). `growmore_bot/mcx_options/

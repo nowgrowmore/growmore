@@ -705,6 +705,16 @@ class MCXOptionsConfig(Base):
     margin_multiple_of_premium: Mapped[float] = mapped_column(
         Numeric, nullable=False, server_default="3.0"
     )
+    # Flat placeholder for a futures roll's bid/ask spread, rupees per lot --
+    # NOT a real sourced roll-spread figure, matching
+    # research/mcx_options/engine.py's EngineConfig.futures_roll_cost_per_lot
+    # default of 0.0 (see that module's own documented simplification).
+    # Charged, alongside growmore_bot.costs.leg_cost's round-trip futures
+    # cost, whenever mcx_options_engine rolls a long_futures position to a
+    # new contract month (migration 0023).
+    futures_roll_cost_per_lot: Mapped[float] = mapped_column(
+        Numeric, nullable=False, server_default="0"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
@@ -769,10 +779,20 @@ class MCXOptionsLeg(Base):
     position_id: Mapped[uuid.UUID] = mapped_column(
         UUID, ForeignKey("mcx_options_positions.id"), nullable=False
     )
+    # For a "roll" leg (see `action` below), this is the NEW futures
+    # contract's expiry, not an option's -- a deliberate, modest repurposing
+    # of this column added in migration 0023 rather than a separate
+    # roll-specific date column, since exactly one of "option cycle expiry"
+    # / "new futures contract expiry" is ever meaningful on a given row.
     cycle_expiry: Mapped[date] = mapped_column(Date, nullable=False)
-    opt_type: Mapped[str] = mapped_column(Text, nullable=False)  # PE|CE
-    strike: Mapped[float] = mapped_column(Numeric, nullable=False)
-    premium: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # PE|CE|ROLL -- ROLL (added in migration 0023) marks a futures contract
+    # rollover event, which is not an option leg at all: it carries no
+    # strike/premium (see below) and no delta/OI selection.
+    opt_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL only for a "roll" leg (migration 0023 made these nullable) -- a
+    # roll has no strike or premium, it is a futures-only event.
+    strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    premium: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     lots: Mapped[float] = mapped_column(Numeric, nullable=False)
     # sell_put | assigned | sell_call | call_expired_otm | called_away |
     # roll | put_expired_otm
@@ -781,6 +801,11 @@ class MCXOptionsLeg(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     assigned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     called_away: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # For a "roll" leg, this is the roll's TRANSACTION COST alone (negative)
+    # -- the mark-to-market gain/loss crystallized by the roll is booked
+    # straight onto `MCXOptionsPosition.realized_pnl` instead (see
+    # mcx_options_engine._roll_futures_position's docstring), not mixed into
+    # this leg's own pnl figure.
     pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
 
     position: Mapped["MCXOptionsPosition"] = relationship(back_populates="legs")

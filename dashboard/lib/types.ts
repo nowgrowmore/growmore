@@ -330,9 +330,11 @@ export interface MCXOptionsLeg {
   id: string;
   position_id: string;
   cycle_expiry: string;
-  opt_type: string; // PE|CE
-  strike: string;
-  premium: string;
+  opt_type: string; // PE|CE|ROLL
+  // NULL only for a "roll" leg (opt_type="ROLL") -- a futures contract
+  // rollover event, which is not an option leg and has no strike/premium.
+  strike: string | null;
+  premium: string | null;
   lots: string;
   // sell_put | assigned | sell_call | call_expired_otm | called_away | roll
   // | put_expired_otm

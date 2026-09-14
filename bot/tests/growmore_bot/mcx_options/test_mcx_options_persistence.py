@@ -61,6 +61,7 @@ def test_config_defaults(session):
     assert float(cfg.trend_favorable_target_delta) == 0.50
     assert cfg.min_open_interest == 0
     assert float(cfg.margin_multiple_of_premium) == 3.0
+    assert float(cfg.futures_roll_cost_per_lot) == 0.0
 
 
 def test_mode_never_defaults_to_live(session):
@@ -194,6 +195,78 @@ def test_selection_defaults_and_config_relationship(session):
     assert selection.reason == "no regime label for the day -- skipped entry"
     assert selection.config.id == cfg.id
     assert cfg.selections == [selection]
+
+
+def test_roll_leg_has_no_strike_or_premium(session):
+    """Migration 0023 made `strike`/`premium` nullable specifically so a
+    futures rollover event (opt_type="ROLL", action="roll") -- which is not
+    an option leg at all -- can be recorded without fabricating either.
+    """
+    strategy = _strategy(session)
+    cfg = MCXOptionsConfig(
+        id=uuid.uuid4(),
+        strategy_id=strategy.id,
+        symbol="GOLDM",
+        lots=1,
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(cfg)
+    session.flush()
+
+    position = MCXOptionsPosition(
+        id=uuid.uuid4(),
+        config_id=cfg.id,
+        state="long_futures",
+        basis=6100.0,
+        futures_qty=100,
+        futures_contract_expiry=date(2026, 10, 28),
+        opened_at=datetime.now(timezone.utc),
+    )
+    session.add(position)
+    session.flush()
+
+    roll_leg = MCXOptionsLeg(
+        id=uuid.uuid4(),
+        position_id=position.id,
+        cycle_expiry=date(2026, 10, 28),  # new contract's expiry, not an option's
+        opt_type="ROLL",
+        strike=None,
+        premium=None,
+        lots=1,
+        action="roll",
+        opened_at=datetime.now(timezone.utc),
+        settled_at=datetime.now(timezone.utc),
+        pnl=-450.0,
+    )
+    session.add(roll_leg)
+    session.commit()
+    session.refresh(roll_leg)
+
+    assert roll_leg.strike is None
+    assert roll_leg.premium is None
+    assert roll_leg.opt_type == "ROLL"
+    assert roll_leg.action == "roll"
+    assert float(roll_leg.pnl) == -450.0
+
+    # An ordinary option leg still requires strike/premium to be meaningful
+    # (nullable at the schema level, but every non-roll write always
+    # supplies both -- see mcx_options_engine.py).
+    option_leg = MCXOptionsLeg(
+        id=uuid.uuid4(),
+        position_id=position.id,
+        cycle_expiry=date(2026, 9, 24),
+        opt_type="CE",
+        strike=6200.0,
+        premium=45.0,
+        lots=1,
+        action="sell_call",
+        opened_at=datetime.now(timezone.utc),
+    )
+    session.add(option_leg)
+    session.commit()
+    session.refresh(option_leg)
+    assert float(option_leg.strike) == 6200.0
+    assert float(option_leg.premium) == 45.0
 
 
 def test_regime_values_accepted(session):

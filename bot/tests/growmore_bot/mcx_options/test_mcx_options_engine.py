@@ -24,6 +24,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from growmore_bot.broker.dhan_client import Bar, OptionChainRow, OptionChainSnapshot
+from growmore_bot.costs import DEFAULT_COST_MODEL, leg_cost
 from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.mcx_options_engine import run_cycle
 from growmore_bot.mcx_options.pricing import black76_price
@@ -103,18 +104,26 @@ def _chain(F: float, T: float, *, pe_strikes=None, ce_strikes=None, oi: float = 
     return OptionChainSnapshot(spot=F, rows=rows)
 
 
-def _cycle_data(futures_bars, futures_price, chain, option_expiry, T_years, lot_size=100) -> MCXCycleData:
+def _cycle_data(
+    futures_bars, futures_price, chain, option_expiry, T_years, lot_size=100,
+    instrument_contract_expiry=None,
+) -> MCXCycleData:
     return MCXCycleData(
         futures_bars=futures_bars, futures_price=futures_price, option_chain=chain,
         option_expiry=option_expiry, T_years=T_years, lot_size=lot_size,
+        instrument_contract_expiry=instrument_contract_expiry,
     )
 
 
-def _open_position_with_leg(session, cfg, *, state, opt_type, strike, cycle_expiry, basis=None, futures_qty=0):
+def _open_position_with_leg(
+    session, cfg, *, state, opt_type, strike, cycle_expiry, basis=None, futures_qty=0,
+    futures_contract_expiry=None, realized_pnl=0,
+):
     now = datetime.now(timezone.utc)
     position = MCXOptionsPosition(
         id=uuid.uuid4(), config_id=cfg.id, status="open", state=state, basis=basis,
         futures_qty=futures_qty, opened_at=now - timedelta(days=1),
+        futures_contract_expiry=futures_contract_expiry, realized_pnl=realized_pnl,
     )
     session.add(position)
     session.flush()
@@ -359,3 +368,155 @@ def test_no_strike_clears_oi_filter_skips_entry(session):
     assert float(selections[0].target_delta) == 0.30
     assert selections[0].selected_strike is None
     assert "no strike" in selections[0].reason.lower()
+
+
+def _expected_roll_cost(notional: float, lots: int, per_lot: float = 0.0) -> float:
+    return (
+        leg_cost(notional, "sell", DEFAULT_COST_MODEL)
+        + leg_cost(notional, "buy", DEFAULT_COST_MODEL)
+        + per_lot * lots
+    )
+
+
+def test_rolls_long_futures_position_when_instrument_contract_advances(session):
+    """The Instrument's own `contract_expiry` has already moved on (via
+    `contract_rollover.roll_to_next_contract`, run earlier in the same
+    tick) past what this position was assigned/last rolled against --
+    the position must roll: mark-to-market the old exposure into
+    `realized_pnl`, charge the round-trip roll cost, rebase `basis` to
+    today's futures price, and advance `futures_contract_expiry`. The
+    covered call isn't due today, so nothing else should happen this cycle.
+    """
+    cfg = _config(session)
+    old_expiry = date(2026, 9, 20)
+    new_expiry = date(2026, 10, 20)
+    position, leg = _open_position_with_leg(
+        session, cfg, state="long_futures", opt_type="CE", strike=6300.0,
+        cycle_expiry=TODAY + timedelta(days=5), basis=6000.0, futures_qty=100,
+        futures_contract_expiry=old_expiry,
+    )
+    F = 6100.0
+    cycle_data = _cycle_data(
+        _too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
+        instrument_contract_expiry=new_expiry,
+    )
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+    session.refresh(leg)
+
+    mtm = (F - 6000.0) * 100
+    roll_cost = _expected_roll_cost(F * 100, cfg.lots)
+
+    assert float(position.basis) == F
+    assert position.futures_contract_expiry == new_expiry
+    assert float(position.realized_pnl) == pytest.approx(mtm - roll_cost)
+    # mark-to-market after the roll (basis now equals F) -- zero, as expected
+    # since the roll itself has no price effect.
+    assert float(position.unrealized_pnl) == pytest.approx(0.0)
+
+    roll_legs = (
+        session.query(MCXOptionsLeg)
+        .filter_by(position_id=position.id, action="roll")
+        .all()
+    )
+    assert len(roll_legs) == 1
+    roll_leg = roll_legs[0]
+    assert roll_leg.opt_type == "ROLL"
+    assert roll_leg.strike is None
+    assert roll_leg.premium is None
+    assert float(roll_leg.lots) == pytest.approx(1.0)
+    assert roll_leg.cycle_expiry == new_expiry
+    assert roll_leg.settled_at is not None
+    assert float(roll_leg.pnl) == pytest.approx(-roll_cost)
+
+    # The existing covered call isn't due yet -- untouched.
+    assert leg.settled_at is None
+
+
+def test_no_roll_when_instrument_contract_expiry_unchanged(session):
+    cfg = _config(session)
+    same_expiry = date(2026, 9, 20)
+    position, leg = _open_position_with_leg(
+        session, cfg, state="long_futures", opt_type="CE", strike=6300.0,
+        cycle_expiry=TODAY + timedelta(days=5), basis=6000.0, futures_qty=100,
+        futures_contract_expiry=same_expiry,
+    )
+    F = 6100.0
+    cycle_data = _cycle_data(
+        _too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
+        instrument_contract_expiry=same_expiry,
+    )
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+
+    assert float(position.basis) == 6000.0  # unchanged -- no roll happened
+    assert position.futures_contract_expiry == same_expiry
+    assert float(position.realized_pnl) == 0.0
+    roll_legs = (
+        session.query(MCXOptionsLeg)
+        .filter_by(position_id=position.id, action="roll")
+        .all()
+    )
+    assert roll_legs == []
+
+
+def test_roll_and_same_day_covered_call_settlement_both_happen(session):
+    """A roll happening the same cycle as the covered call's own expiry:
+    the roll runs first (rebasing `basis`/`futures_contract_expiry`), then
+    the normal settle-and-decide logic proceeds using the now-current
+    contract -- both should be reflected.
+    """
+    cfg = _config(session)
+    old_expiry = date(2026, 9, 20)
+    new_expiry = date(2026, 10, 20)
+    position, leg = _open_position_with_leg(
+        session, cfg, state="long_futures", opt_type="CE", strike=6200.0,
+        cycle_expiry=TODAY, basis=6000.0, futures_qty=100,
+        futures_contract_expiry=old_expiry,
+    )
+    F = 6100.0  # OTM against the 6200 call -> keeps futures, writes a new call
+    expiry = TODAY + timedelta(days=10)
+    T = (expiry - TODAY).days / 365.25
+    chain = _chain(F, T, ce_strikes=[6100, 6150, 6200, 6250, 6300])
+    cycle_data = _cycle_data(
+        _consolidating_bars(), F, chain, expiry, T, instrument_contract_expiry=new_expiry,
+    )
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+    session.refresh(leg)
+
+    mtm = (F - 6000.0) * 100
+    roll_cost = _expected_roll_cost(F * 100, cfg.lots)
+
+    # Roll happened.
+    assert position.futures_contract_expiry == new_expiry
+    assert float(position.realized_pnl) == pytest.approx(mtm - roll_cost)
+    roll_legs = (
+        session.query(MCXOptionsLeg)
+        .filter_by(position_id=position.id, action="roll")
+        .all()
+    )
+    assert len(roll_legs) == 1
+
+    # The existing covered call settled OTM against the now-current F/basis.
+    assert leg.settled_at is not None
+    assert leg.action == "call_expired_otm"
+    assert position.status == "open"
+    assert position.state == "long_futures"
+
+    # A fresh covered call was written for the next cycle.
+    open_legs = (
+        session.query(MCXOptionsLeg)
+        .filter_by(position_id=position.id, settled_at=None)
+        .all()
+    )
+    assert len(open_legs) == 1
+    assert open_legs[0].opt_type == "CE"
+    assert open_legs[0].action == "sell_call"
+    assert open_legs[0].strike >= float(position.basis)  # floored at post-roll basis

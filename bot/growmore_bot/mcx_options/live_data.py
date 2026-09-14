@@ -46,6 +46,17 @@ class MCXCycleData:
     #: Years to `option_expiry` from `today`, floored at 0.
     T_years: float
     lot_size: int
+    #: The underlying `Instrument`'s CURRENT `contract_expiry` as of this
+    #: cycle -- kept fresh by `growmore_bot.scheduler.contract_rollover.
+    #: roll_to_next_contract`, called earlier in the same tick (see
+    #: `run.py`). `mcx_options_engine.run_cycle` compares this against a
+    #: `long_futures` position's own `futures_contract_expiry` to detect
+    #: when that mechanism has already rolled the Instrument's contract out
+    #: from under an open futures position. `None` when the Instrument row
+    #: itself has no `contract_expiry` recorded (purely informational field,
+    #: nullable) -- rollover detection is then simply skipped, same as
+    #: before this field existed.
+    instrument_contract_expiry: date | None = None
 
 
 def _parse_expiry(raw: str) -> date:
@@ -94,6 +105,7 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
 
     T_years = max((option_expiry - today).days, 0) / 365.25
     lot_size = int(getattr(instrument, "lot_size", 1))
+    instrument_contract_expiry = getattr(instrument, "contract_expiry", None)
 
     return MCXCycleData(
         futures_bars=tuple(bars),
@@ -102,6 +114,7 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
         option_expiry=option_expiry,
         T_years=T_years,
         lot_size=lot_size,
+        instrument_contract_expiry=instrument_contract_expiry,
     )
 
 

@@ -26,6 +26,7 @@ class _Instrument:
     security_id: str = "123"
     exchange_segment: str = "MCX_COMM"
     lot_size: int = 100
+    contract_expiry: date | None = None
 
 
 class _FakeDhanClient:
@@ -87,6 +88,34 @@ def test_fetches_futures_history_option_chain_and_computes_T_years():
     assert result.T_years == pytest.approx(10 / 365.25)
     assert result.lot_size == 100
     assert client.chain_calls == [(instrument, expiry.isoformat())]
+
+
+def test_carries_the_instrument_contract_expiry_for_rollover_detection():
+    """`mcx_options_engine.run_cycle` needs to compare a `long_futures`
+    position's own `futures_contract_expiry` against the Instrument's
+    CURRENT `contract_expiry` every cycle (see mcx_options_engine's
+    rollover logic) -- MCXCycleData must carry it through.
+    """
+    bars = _some_bars()
+    expiry = TODAY + timedelta(days=10)
+    chain = _some_chain()
+    instrument = _Instrument(contract_expiry=date(2026, 10, 20))
+    client = _FakeDhanClient(bars, [expiry.isoformat()], chain)
+
+    result = fetch_cycle_data(client, instrument, today=TODAY)
+
+    assert result.instrument_contract_expiry == date(2026, 10, 20)
+
+
+def test_instrument_contract_expiry_defaults_to_none_when_instrument_lacks_it():
+    bars = _some_bars()
+    expiry = TODAY + timedelta(days=10)
+    chain = _some_chain()
+    client = _FakeDhanClient(bars, [expiry.isoformat()], chain)
+
+    result = fetch_cycle_data(client, _Instrument(contract_expiry=None), today=TODAY)
+
+    assert result.instrument_contract_expiry is None
 
 
 def test_picks_the_nearest_upcoming_expiry_not_the_first_in_the_list():
