@@ -37,6 +37,18 @@ dev = [
 research = [
     "yfinance",
     "pyarrow",
+    # Technical-indicator library for research/mcx_options/regime.py (ADX,
+    # +DI/-DI, Bollinger Bandwidth). The upstream `pandas_ta` PyPI project's
+    # only remaining releases (0.4.67b0/0.4.71b0, checked 2026-09-14)
+    # require Python >=3.12 and its GitHub source (twopirllc/pandas-ta) has
+    # been taken down, so it cannot be installed into this project's >=3.10
+    # environment. `pandas-ta-classic` is the actively maintained
+    # community fork that kept the original API and py3.10 support; it
+    # installs under the distribution name `pandas-ta-classic` but is
+    # imported as `pandas_ta_classic` and registers the same `df.ta.*`
+    # accessor (ADX_14/DMP_14/DMN_14, BBB_20_2.0, etc.) that `pandas_ta`
+    # always did. See research/mcx_options/regime.py's docstring.
+    "pandas-ta-classic",
 ]
 
 [project.scripts]
