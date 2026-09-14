@@ -204,6 +204,53 @@ describe("MCXOptionsClient", () => {
     expect(screen.getByText("Assigned")).toBeInTheDocument();
   });
 
+  it("hides low-OI candidates and caps the evaluated list at the 10 closest to target delta", () => {
+    // Mirrors a real thin-market cycle: lots of near-zero-OI strikes far from
+    // the target delta, plus a handful of liquid ones actually worth showing.
+    const farOtmNoise = Array.from({ length: 20 }, (_, i) => ({
+      strike: 180000 + i * 1000,
+      delta: -0.02 - i * 0.005,
+      oi: i % 3, // 0, 1, or 2 -- all below the display floor
+      ltp: 5,
+    }));
+    const liquidCandidates = [
+      { strike: 148000, delta: -0.35, oi: 500, ltp: 900 },
+      { strike: 149000, delta: -0.3, oi: 620, ltp: 750 }, // the picked strike
+      { strike: 150000, delta: -0.25, oi: 480, ltp: 600 },
+    ];
+    const selections: MCXOptionsSelection[] = [
+      {
+        id: "sel-1",
+        config_id: "config-1",
+        cycle_date: "2026-09-14",
+        regime: "consolidating",
+        target_delta: "0.30",
+        selected_strike: "149000",
+        reason: "entered PE at 149000",
+        futures_price: "152978",
+        position_state: "flat",
+        position_basis: null,
+        position_unrealized_pnl: null,
+        candidates_considered: [...farOtmNoise, ...liquidCandidates],
+        created_at: "2026-09-14T00:00:00Z",
+      },
+    ];
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": selections }}
+        onToggle={vi.fn()}
+      />
+    );
+    // The liquid, near-target candidates show...
+    expect(screen.getByText(/₹1,49,000\.00.*Δ-0\.30.*OI 620/)).toBeInTheDocument();
+    // ...but the noisy far-OTM zero/near-zero-OI strikes don't.
+    expect(screen.queryByText(/OI 0\)/)).not.toBeInTheDocument();
+    expect(screen.getByText(/more \(low OI \/ far from target delta, hidden\)/)).toBeInTheDocument();
+  });
+
   it("renders one section per config when there are several", () => {
     render(
       <MCXOptionsClient

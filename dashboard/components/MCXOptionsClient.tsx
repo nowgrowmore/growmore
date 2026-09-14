@@ -47,12 +47,24 @@ function regimeLabel(regime: string | null): string {
   }
 }
 
+//: Liquidity floors to try, loosest first as a fallback when the market's
+//: too thin for the stricter ones to leave anything -- MCX options can have
+//: very sparse OI far from the money, so a fixed non-relaxing threshold
+//: would sometimes show nothing at all. Never actually gates the engine
+//: (that's `config.min_open_interest`, currently 0) -- this is display-only
+//: noise reduction so a 144-candidate dump doesn't bury the strikes that
+//: mattered to the decision.
+const OI_DISPLAY_FLOORS = [10, 1, 0];
+const MAX_CANDIDATES_SHOWN = 10;
+
 function CandidatesEvaluated({
   candidates,
   selectedStrike,
+  targetDelta,
 }: {
   candidates: MCXOptionsCandidate[] | null;
   selectedStrike: string | null;
+  targetDelta: string | null;
 }) {
   if (candidates === null) {
     return <span className="text-[color:var(--text-muted)]">—</span>;
@@ -61,24 +73,61 @@ function CandidatesEvaluated({
     return <span className="text-[color:var(--text-muted)]">none cleared filters</span>;
   }
   const selected = selectedStrike !== null ? toNumber(selectedStrike) : null;
+  const target = targetDelta !== null ? toNumber(targetDelta) : null;
+
+  // Liquid-enough subset, loosening the OI floor until something survives.
+  let liquid = candidates;
+  for (const floor of OI_DISPLAY_FLOORS) {
+    const survivors = candidates.filter((c) => c.oi >= floor);
+    if (survivors.length > 0) {
+      liquid = survivors;
+      break;
+    }
+  }
+
+  // Rank by closeness to the delta the engine was actually targeting (the
+  // real selection criterion), not by strike -- so "top 10" means the 10
+  // most relevant to the decision, not just the 10 lowest strikes.
+  const ranked = [...liquid].sort((a, b) => {
+    if (target === null) return Math.abs(a.delta) - Math.abs(b.delta);
+    return Math.abs(Math.abs(a.delta) - target) - Math.abs(Math.abs(b.delta) - target);
+  });
+
+  const shown = ranked.slice(0, MAX_CANDIDATES_SHOWN);
+  // Always surface the picked strike, even if it fell just outside the cap.
+  if (selected !== null && !shown.some((c) => c.strike === selected)) {
+    const pickedRow = candidates.find((c) => c.strike === selected);
+    if (pickedRow) shown.push(pickedRow);
+  }
+  shown.sort((a, b) => a.strike - b.strike);
+
+  const hiddenCount = candidates.length - shown.length;
+
   return (
-    <ul className="flex flex-wrap gap-x-2 gap-y-1">
-      {candidates.map((c) => {
-        const isPicked = selected !== null && c.strike === selected;
-        return (
-          <li
-            key={c.strike}
-            className={
-              isPicked
-                ? "rounded bg-[color:var(--success-text)]/15 px-1.5 py-0.5 font-semibold text-[color:var(--success-text)]"
-                : "text-[color:var(--text-secondary)]"
-            }
-          >
-            {formatCurrency(c.strike)} (Δ{c.delta.toFixed(2)}, OI {c.oi.toLocaleString()})
-          </li>
-        );
-      })}
-    </ul>
+    <div className="flex flex-col gap-1">
+      <ul className="flex flex-wrap gap-x-2 gap-y-1">
+        {shown.map((c) => {
+          const isPicked = selected !== null && c.strike === selected;
+          return (
+            <li
+              key={c.strike}
+              className={
+                isPicked
+                  ? "rounded bg-[color:var(--success-text)]/15 px-1.5 py-0.5 font-semibold text-[color:var(--success-text)]"
+                  : "text-[color:var(--text-secondary)]"
+              }
+            >
+              {formatCurrency(c.strike)} (Δ{c.delta.toFixed(2)}, OI {c.oi.toLocaleString()})
+            </li>
+          );
+        })}
+      </ul>
+      {hiddenCount > 0 && (
+        <span className="text-xs text-[color:var(--text-muted)]">
+          +{hiddenCount} more (low OI / far from target delta, hidden)
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -273,6 +322,7 @@ export function MCXOptionsClient({
                             <CandidatesEvaluated
                               candidates={s.candidates_considered}
                               selectedStrike={s.selected_strike}
+                              targetDelta={s.target_delta}
                             />
                           </td>
                           <td className="px-3 py-2 text-[color:var(--text-secondary)]">{s.reason}</td>
