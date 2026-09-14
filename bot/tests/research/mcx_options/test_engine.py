@@ -94,6 +94,42 @@ def test_a_short_put_expires_otm_keeps_premium_no_futures_ever():
     assert all(leg.action != "assigned" for leg in cycle.legs)
 
 
+def test_a2_accepts_a_real_pandas_datetimeindex_not_just_plain_dates():
+    """Regression test: `_to_date`'s `isinstance(value, date)` check is a
+    false-positive trap for `pd.Timestamp`, which subclasses
+    `datetime.datetime` which subclasses `datetime.date` -- so a real
+    `DatetimeIndex` (what every actual data pipeline produces: parquet ->
+    `pd.to_datetime` -> `set_index`, never a plain Python `date` by hand)
+    used to sail through `_to_date` UNCONVERTED, leaving `bars.index` full of
+    `Timestamp`s despite the explicit `[_to_date(i) for i in bars.index]`
+    normalisation pass. That silently broke every `date`-vs-`Timestamp`
+    comparison downstream (e.g. `sorted_expiries` built from plain-`date`
+    `MCXOptionRow.expiry` values compared against a `Timestamp` `day`),
+    raising `TypeError: Cannot compare Timestamp with datetime.date` --
+    invisible to every other test in this file because `_bars()` builds its
+    index from plain Python `date` dict keys, never a real `DatetimeIndex`.
+    """
+    d0, d1 = date(2026, 1, 5), date(2026, 2, 4)
+    chain = [_row(d0, d1, strike=90.0, opt_type="PE", close=5.0)]
+    bars = pd.DataFrame(
+        {"close": [100.0, 95.0]},
+        index=pd.to_datetime([d0.isoformat(), d1.isoformat()]),
+    )
+    assert isinstance(bars.index, pd.DatetimeIndex)  # the real-world shape
+    regime = {d0: FAVORABLE_PE}
+
+    result = run(_config(), chain, bars, regime)
+
+    qty = LOT_SIZE
+    credit = 5.0 * qty
+    cost = credit * 0.01
+    expected = credit - cost
+
+    assert result.total_pnl == pytest.approx(expected)
+    assert len(result.cycles) == 1
+    assert result.cycles[0].outcome == "put_expired_otm"
+
+
 def test_b_short_put_expires_itm_assigns_at_strike_as_basis():
     d0, d1 = date(2026, 1, 5), date(2026, 2, 4)
     chain = [_row(d0, d1, strike=90.0, opt_type="PE", close=5.0)]

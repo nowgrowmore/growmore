@@ -105,7 +105,7 @@ must pass their own reviewed `CostModel` for the option leg.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Sequence
 
 import pandas as pd
@@ -202,6 +202,19 @@ class EngineResult:
 
 
 def _to_date(value) -> date:
+    """Normalise one `futures_daily_bars` index entry to a plain `date`.
+
+    `datetime.datetime` (hence `pd.Timestamp`, which subclasses it) is
+    ITSELF a subclass of `datetime.date` -- `isinstance(pd.Timestamp(...),
+    date)` is `True`. Checking `date` first (as this used to) therefore
+    let every real `pd.Timestamp` (what a genuine `DatetimeIndex` -- the
+    normal shape for real market data -- is actually made of) sail through
+    unconverted, defeating the whole point of this function; only a
+    hand-built plain-`date` index (as this repo's own test fixtures use)
+    ever exercised the intended branch. Check `datetime` FIRST instead.
+    """
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     return pd.Timestamp(value).date()
