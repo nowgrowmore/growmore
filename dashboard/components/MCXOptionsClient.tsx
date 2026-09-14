@@ -34,6 +34,36 @@ function stateBadgeClass(state: string): string {
   }
 }
 
+//: The leg currently outstanding against a position, if any. `state`
+//: (flat/long_futures/closed) only tracks FUTURES exposure -- a freshly
+//: sold put with no assignment yet is legitimately "flat" there, which
+//: otherwise makes the current-position card look empty while a real short
+//: option is live (see Trade History for it instead, confusingly). Surface
+//: it here so "what's actually outstanding right now" doesn't require
+//: cross-referencing the trade-history table.
+function openLegFor(legs: MCXOptionsLeg[], positionId: string): MCXOptionsLeg | null {
+  return legs.find((l) => l.position_id === positionId && l.settled_at === null) ?? null;
+}
+
+function OpenLegSummary({ leg }: { leg: MCXOptionsLeg | null }) {
+  if (leg === null) {
+    return <span className="text-[color:var(--text-muted)]">—</span>;
+  }
+  if (leg.opt_type === "ROLL") {
+    // Shouldn't normally be seen "open" (a roll settles same-cycle), but
+    // guard against the NULL strike/premium a roll leg carries regardless.
+    return <span className="text-[color:var(--text-secondary)]">Roll in progress</span>;
+  }
+  const side = leg.opt_type === "CE" ? "call" : "put";
+  return (
+    <span className="text-[color:var(--text-secondary)]">
+      Short {leg.opt_type} ({side}) @ {leg.strike ? formatCurrency(toNumber(leg.strike)) : "—"}
+      {leg.premium ? `, premium ${formatCurrency(toNumber(leg.premium))}` : ""}, exp{" "}
+      {new Date(leg.cycle_expiry).toLocaleDateString()}
+    </span>
+  );
+}
+
 function regimeLabel(regime: string | null): string {
   switch (regime) {
     case "consolidating":
@@ -214,10 +244,11 @@ export function MCXOptionsClient({
                 <p className="text-sm text-[color:var(--text-muted)]">No open position.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
-                  <table className="w-full min-w-[720px] text-sm">
+                  <table className="w-full min-w-[880px] text-sm">
                     <thead>
                       <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
                         <th className="px-3 py-2 font-medium">State</th>
+                        <th className="px-3 py-2 font-medium">Open leg</th>
                         <th className="px-3 py-2 font-medium text-right">Basis</th>
                         <th className="px-3 py-2 font-medium text-right">Futures qty</th>
                         <th className="px-3 py-2 font-medium">Contract expiry</th>
@@ -234,6 +265,9 @@ export function MCXOptionsClient({
                             >
                               {stateLabel(p.state)}
                             </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <OpenLegSummary leg={openLegFor(legs, p.id)} />
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {p.basis ? formatCurrency(toNumber(p.basis)) : "—"}

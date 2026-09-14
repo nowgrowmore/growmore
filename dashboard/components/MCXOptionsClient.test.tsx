@@ -67,6 +67,54 @@ describe("MCXOptionsClient", () => {
     expect(screen.getByText("Long futures (covered)")).toBeInTheDocument();
   });
 
+  it("surfaces the open leg on a 'flat' position that has an unsettled short put", () => {
+    // Regression: `state` only tracks FUTURES exposure -- a freshly sold put
+    // with no assignment yet is legitimately "flat", which used to make the
+    // current-position card show nothing (State=Flat, Basis=—, Futures
+    // qty=0, Contract expiry=—) even while Trade History showed a real open
+    // short put. The open leg must show up in the current-position card too.
+    const position: MCXOptionsPosition = {
+      id: "pos-1",
+      config_id: "config-1",
+      status: "open",
+      state: "flat",
+      basis: null,
+      futures_qty: "0",
+      futures_contract_expiry: null,
+      opened_at: "2026-09-14T00:00:00Z",
+      closed_at: null,
+      realized_pnl: "0",
+      unrealized_pnl: "0",
+    };
+    const leg: MCXOptionsLeg = {
+      id: "leg-1",
+      position_id: "pos-1",
+      cycle_expiry: "2026-09-24",
+      opt_type: "PE",
+      strike: "207000",
+      premium: "27409.50",
+      lots: "1",
+      action: "sell_put",
+      opened_at: "2026-09-14T00:00:00Z",
+      settled_at: null,
+      assigned: false,
+      called_away: false,
+      pnl: null,
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config({ symbol: "SILVERM" })]}
+        positionsByConfigId={{ "config-1": [position] }}
+        legsByConfigId={{ "config-1": [leg] }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Flat")).toBeInTheDocument();
+    expect(screen.getByText(/Short PE \(put\) @ ₹2,07,000\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/premium ₹27,409\.50/)).toBeInTheDocument();
+  });
+
   it("renders the selection log with the reason text, including skipped cycles", () => {
     const selections: MCXOptionsSelection[] = [
       {
