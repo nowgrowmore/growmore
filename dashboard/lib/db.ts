@@ -68,7 +68,22 @@ function getClient(): SqlClient {
       "DATABASE_URL is not set. Copy .env.example to .env.local (or .env.test.local for tests) and fill it in."
     );
   }
-  cachedClient = wrap(postgres(url));
+  // `prepare: false` -- DATABASE_URL is Neon's POOLED connection string
+  // (PgBouncer-style transaction pooling), which is fundamentally
+  // incompatible with postgres.js's default server-side prepared
+  // statements: a warm serverless instance's cached connection can hold a
+  // prepared statement's plan from before a schema change (e.g. an Alembic
+  // migration adding/altering a column), and PgBouncer's transaction-mode
+  // pooling means that connection can get handed to a query against the
+  // NEW schema, which Postgres then rejects with "cached plan must not
+  // change result type" -- confirmed live 2026-09-14 immediately after
+  // migrations 0023/0024 altered mcx_options_legs/mcx_options_selections,
+  // crashing every /mcx-options request until this fix (a fresh deploy
+  // alone wasn't enough to reliably clear it, since the same class of
+  // failure could recur on the next schema change). Disabling prepared
+  // statements is Neon's own documented fix for postgres.js against the
+  // pooled endpoint -- see https://neon.tech/docs/guides/postgres-js.
+  cachedClient = wrap(postgres(url, { prepare: false }));
   return cachedClient;
 }
 
