@@ -332,3 +332,15 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   in underwater assignments, which is what caps the strategy — and that an exit rule for those is
   probably worth more than any amount of smarter stock selection. See `docs/wheel-basket-results.md`
   Sec 8 for what would be worth trying next.
+
+
+## MCX options schema migration (2026-09-14)
+
+- [ ] **Run `alembic upgrade head` against the real Neon database, deliberately, when you're ready.**
+  Migration `0022_mcx_options` (adds `mcx_options_configs`/`mcx_options_positions`/
+  `mcx_options_legs`/`mcx_options_selections` — the MCX Goldmini/Silvermini analog of the
+  `wheel_basket_*` tables) has been written and tested against SQLAlchemy models plus (where
+  reachable) a local/dockerized Postgres, but has **not** been applied to production. It only adds
+  new tables (no changes to existing ones), so it's low-risk, but per this repo's rules that
+  promotion is never automatic — nobody ran it against Neon as part of this change. No engine code
+  reads/writes these tables yet either (schema-only, ahead of a later live/paper engine phase).

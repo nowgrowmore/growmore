@@ -664,6 +664,155 @@ class WheelBasketSelection(Base):
     config: Mapped["WheelBasketConfig"] = relationship(back_populates="selections")
 
 
+class MCXOptionsConfig(Base):
+    """One row per commodity (GOLDM/SILVERM) -- the direct MCX analog of
+    WheelBasketConfig, but there is no cross-sectional universe/rotation
+    concept here (see research/mcx_options/engine.py's module docstring for
+    the strategy this runs live): one config row per symbol, sized in lots
+    rather than virtual capital. Fields mirror research.mcx_options.engine's
+    EngineConfig so a future live engine can be configured identically to
+    what was validated in the offline backtest.
+    """
+
+    __tablename__ = "mcx_options_configs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    strategy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("strategies.id"), nullable=False
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "paper" (default) or "live" -- same two-gate meaning as BotConfig.mode.
+    # A live options order-placement path does not exist yet (see
+    # docs/pending-actions.md); this stays "paper" until one is built and
+    # separately verified.
+    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="paper")
+    # "GOLDM" or "SILVERM" -- one config row per commodity.
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    lots: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Regime -> target delta, mirroring EngineConfig.target_delta_for:
+    # Regime.CONSOLIDATING -> consolidating_target_delta,
+    # Regime.TREND_FAVORABLE -> trend_favorable_target_delta,
+    # Regime.TREND_UNFAVORABLE (or no label for the day) -> skip entry.
+    consolidating_target_delta: Mapped[float] = mapped_column(
+        Numeric, nullable=False, server_default="0.30"
+    )
+    trend_favorable_target_delta: Mapped[float] = mapped_column(
+        Numeric, nullable=False, server_default="0.50"
+    )
+    min_open_interest: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Flat margin-multiple placeholder -- reporting only, never gates a
+    # trade (see EngineConfig.margin_multiple_of_premium).
+    margin_multiple_of_premium: Mapped[float] = mapped_column(
+        Numeric, nullable=False, server_default="3.0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    positions: Mapped[list["MCXOptionsPosition"]] = relationship(back_populates="config")
+    selections: Mapped[list["MCXOptionsSelection"]] = relationship(back_populates="config")
+
+
+class MCXOptionsPosition(Base):
+    """One row per position lifecycle for a given config (config is already
+    scoped to one symbol, unlike WheelBasketPosition which is scoped per
+    (config, symbol)). Unlike the stock wheel, an assignment here settles
+    into a FUTURES position -- not shares -- which carries its own contract
+    expiry independent of the option's expiry and may need rolling
+    (`futures_contract_expiry`). No stop-loss ever closes a position, by
+    deliberate design (research/mcx_options/engine.py's module docstring):
+    only expiry (OTM), assignment (ITM put), or being called away (ITM
+    call) ends a cycle.
+    """
+
+    __tablename__ = "mcx_options_positions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("mcx_options_configs.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")  # open|closed
+    state: Mapped[str] = mapped_column(Text, nullable=False)  # flat|long_futures|closed
+    # Basis = the RAW STRIKE the put was assigned at, not premium-adjusted
+    # (matches research/mcx_options/engine.py's documented convention: the
+    # premium received is booked as its own cash P&L at entry, never netted
+    # into basis).
+    basis: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Lots x lot_size.
+    futures_qty: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    # Which futures contract month currently backs an open LONG_FUTURES
+    # position -- no wheel_basket analog; tracks what needs rolling if its
+    # own expiry arrives before the covered-call cycle resolves.
+    futures_contract_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    realized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+    unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
+
+    config: Mapped["MCXOptionsConfig"] = relationship(back_populates="positions")
+    legs: Mapped[list["MCXOptionsLeg"]] = relationship(
+        back_populates="position", cascade="all, delete-orphan"
+    )
+
+
+class MCXOptionsLeg(Base):
+    """One row per option leg written and settled, plus the assignment/roll/
+    call-away events that move the state machine along -- mirrors
+    WheelBasketLeg's shape, but `action` covers this state machine's actual
+    leg types (matching research/mcx_options/engine.py's LegRecord.action
+    literal values exactly).
+    """
+
+    __tablename__ = "mcx_options_legs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    position_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("mcx_options_positions.id"), nullable=False
+    )
+    cycle_expiry: Mapped[date] = mapped_column(Date, nullable=False)
+    opt_type: Mapped[str] = mapped_column(Text, nullable=False)  # PE|CE
+    strike: Mapped[float] = mapped_column(Numeric, nullable=False)
+    premium: Mapped[float] = mapped_column(Numeric, nullable=False)
+    lots: Mapped[float] = mapped_column(Numeric, nullable=False)
+    # sell_put | assigned | sell_call | call_expired_otm | called_away |
+    # roll | put_expired_otm
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    called_away: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pnl: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    position: Mapped["MCXOptionsPosition"] = relationship(back_populates="legs")
+
+
+class MCXOptionsSelection(Base):
+    """The "why" record -- why the engine did or didn't enter on a given
+    cycle date, mirroring WheelBasketSelection's transparency purpose.
+    `regime` matches research/mcx_options/regime.py's Regime enum values
+    (consolidating|trend_favorable|trend_unfavorable), or null for "no
+    opinion" (a day with no regime label at all, treated the same as
+    TREND_UNFAVORABLE by the engine: never permissive).
+    """
+
+    __tablename__ = "mcx_options_selections"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    config_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("mcx_options_configs.id"), nullable=False
+    )
+    cycle_date: Mapped[date] = mapped_column(Date, nullable=False)
+    regime: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    selected_strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    config: Mapped["MCXOptionsConfig"] = relationship(back_populates="selections")
+
+
 __all__ = [
     "Base",
     "Instrument",
@@ -687,4 +836,8 @@ __all__ = [
     "WheelBasketPosition",
     "WheelBasketLeg",
     "WheelBasketSelection",
+    "MCXOptionsConfig",
+    "MCXOptionsPosition",
+    "MCXOptionsLeg",
+    "MCXOptionsSelection",
 ]

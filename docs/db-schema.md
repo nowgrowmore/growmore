@@ -151,6 +151,11 @@ erDiagram
     WHEEL_BASKET_CONFIGS ||--o{ WHEEL_BASKET_SELECTIONS : "one row per candidate per cycle"
     WHEEL_BASKET_POSITIONS ||--o{ WHEEL_BASKET_LEGS : "one row per option leg written/settled"
 
+    STRATEGIES ||--o{ MCX_OPTIONS_CONFIGS : "one config per commodity (GOLDM/SILVERM)"
+    MCX_OPTIONS_CONFIGS ||--o{ MCX_OPTIONS_POSITIONS : "one row per position lifecycle"
+    MCX_OPTIONS_CONFIGS ||--o{ MCX_OPTIONS_SELECTIONS : "one row per cycle date"
+    MCX_OPTIONS_POSITIONS ||--o{ MCX_OPTIONS_LEGS : "one row per option leg / state transition"
+
     WHEEL_BASKET_CONFIGS {
         uuid id PK
         uuid strategy_id FK
@@ -205,6 +210,58 @@ erDiagram
         text reason "human-readable, rendered directly as prose on the dashboard"
         timestamptz created_at
     }
+
+    MCX_OPTIONS_CONFIGS {
+        uuid id PK
+        uuid strategy_id FK
+        boolean enabled
+        text mode "paper (only mode that exists -- no live options path yet)"
+        text symbol "GOLDM|SILVERM -- one config row per commodity, no rotation"
+        integer lots
+        numeric consolidating_target_delta "default 0.30"
+        numeric trend_favorable_target_delta "default 0.50"
+        integer min_open_interest
+        numeric margin_multiple_of_premium "flat reporting placeholder, never gates a trade"
+        timestamptz updated_at
+    }
+    MCX_OPTIONS_POSITIONS {
+        uuid id PK
+        uuid config_id FK
+        text status "open|closed"
+        text state "flat|long_futures|closed"
+        numeric basis "assigned put's RAW STRIKE, not premium-adjusted; null until assigned"
+        numeric futures_qty "lots x lot_size"
+        date futures_contract_expiry "current futures contract month backing the position, may roll"
+        timestamptz opened_at
+        timestamptz closed_at
+        numeric realized_pnl
+        numeric unrealized_pnl "marked daily while LONG_FUTURES is held"
+    }
+    MCX_OPTIONS_LEGS {
+        uuid id PK
+        uuid position_id FK
+        date cycle_expiry "the option's own expiry"
+        text opt_type "PE|CE"
+        numeric strike
+        numeric premium
+        numeric lots
+        text action "sell_put|assigned|sell_call|call_expired_otm|called_away|roll|put_expired_otm"
+        timestamptz opened_at
+        timestamptz settled_at
+        boolean assigned
+        boolean called_away
+        numeric pnl
+    }
+    MCX_OPTIONS_SELECTIONS {
+        uuid id PK
+        uuid config_id FK
+        date cycle_date
+        text regime "consolidating|trend_favorable|trend_unfavorable|null (no opinion)"
+        numeric target_delta
+        numeric selected_strike
+        text reason "human-readable, rendered directly as prose on the dashboard"
+        timestamptz created_at
+    }
 ```
 
 ## Notes
@@ -233,3 +290,14 @@ erDiagram
   `instruments` row (that table is MCX/Dhan-security-id shaped; NSE F&O stock options have no
   equivalent row today). `mode` only ever has the value `"paper"` — no live options order-placement
   path exists yet, unlike `bot_config.mode`, which genuinely supports `"live"`.
+- `mcx_options_configs` is the direct MCX analog of `wheel_basket_configs`, but there is no
+  cross-sectional universe/rotation concept for Goldmini/Silvermini options — one config row per
+  commodity (`symbol` = `GOLDM`/`SILVERM`), sized in `lots` rather than a shared virtual-capital
+  pool. Unlike the stock wheel (which settles into `shares`), an assigned put here settles into a
+  `LONG_FUTURES` position (`futures_qty`) with its own `futures_contract_expiry` independent of the
+  option's expiry, which may need rolling before the covered-call cycle resolves — tracked via the
+  `roll` leg action. `basis` keeps the same convention as `wheel_basket_positions.basis`: the raw
+  assignment strike, never premium-adjusted. There is no stop-loss anywhere in this state machine by
+  deliberate design (`bot/research/mcx_options/engine.py`'s module docstring) — a position only ever
+  closes via expiry, assignment, or being called away; this is schema-only, the engine enforcing it
+  is a later phase (see `docs/pending-actions.md`). `mode` is likewise `"paper"`-only for now.

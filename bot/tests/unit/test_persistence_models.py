@@ -34,6 +34,10 @@ EXPECTED_TABLES = {
     "wheel_basket_positions",
     "wheel_basket_legs",
     "wheel_basket_selections",
+    "mcx_options_configs",
+    "mcx_options_positions",
+    "mcx_options_legs",
+    "mcx_options_selections",
 }
 
 
@@ -82,6 +86,22 @@ def test_money_and_price_columns_are_numeric_not_float():
     _money_columns(
         "wheel_basket_selections", ["avg_iv", "iv_percentile", "rsi", "score"]
     )
+    _money_columns(
+        "mcx_options_configs",
+        [
+            "consolidating_target_delta",
+            "trend_favorable_target_delta",
+            "margin_multiple_of_premium",
+        ],
+    )
+    _money_columns(
+        "mcx_options_positions",
+        ["basis", "futures_qty", "realized_pnl", "unrealized_pnl"],
+    )
+    _money_columns("mcx_options_legs", ["strike", "premium", "lots", "pnl"])
+    _money_columns(
+        "mcx_options_selections", ["target_delta", "selected_strike"]
+    )
 
 
 def test_foreign_keys_match_er_diagram():
@@ -96,6 +116,10 @@ def test_foreign_keys_match_er_diagram():
         "wheel_basket_positions": {"config_id": "wheel_basket_configs.id"},
         "wheel_basket_legs": {"position_id": "wheel_basket_positions.id"},
         "wheel_basket_selections": {"config_id": "wheel_basket_configs.id"},
+        "mcx_options_configs": {"strategy_id": "strategies.id"},
+        "mcx_options_positions": {"config_id": "mcx_options_configs.id"},
+        "mcx_options_legs": {"position_id": "mcx_options_positions.id"},
+        "mcx_options_selections": {"config_id": "mcx_options_configs.id"},
     }
     for table_name, cols in fks.items():
         table = Base.metadata.tables[table_name]
@@ -121,6 +145,10 @@ def test_timestamp_columns_are_timezone_aware():
         "wheel_basket_positions": ["opened_at", "closed_at"],
         "wheel_basket_legs": ["opened_at", "settled_at"],
         "wheel_basket_selections": ["created_at"],
+        "mcx_options_configs": ["updated_at"],
+        "mcx_options_positions": ["opened_at", "closed_at"],
+        "mcx_options_legs": ["opened_at", "settled_at"],
+        "mcx_options_selections": ["created_at"],
     }
     for table_name, cols in checks.items():
         table = Base.metadata.tables[table_name]
