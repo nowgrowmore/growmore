@@ -435,3 +435,61 @@ def test_a_plausible_row_iv_is_still_used_verbatim():
     )
 
     assert candidate.delta == pytest.approx(black76_delta("PE", F, 90.0, T, row_iv, R))
+
+
+# ---------------------------------------------------------------------------
+# max_relative_spread (MCXOptionsConfig, migration 0027) -- DEFAULT-OFF.
+# ---------------------------------------------------------------------------
+
+
+def _wide_market_row() -> OptionChainRow:
+    """The REAL market quoted for SILVERM PE 207000 on 2026-09-14 -- bid 38
+    against ask 2044.5 -- but with an `ltp` that genuinely sits inside it, so
+    this row passes the pre-existing executability gate and isolates the
+    spread cap as the only thing that can reject it.
+    """
+    return OptionChainRow(
+        strike=90.0, opt_type="PE", ltp=500.0, iv=SIGMA, oi=_DEFAULT_OI, volume=10,
+        top_bid_price=38.0, top_ask_price=2044.5,
+    )
+
+
+def test_a_hopelessly_wide_market_still_passes_when_the_spread_cap_is_off():
+    """The pre-existing executability gate only establishes that `ltp` sits
+    INSIDE the spread. The REAL 2026-09-14 SILVERM market of 38 / 2044.5
+    satisfies that for almost any ltp -- "inside a meaningless spread" is not
+    the same thing as tradeable.
+    """
+    chain = OptionChainSnapshot(spot=F, rows=[_wide_market_row()])
+
+    assert (
+        evaluate_candidates(
+            chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+            min_open_interest=1,
+        )
+        != []
+    )
+
+
+def test_the_spread_cap_rejects_that_same_market_once_set():
+    chain = OptionChainSnapshot(spot=F, rows=[_wide_market_row()])
+
+    assert (
+        evaluate_candidates(
+            chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+            min_open_interest=1, max_relative_spread=0.25,
+        )
+        == []
+    )
+
+
+def test_the_spread_cap_keeps_a_tight_market():
+    tight = _row(90.0, "PE")  # the default fixture quotes +-2% around price
+    chain = OptionChainSnapshot(spot=F, rows=[tight])
+
+    survivors = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+        min_open_interest=1, max_relative_spread=0.25,
+    )
+
+    assert [c.strike for c in survivors] == [90.0]

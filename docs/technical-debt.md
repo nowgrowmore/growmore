@@ -32,6 +32,78 @@
   None of this blocks the code from running or being tested — it blocks trusting any CAGR/Sharpe
   number this produces as a real trading conclusion until the above are sourced/verified.
 
+- **(2026-09-15) Independent code review of the MCX options strategy and its dashboard.** Run after
+  the strategy's first real paper cycles. Correctness findings were fixed outright; strategy
+  findings became default-OFF config flags (migration 0027) because they are the account owner's
+  judgement calls, not bugs — see `docs/pending-actions.md`.
+  - **Fixed — settlement wedged the strategy permanently.** `run_cycle` required
+    `open_leg.cycle_expiry == today` exactly. One missed cycle (VPS restart, an MCX
+    partial-session holiday absent from `MCX_HOLIDAYS_2026`, or a `DhanApiError` that exhausted
+    `scheduler_job`'s three retries) meant that date never recurred, `entry_needed` stayed False
+    forever, and the commodity silently stopped trading with only a log line. Now `<= today`,
+    logging loudly when settling late (the ITM/OTM call is then made against today's price, not
+    the expiry day's).
+  - **Fixed — same-day expiry produced a garbage strike and then deadlocked.**
+    `fetch_cycle_data` accepted an expiry dated today, giving `T_years = 0`, where every Black-76
+    delta is its 0/±1 boundary: the whole chain tied on `|delta − target|` and `min` returned the
+    deepest OTM strike listed. The leg written also carried `cycle_expiry == today`, which the
+    settlement path could never see again. `MIN_OPTION_DTE_DAYS` now requires a strictly future
+    expiry.
+  - **Fixed — mark-to-market skipped on every cycle that attempted an entry.** `_mark_to_market`
+    ran only on the "leg live, not due" branch, so `unrealized_pnl` and the
+    `position_unrealized_pnl` snapshot went stale on exactly the cycles that matter: the
+    assignment cycle (the futures position opens already underwater by `(F − strike) × qty`, and
+    read as 0) and any cycle where a covered call was skipped by regime or by the strike filters.
+    Now called once, unconditionally, on every path.
+  - **Fixed — futures rollover was coupled to an unrelated `bot_config` row.**
+    `roll_to_next_contract` was only ever called from `run_all_enabled_configs`'s loop over
+    `BotConfig.enabled == True`, and this strategy never creates a `bot_config` row. Unless
+    GOLDM/SILVERM happened to also have an enabled futures `BotConfig`,
+    `Instrument.contract_expiry`/`security_id` never advanced — so the engine could keep quoting an
+    **expired contract's `security_id`**, and `_roll_futures_position` was dead code in production.
+    `mcx_options/scheduler_job.py` now runs the close-out/rollover check itself and fails closed.
+    **Still needs owner verification:** whether enabled `bot_config` rows exist for GOLDM/SILVERM
+    in production, and therefore whether any past cycle ran against a stale contract — see
+    `docs/pending-actions.md`.
+  - **Fixed — smaller correctness items.** A called-away position kept phantom `futures_qty`; a
+    covered call was sized from `config.lots` rather than the futures actually held (editing
+    `lots` mid-position would quietly make it partly naked); nothing stopped the picker selling an
+    **in-the-money put** (at `trend_favorable_target_delta = 0.50`, an ATM delta, it could and
+    would); Dhan's quoted IV went into Black-76 unclamped, and a real production row quoted
+    **259.33%**, which flattens every delta toward 0.5 and makes the target-delta pick meaningless;
+    `_settle_leg`'s guards were bare `assert`s, stripped under `python -O`; and re-running a cycle
+    appended a duplicate `MCXOptionsSelection` row instead of replacing that day's.
+  - **Fixed — the OI floor was switched off in production.**
+    `provision_mcx_options_configs.py` never wrote `min_open_interest`, so every row sat at the
+    column's server default of **0**: the floor was a complete no-op and only the bid/ask
+    executability gate filtered anything. Now provisioned at a deliberately conservative
+    `MIN_OPEN_INTEREST = 10`, which is **not a sourced figure** — tune it against the real OI now
+    being recorded in `candidates_considered`.
+  - **Still open — option transaction costs are modelled as exactly zero.** `_entry_leg_amount`
+    uses `FREE_COST_MODEL` because `MCX_COMMODITY_OPTION_COST_MODEL` is `reviewed=False`. Every
+    option premium in the paper ledger is gross of brokerage, STT, exchange charges and GST; only
+    the futures side is costed. **No P&L number from this strategy should be trusted until real
+    Dhan commodity-options rates are sourced.**
+  - **Still open — the option lot size is assumed equal to the futures lot size.** The engine
+    multiplies by `Instrument.lot_size` (GOLDM 10, SILVERM 5) while
+    `research/mcx_options/contract_specs.py` explicitly warns "do NOT assume this equals the
+    underlying future's lot_size". Every rupee figure scales linearly with this.
+  - **Still open — no portfolio-level exposure cap, and no alerting.** GOLDM and SILVERM are highly
+    correlated bullion and nothing caps their combined exposure;
+    `margin_multiple_of_premium` is read by no code at all. Separately, there is no notification
+    path anywhere in `growmore_bot/`, so a wedged commodity is invisible outside the log. Both were
+    deliberately NOT implemented behind a flag — each has real design questions (what counts as
+    exposure, which margin source, who gets alerted and how) that a half-built flag would obscure
+    rather than answer. See `docs/pending-actions.md`.
+  - **Dashboard fixes.** ROLL legs rendered as ₹0.00 options labelled "Expired OTM"; Postgres
+    `date` columns arrive as JS `Date` at UTC midnight and were formatted in the viewer's timezone
+    (off-by-one for anyone west of UTC, plus an SSR/client hydration mismatch — now formatted in
+    IST); the falsy-zero bug already fixed for `leg.pnl` survived in six other places;
+    `candidates_considered` JSONB was rendered unvalidated with no error boundary anywhere under
+    `app/`; trade history had no lots column although P&L is booked as `premium × lots × lot_size`;
+    delta rendered as "30%" beside a "Δ-0.30" in the same row; and the page issued `3N + 1` queries
+    under `force-dynamic` with a 60s auto-refresh.
+
 - **(OPEN, 2026-09-14) MCX options-selling LIVE paper-trading engine (phase 2) is built
   (`bot/growmore_bot/mcx_options/`: `pricing.py`, `regime.py`, `strike_selection.py`,
   `live_data.py`, `mcx_options_engine.py`) and unit-tested, and (phase 3, same day) is now wired

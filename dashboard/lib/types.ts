@@ -323,6 +323,18 @@ export interface MCXOptionsConfig {
   // (migration 0023) -- NOT a real sourced roll-spread figure. Surfaced on
   // the page precisely because it is a caveat worth watching.
   futures_roll_cost_per_lot: string;
+  // Risk/selection flags (migration 0027). Every one is null/false by
+  // default and every code path in the bot treats that as "disabled", so the
+  // strategy behaves exactly as it did before 0027 until the account owner
+  // sets one. Surfaced on the page precisely so an enabled one is never
+  // invisible -- see docs/pending-actions.md for what each does.
+  stop_loss_premium_multiple: string | null;
+  min_dte_days: number | null;
+  max_dte_days: number | null;
+  min_credit_pct_of_strike: string | null;
+  max_relative_spread: string | null;
+  use_bid_for_entry_premium: boolean;
+  fallback_sigma: string | null;
   updated_at: PgDate;
 }
 

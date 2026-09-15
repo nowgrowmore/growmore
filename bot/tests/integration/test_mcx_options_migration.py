@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -162,8 +162,6 @@ def test_roll_leg_can_have_null_strike_and_premium(migrated_engine):
     """Migration 0023 relaxed `strike`/`premium` to nullable, and 0026's
     CHECK now ties that nullability to the one case it exists for.
     """
-    from datetime import date
-
     from growmore_bot.persistence.models import MCXOptionsLeg
 
     with Session(migrated_engine) as session:
@@ -194,8 +192,6 @@ def test_option_leg_may_not_have_a_null_strike(migrated_engine):
     with a null strike was schema-legal and only a `python -O`-strippable
     `assert` stood in the way.
     """
-    from datetime import date
-
     from sqlalchemy.exc import IntegrityError
 
     from growmore_bot.persistence.models import MCXOptionsLeg
@@ -219,8 +215,6 @@ def test_selection_snapshot_columns_exist_and_candidates_round_trip_as_jsonb(mig
     """Migrations 0024 (snapshot columns + `candidates_considered` JSONB) and
     0025 (`option_expiry`) -- neither had any integration coverage.
     """
-    from datetime import date
-
     from growmore_bot.persistence.models import MCXOptionsSelection
 
     candidates = [{"strike": 6000.0, "delta": -0.3, "oi": 5000.0, "ltp": 42.5}]
@@ -248,8 +242,6 @@ def test_one_selection_row_per_config_and_cycle_date(migrated_engine):
     cycles were hand-run on 2026-09-14 and each appended its own row for that
     same date -- one cycle_date is one decision.
     """
-    from datetime import date
-
     from sqlalchemy.exc import IntegrityError
 
     from growmore_bot.persistence.models import MCXOptionsSelection
@@ -296,8 +288,6 @@ def test_only_one_unsettled_leg_per_position(migrated_engine):
     """0026's other partial unique index -- the state that used to raise a
     bare MultipleResultsFound and silently wedge that commodity every day.
     """
-    from datetime import date
-
     from sqlalchemy.exc import IntegrityError
 
     from growmore_bot.persistence.models import MCXOptionsLeg
@@ -357,3 +347,42 @@ def test_the_hot_query_indexes_exist(migrated_engine):
     assert "ix_mcx_options_selections_config_cycle" in names
     assert "ix_mcx_options_positions_config_opened" in names
     assert "ix_mcx_options_legs_position" in names
+
+
+def test_stop_legs_are_permitted_and_risk_flags_default_to_off(migrated_engine):
+    """Migration 0027. Every risk/selection flag must arrive NULL/false, since
+    the whole point is that applying the migration changes the strategy's
+    behaviour in no way at all until the owner sets one. 0027 also widens
+    0026's leg CHECKs to admit the STOP leg a stop-out records.
+    """
+    from growmore_bot.persistence.models import MCXOptionsLeg
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        session.commit()
+        session.refresh(cfg)
+
+        assert cfg.stop_loss_premium_multiple is None
+        assert cfg.min_dte_days is None
+        assert cfg.max_dte_days is None
+        assert cfg.min_credit_pct_of_strike is None
+        assert cfg.max_relative_spread is None
+        assert cfg.fallback_sigma is None
+        assert cfg.use_bid_for_entry_premium is False
+
+        position = _position_row(session, cfg, state="long_futures", basis=6000.0, futures_qty=100)
+        leg = MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=date(2026, 9, 24),
+            opt_type="STOP", strike=None, premium=None, lots=1, action="stop_loss",
+            opened_at=datetime.now(timezone.utc), settled_at=datetime.now(timezone.utc),
+            pnl=-20000.0,
+        )
+        session.add(leg)
+        session.commit()
+        session.refresh(leg)
+        assert leg.opt_type == "STOP"
+
+        # Same teardown care as the ROLL-leg test above: 0023's downgrade
+        # restores `premium` to NOT NULL.
+        session.delete(leg)
+        session.commit()

@@ -105,7 +105,7 @@ def test_one_configs_failure_does_not_abort_the_others(session):
     _config(session, strategy, "SILVERM")
     dhan_client = MagicMock()
 
-    def _fetch(client, instrument, today):
+    def _fetch(client, instrument, today, **_dte_window):
         if instrument.symbol == "GOLDM":
             raise ValueError("boom -- simulated Dhan failure for GOLDM")
         return MagicMock()
@@ -181,7 +181,7 @@ def test_fetch_is_retried_on_dhan_api_error_and_then_succeeds(session):
     calls = {"n": 0}
     successful_cycle_data = MagicMock()
 
-    def _fetch(client, instrument, today):
+    def _fetch(client, instrument, today, **_dte_window):
         calls["n"] += 1
         if calls["n"] == 1:
             raise DhanApiError(
@@ -216,7 +216,7 @@ def test_fetch_persistent_dhan_api_error_is_retried_then_skipped_without_abortin
 
     goldm_attempts = {"n": 0}
 
-    def _fetch(client, instrument, today):
+    def _fetch(client, instrument, today, **_dte_window):
         if instrument.symbol == "GOLDM":
             goldm_attempts["n"] += 1
             raise DhanApiError("persistent burst-limit failure")
@@ -372,3 +372,40 @@ def test_a_failing_instrument_master_fetch_skips_the_commodity_rather_than_tradi
 
     fetch.assert_not_called()
     run_cycle_mock.assert_not_called()
+
+
+def test_passes_the_configs_dte_window_through_to_the_fetch(session):
+    """`min_dte_days`/`max_dte_days` live on MCXOptionsConfig (migration 0027)
+    but are applied during expiry selection in live_data, so the scheduler is
+    what has to carry them across.
+    """
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    cfg = _config(session, strategy, "GOLDM")
+    cfg.min_dte_days = 7
+    cfg.max_dte_days = 45
+    session.commit()
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"):
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    assert fetch.call_args.kwargs["min_dte_days"] == 7
+    assert fetch.call_args.kwargs["max_dte_days"] == 45
+
+
+def test_passes_no_dte_window_when_the_config_leaves_it_unset(session):
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"):
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    assert fetch.call_args.kwargs["min_dte_days"] is None
+    assert fetch.call_args.kwargs["max_dte_days"] is None

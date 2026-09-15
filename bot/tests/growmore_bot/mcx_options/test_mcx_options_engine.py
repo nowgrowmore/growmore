@@ -17,6 +17,7 @@ tests/growmore_bot/mcx_options/test_regime.py uses.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -31,7 +32,7 @@ from growmore_bot.mcx_options.mcx_options_engine import (
     _settle_leg,
     run_cycle,
 )
-from growmore_bot.mcx_options.pricing import black76_price
+from growmore_bot.mcx_options.pricing import black76_delta, black76_price
 from growmore_bot.persistence.models import (
     Base,
     MCXOptionsConfig,
@@ -1140,3 +1141,189 @@ def test_settling_a_leg_with_no_premium_raises_rather_than_asserting():
 
     with pytest.raises(MCXOptionsStateError, match="premium"):
         _settle_leg(position, leg, cycle_data, datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# Risk/selection flags (migration 0027). Each is a STRATEGY decision for the
+# account owner, not a bug fix, so each is default-OFF and each gets a test
+# proving both halves: that leaving it unset changes nothing, and that setting
+# it does what it says. See docs/pending-actions.md.
+# ---------------------------------------------------------------------------
+
+
+def _long_futures_position(
+    session, cfg, *, basis, futures_qty, premium=50.0, lot_size=100,
+):
+    """A held futures position with no OPEN leg, but with the settled short put
+    that got it assigned -- the state the engine is in on a day it would write
+    a fresh covered call.
+
+    The settled leg is not decoration: `stop_loss_premium_multiple` is a
+    multiple of the premium actually collected on the position, which the
+    engine sums from exactly these rows.
+    """
+    collected = premium * float(cfg.lots) * lot_size
+    position = MCXOptionsPosition(
+        id=uuid.uuid4(), config_id=cfg.id, status="open", state="long_futures", basis=basis,
+        futures_qty=futures_qty, opened_at=datetime.now(timezone.utc) - timedelta(days=2),
+        realized_pnl=collected, unrealized_pnl=0,
+    )
+    session.add(position)
+    session.flush()
+    session.add(
+        MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=TODAY - timedelta(days=1),
+            opt_type="PE", strike=basis, premium=premium, lots=cfg.lots, action="assigned",
+            opened_at=datetime.now(timezone.utc) - timedelta(days=2),
+            settled_at=datetime.now(timezone.utc) - timedelta(days=1), assigned=True,
+        )
+    )
+    session.flush()
+    return position, collected
+
+
+def test_stop_loss_is_off_by_default(session):
+    """With `stop_loss_premium_multiple` unset the position is held no matter
+    how far underwater -- the strategy's documented stop-less design.
+    """
+    cfg = _config(session)
+    position, _collected = _long_futures_position(session, cfg, basis=6000.0, futures_qty=100)
+    F = 4000.0  # catastrophically underwater: -200,000 against 5,000 collected
+    cycle_data = _cycle_data(
+        _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
+    )
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+
+    assert position.status == "open"
+    assert position.state == "long_futures"
+    assert float(position.unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
+
+
+def test_stop_loss_flattens_the_position_once_enabled(session):
+    cfg = _config(session, stop_loss_premium_multiple=2.0)
+    position, premium_collected = _long_futures_position(
+        session, cfg, basis=6000.0, futures_qty=100
+    )
+    assert premium_collected == 5000.0  # 50.0 premium x 1 lot x lot_size 100
+    F = 5800.0  # -20,000 unrealized, against 2 x 5,000 allowed
+    cycle_data = _cycle_data(
+        _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
+    )
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+
+    assert position.status == "closed"
+    assert position.state == "closed"
+    assert float(position.futures_qty) == 0.0
+    assert float(position.unrealized_pnl) == 0.0
+    # The loss is crystallized, net of a real futures exit cost, not discarded.
+    exit_cost = leg_cost(F * 100, "sell", DEFAULT_COST_MODEL)
+    assert float(position.realized_pnl) == pytest.approx(
+        premium_collected + (F - 6000.0) * 100 - exit_cost
+    )
+
+    stop_leg = session.query(MCXOptionsLeg).filter_by(action="stop_loss").one()
+    assert stop_leg.opt_type == "STOP"
+    assert stop_leg.settled_at is not None
+
+    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    assert "stop" in selections[0].reason.lower()
+
+
+def test_stop_loss_leaves_a_position_inside_the_threshold_alone(session):
+    cfg = _config(session, stop_loss_premium_multiple=2.0)
+    position, _collected = _long_futures_position(session, cfg, basis=6000.0, futures_qty=100)
+    F = 5950.0  # -5,000 unrealized, well inside the 10,000 allowed
+
+    cycle_data = _cycle_data(
+        _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
+    )
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    session.refresh(position)
+
+    assert position.status == "open"
+
+
+def test_minimum_credit_gate_is_off_by_default_and_blocks_when_set(session):
+    """No premium-richness gate exists today -- the engine sells the target
+    delta whether the premium is fat or derisory.
+    """
+    expiry = TODAY + timedelta(days=10)
+    T = (expiry - TODAY).days / 365.25
+    F = 6000.0
+    chain = _chain(F, T)
+
+    unset = _config(session)
+    run_cycle(session, unset, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
+    session.commit()
+    assert session.query(MCXOptionsLeg).all() != []
+
+    # 10% of the strike is far above any plausible OTM put premium here.
+    gated = _config(session, min_credit_pct_of_strike=0.10)
+    run_cycle(session, gated, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
+    session.commit()
+
+    selections = session.query(MCXOptionsSelection).filter_by(config_id=gated.id).all()
+    assert len(selections) == 1
+    assert selections[0].selected_strike is None
+    assert "credit" in selections[0].reason.lower()
+
+
+def test_entry_premium_uses_the_bid_when_that_flag_is_set(session):
+    """A seller hits the bid; `ltp` systematically overstates the credit."""
+    cfg = _config(session, use_bid_for_entry_premium=True)
+    expiry = TODAY + timedelta(days=10)
+    T = (expiry - TODAY).days / 365.25
+    F = 6000.0
+    cycle_data = _cycle_data(_consolidating_bars(), F, _chain(F, T), expiry, T)
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+
+    leg = session.query(MCXOptionsLeg).filter_by(action="sell_put").one()
+    row = next(
+        r for r in cycle_data.option_chain.rows
+        if r.opt_type == "PE" and r.strike == float(leg.strike)
+    )
+    # `_chain_row` quotes bid at 98% of theoretical price -- strictly below ltp.
+    assert float(leg.premium) == pytest.approx(row.top_bid_price)
+    assert float(leg.premium) < row.ltp
+
+
+def test_fallback_sigma_overrides_the_module_default_per_commodity(session):
+    """DEFAULT_SIGMA is hard-coded at 0.20 for both GOLDM and SILVERM; silver's
+    realised vol is materially higher. Only affects strikes whose own quoted
+    IV is missing or implausible.
+    """
+    cfg = _config(session, fallback_sigma=0.80)
+    expiry = TODAY + timedelta(days=10)
+    T = (expiry - TODAY).days / 365.25
+    F = 6000.0
+    # Strip every row's IV so the fallback is what actually prices the chain.
+    chain = _chain(F, T)
+    chain = OptionChainSnapshot(
+        spot=chain.spot,
+        rows=[replace(r, iv=None) for r in chain.rows],
+    )
+    cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
+
+    run_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+
+    leg = session.query(MCXOptionsLeg).filter_by(action="sell_put").one()
+    candidates = (
+        session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).one().candidates_considered
+    )
+    picked = next(c for c in candidates if float(c["strike"]) == float(leg.strike))
+    # At sigma=0.80 the same strike carries a much larger |delta| than it
+    # would at the 0.20 module default -- proving the override reached the
+    # pricing call rather than being silently ignored.
+    assert abs(picked["delta"]) == pytest.approx(
+        abs(black76_delta("PE", F, float(leg.strike), T, 0.80, 0.0))
+    )

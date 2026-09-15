@@ -21,6 +21,13 @@ function config(overrides: Partial<MCXOptionsConfig> = {}): MCXOptionsConfig {
     min_open_interest: 100,
     margin_multiple_of_premium: "3.0",
     futures_roll_cost_per_lot: "0",
+    stop_loss_premium_multiple: null,
+    min_dte_days: null,
+    max_dte_days: null,
+    min_credit_pct_of_strike: null,
+    max_relative_spread: null,
+    use_bid_for_entry_premium: false,
+    fallback_sigma: null,
     updated_at: "2026-09-06T00:00:00Z",
     ...overrides,
   };
@@ -676,5 +683,42 @@ describe("MCXOptionsClient — review fixes", () => {
       .find((el) => el.tagName === "DT")!
       .closest("div")!;
     expect(within(card).getByText("₹0.00")).toBeInTheDocument();
+  });
+});
+
+describe("MCXOptionsClient — risk flags", () => {
+  it("says plainly that no risk flags are enabled, rather than staying silent", () => {
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/none enabled \(no stop-loss/)).toBeInTheDocument();
+  });
+
+  it("surfaces each flag that IS set", () => {
+    render(
+      <MCXOptionsClient
+        configs={[
+          config({
+            stop_loss_premium_multiple: "2.5",
+            min_dte_days: 7,
+            max_dte_days: 45,
+            use_bid_for_entry_premium: true,
+          }),
+        ]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/stop-loss at 2\.5× premium/)).toBeInTheDocument();
+    expect(screen.getByText(/DTE 7…45d/)).toBeInTheDocument();
+    expect(screen.getByText(/entry priced at bid/)).toBeInTheDocument();
   });
 });

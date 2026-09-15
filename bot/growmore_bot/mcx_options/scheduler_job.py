@@ -57,7 +57,7 @@ _FETCH_MAX_ATTEMPTS = 3
 
 
 def _fetch_cycle_data_with_retry(
-    dhan_client: Any, instrument: Any, cycle_date: date
+    dhan_client: Any, instrument: Any, cycle_date: date, config: Any = None
 ) -> Any:
     """Wraps `live_data.fetch_cycle_data` with a short retry-with-backoff on
     `DhanApiError` -- the exception type `DhanClient._raise_if_failed` raises
@@ -76,10 +76,22 @@ def _fetch_cycle_data_with_retry(
     of `live_data` as "the ONLY module calling DhanClient, but a pure fetch,
     no retry policy baked in" -- retry/backoff is an orchestration concern.
     """
+    # The days-to-expiry window is a MCXOptionsConfig preference (migration
+    # 0027, default-OFF) but is applied during expiry SELECTION, inside
+    # live_data -- so it has to be carried across from here.
+    min_dte = getattr(config, "min_dte_days", None)
+    max_dte = getattr(config, "max_dte_days", None)
+
     last_error: DhanApiError
     for attempt in range(1, _FETCH_MAX_ATTEMPTS + 1):
         try:
-            return live_data.fetch_cycle_data(dhan_client, instrument, cycle_date)
+            return live_data.fetch_cycle_data(
+                dhan_client,
+                instrument,
+                cycle_date,
+                min_dte_days=None if min_dte is None else int(min_dte),
+                max_dte_days=None if max_dte is None else int(max_dte),
+            )
         except DhanApiError as exc:
             last_error = exc
             if attempt == _FETCH_MAX_ATTEMPTS:
@@ -210,7 +222,9 @@ def run_mcx_options_configs(session: Any, dhan_client: Any, today: Optional[date
             # Never trade an expired contract -- see _ensure_contract_is_current.
             if not _ensure_contract_is_current(session, dhan_client, instrument, cycle_date):
                 continue
-            cycle_data = _fetch_cycle_data_with_retry(dhan_client, instrument, cycle_date)
+            cycle_data = _fetch_cycle_data_with_retry(
+                dhan_client, instrument, cycle_date, config
+            )
             run_cycle(session, config, cycle_data, today=cycle_date)
         except Exception:  # noqa: BLE001 -- one commodity must not lose the whole cycle
             logger.exception(

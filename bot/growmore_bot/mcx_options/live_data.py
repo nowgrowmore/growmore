@@ -138,7 +138,13 @@ def _parse_expiry(raw: str) -> date:
         ) from exc
 
 
-def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> MCXCycleData:
+def fetch_cycle_data(
+    dhan_client: DhanClient,
+    instrument: Any,
+    today: date,
+    min_dte_days: int | None = None,
+    max_dte_days: int | None = None,
+) -> MCXCycleData:
     """Fetch this cycle's futures history, live futures price, nearest
     upcoming option expiry, and that expiry's option chain for one
     commodity `instrument`.
@@ -175,15 +181,27 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
     parsed_expiries = [_parse_expiry(e) for e in raw_expiries]
     # Strictly in the future, by at least MIN_OPTION_DTE_DAYS -- an expiry
     # dated today is NOT tradeable here; see that constant's docstring.
+    #
+    # `min_dte_days`/`max_dte_days` (MCXOptionsConfig, migration 0027) narrow
+    # that further to a strategy PREFERENCE, and are None/off by default. The
+    # `max(...)` is deliberate: the config's floor can only ever tighten the
+    # hard correctness floor, never undercut it, so setting `min_dte_days=0`
+    # cannot re-admit a same-day expiry.
+    floor_dte = MIN_OPTION_DTE_DAYS if min_dte_days is None else max(MIN_OPTION_DTE_DAYS, min_dte_days)
     upcoming = sorted(
-        e for e in parsed_expiries if (e - today).days >= MIN_OPTION_DTE_DAYS
+        e
+        for e in parsed_expiries
+        if (e - today).days >= floor_dte
+        and (max_dte_days is None or (e - today).days <= max_dte_days)
     )
     if not upcoming:
         raise ValueError(
-            f"No tradeable option expiry (at least {MIN_OPTION_DTE_DAYS} day(s) after "
+            f"No tradeable option expiry (at least {floor_dte} day(s) after "
             f"{today.isoformat()}) returned by Dhan for "
             f"{getattr(instrument, 'symbol', instrument)!r} -- Dhan listed "
-            f"{sorted(parsed_expiries)!r}. An expiry dated today is deliberately "
+            f"{sorted(parsed_expiries)!r}"
+            + (f", max {max_dte_days} day(s)" if max_dte_days is not None else "")
+            + ". An expiry dated today is deliberately "
             "excluded (T_years would be 0, which collapses every Black-76 delta to a "
             "0/+-1 boundary and makes the target-delta strike pick meaningless)."
         )

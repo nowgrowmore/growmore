@@ -337,6 +337,65 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   Sec 8 for what would be worth trying next.
 
 
+## MCX options strategy — independent code review (2026-09-15)
+
+An independent review of `bot/growmore_bot/mcx_options/` and the `/mcx-options` page, run after the
+strategy's first real paper cycles. Correctness bugs are already fixed and pushed (see
+`docs/technical-debt.md`). What is left here is what only you can decide or do.
+
+### Do first
+
+- [ ] **Check whether any past cycle traded an expired contract.** Futures rollover used to be
+  reachable only from the futures tick's loop over enabled `bot_config` rows, which this strategy
+  never creates. If GOLDM/SILVERM have no enabled futures `bot_config`, then
+  `Instrument.contract_expiry`/`security_id` were never advancing and cycles may have been priced
+  against a contract that had already expired. The code now rolls these instruments itself and
+  fails closed, but **past selection rows may be worthless** — worth knowing before drawing any
+  conclusion from them. (I could not check this myself: reads against the production database are
+  blocked in my sandbox.)
+- [ ] **Re-run `provision_mcx_options_configs --apply`** against production. `min_open_interest`
+  was never written by that script, so both configs have been running with the OI floor at **0** —
+  a complete no-op. The script now sets a conservative `10`.
+- [ ] **Treat every P&L figure shown so far as provisional.** Option transaction costs are modelled
+  as exactly zero (the real Dhan commodity-options rates are still unsourced — the existing
+  `MCX_COMMODITY_OPTION_COST_MODEL` deliberately refuses to invent them), and the option lot size
+  is assumed equal to the futures lot size, which `research/mcx_options/contract_specs.py` warns
+  against. Sourcing both is on the existing list below.
+
+### Risk/selection flags now available, all OFF (migration 0027)
+
+These are the review's *strategy* findings. Each is a judgement call that changes what the bot does
+with money and breaks comparability with the offline backtest, so none is enabled: every column is
+NULL/false and the engine treats that as disabled. Set one on `mcx_options_configs` when you want
+it; `/mcx-options` lists whichever are active.
+
+- [ ] **`stop_loss_premium_multiple`** — flatten a long-futures position once its unrealized loss
+  exceeds N × the premium collected on it. The strategy is deliberately stop-less, but that design
+  was validated on a backtest whose option costs were placeholders, and an unhedged short gold put
+  is the largest tail risk in the system. A value of 2–3 is the conventional starting point.
+- [ ] **`min_dte_days` / `max_dte_days`** — the engine currently takes whatever the nearest expiry
+  is, 1 day or 45, which are very different trades in gamma and premium terms.
+- [ ] **`min_credit_pct_of_strike`** — there is no premium-richness gate at all today: the engine
+  writes its target delta whether the premium is fat or derisory.
+- [ ] **`max_relative_spread`** — the existing executability gate only checks that the last price
+  sits *inside* the bid/ask. The real 2026-09-14 SILVERM market of **38 / 2044.5** passes that.
+- [ ] **`use_bid_for_entry_premium`** — a seller hits the bid; booking `ltp` overstates every entry
+  credit and therefore every P&L number on the dashboard. Turning this on will make results look
+  worse and be more honest.
+- [ ] **`fallback_sigma`** — per-commodity replacement for the hard-coded 0.20 used when a strike's
+  own IV is missing or implausible. Silver's realised vol is materially higher than gold's.
+
+### Deliberately NOT built yet — tell me if you want these
+
+- [ ] **Portfolio-level exposure cap across GOLDM and SILVERM.** They are highly correlated
+  bullion and nothing limits their combined size; `margin_multiple_of_premium` is read by no code
+  at all. I did not put this behind a flag because the design questions are real — what counts as
+  exposure (notional? margin? delta?), and whether to read live margin from Dhan's funds API —
+  and a half-built flag would hide those rather than answer them.
+- [ ] **Operational alerting.** There is no notification path anywhere in `growmore_bot/`, so a
+  commodity that fails every day is invisible outside the log file. Same reasoning: the question
+  is what channel you actually want (email, Telegram, a dashboard banner), which is your call.
+
 ## MCX options-selling strategy — live in paper mode (2026-09-14)
 
 - [x] **All three migrations applied to production Neon** (`0022_mcx_options`,

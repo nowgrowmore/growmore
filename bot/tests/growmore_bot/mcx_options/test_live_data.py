@@ -258,3 +258,77 @@ def test_raises_loudly_when_the_only_expiry_left_is_today():
 
     with pytest.raises(ValueError, match="expiry"):
         fetch_cycle_data(client, _Instrument(), today)
+
+
+# ---------------------------------------------------------------------------
+# Days-to-expiry window (MCXOptionsConfig.min_dte_days/max_dte_days, migration
+# 0027) -- DEFAULT-OFF. Distinct from MIN_OPTION_DTE_DAYS, which is a hard
+# correctness floor that always applies. See docs/pending-actions.md.
+# ---------------------------------------------------------------------------
+
+
+def test_dte_window_is_off_by_default_and_takes_the_nearest_tradeable_expiry():
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[
+            (today + timedelta(days=2)).isoformat(),
+            (today + timedelta(days=30)).isoformat(),
+        ],
+        chain=_some_chain(),
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today)
+
+    assert cycle.option_expiry == today + timedelta(days=2)
+
+
+def test_min_dte_days_skips_expiries_that_are_too_close():
+    """A 2-day expiry and a 30-day expiry are very different trades -- high
+    gamma and thin premium versus the opposite. The engine has no preference
+    at all today; this makes one expressible.
+    """
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[
+            (today + timedelta(days=2)).isoformat(),
+            (today + timedelta(days=30)).isoformat(),
+        ],
+        chain=_some_chain(),
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, min_dte_days=7)
+
+    assert cycle.option_expiry == today + timedelta(days=30)
+
+
+def test_max_dte_days_skips_expiries_that_are_too_far():
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[
+            (today + timedelta(days=45)).isoformat(),
+            (today + timedelta(days=90)).isoformat(),
+        ],
+        chain=_some_chain(),
+    )
+
+    with pytest.raises(ValueError, match="expiry"):
+        fetch_cycle_data(client, _Instrument(), today, max_dte_days=30)
+
+
+def test_the_dte_window_can_never_undercut_the_hard_correctness_floor():
+    """`min_dte_days=0` must not re-admit a same-day expiry -- T_years would
+    be 0 and every Black-76 delta would collapse to a boundary value.
+    """
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[today.isoformat(), (today + timedelta(days=10)).isoformat()],
+        chain=_some_chain(),
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, min_dte_days=0)
+
+    assert cycle.option_expiry == today + timedelta(days=10)

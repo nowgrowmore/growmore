@@ -5,6 +5,7 @@ import {
   formatIstDate,
   formatIstDateTime,
   formatNumber,
+  formatPercent,
   formatPositionAge,
   toNumber,
 } from "@/lib/format";
@@ -71,6 +72,34 @@ function OpenLegSummary({ leg }: { leg: MCXOptionsLeg | null }) {
       {formatIstDate(leg.cycle_expiry)}
     </span>
   );
+}
+
+//: Risk/selection flags (migration 0027) are null/false by default, and the
+//: bot treats that as "disabled". Only the ones actually SET are rendered:
+//: listing seven "off"s on every config would bury the one that isn't, and an
+//: enabled risk flag that shows up nowhere in the UI is exactly the kind of
+//: thing that goes unnoticed for months.
+function activeRiskFlags(config: MCXOptionsConfig): string[] {
+  const flags: string[] = [];
+  if (config.stop_loss_premium_multiple !== null) {
+    flags.push(`stop-loss at ${formatNumber(toNumber(config.stop_loss_premium_multiple), 1)}× premium`);
+  }
+  if (config.min_dte_days !== null || config.max_dte_days !== null) {
+    flags.push(`DTE ${config.min_dte_days ?? "–"}…${config.max_dte_days ?? "–"}d`);
+  }
+  if (config.min_credit_pct_of_strike !== null) {
+    flags.push(
+      `min credit ${formatPercent(toNumber(config.min_credit_pct_of_strike) * 100, 2)} of strike`
+    );
+  }
+  if (config.max_relative_spread !== null) {
+    flags.push(`max spread ${formatPercent(toNumber(config.max_relative_spread) * 100, 0)}`);
+  }
+  if (config.use_bid_for_entry_premium) flags.push("entry priced at bid");
+  if (config.fallback_sigma !== null) {
+    flags.push(`fallback σ ${formatNumber(toNumber(config.fallback_sigma))}`);
+  }
+  return flags;
 }
 
 function regimeLabel(regime: string | null): string {
@@ -203,6 +232,12 @@ export function MCXOptionsClient({
                   {formatNumber(toNumber(config.trend_favorable_target_delta))}{" "}
                   (trend favorable) · Min OI {config.min_open_interest} · Roll cost{" "}
                   {formatCurrency(toNumber(config.futures_roll_cost_per_lot))}/lot
+                </p>
+                <p className="mt-1 text-xs text-[color:var(--text-muted)]">
+                  Risk flags:{" "}
+                  {activeRiskFlags(config).length === 0
+                    ? "none enabled (no stop-loss, no DTE window, no premium floor)"
+                    : activeRiskFlags(config).join(" · ")}
                 </p>
               </div>
               <StrategyToggle configId={config.id} initialEnabled={config.enabled} onToggle={onToggle} />

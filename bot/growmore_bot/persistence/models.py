@@ -723,6 +723,40 @@ class MCXOptionsConfig(Base):
         Numeric, nullable=False, server_default="0.50"
     )
     min_open_interest: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # ---- Risk/selection flags (migration 0027), ALL DEFAULT-OFF ----------
+    # Each of these changes what the strategy DOES, not whether it does it
+    # correctly, so each is a decision for the account owner rather than a
+    # bug fix. NULL (or False) means "disabled", and every code path reads it
+    # that way -- with all of them unset the engine behaves exactly as it did
+    # before migration 0027. See that migration's docstring and
+    # docs/pending-actions.md for what enabling each one would mean.
+    #
+    # Flatten a long-futures position once its unrealized loss exceeds N x the
+    # premium collected on it. The strategy is deliberately stop-less by
+    # design (research/mcx_options/engine.py: "Do not add early-exit logic
+    # here") -- this column exists so that decision can be REVISITED, not
+    # because it has been.
+    stop_loss_premium_multiple: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Days-to-expiry preference. Distinct from live_data.MIN_OPTION_DTE_DAYS,
+    # which is a hard correctness floor (delta math is meaningless at T=0)
+    # that always applies and is not tunable.
+    min_dte_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_dte_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Refuse to sell for a premium below this fraction of the strike -- the
+    # engine has no premium-richness gate at all today.
+    min_credit_pct_of_strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Reject a strike whose bid/ask is wider than this fraction of its mid.
+    # The executability gate only checks that LTP sits INSIDE the spread, so
+    # the real 2026-09-14 SILVERM market of 38 / 2044.5 still passes it.
+    max_relative_spread: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # Book the entry credit at the bid rather than the last-traded price -- a
+    # seller hits the bid, so `ltp` systematically overstates every credit.
+    use_bid_for_entry_premium: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    # Per-commodity replacement for mcx_options_engine.DEFAULT_SIGMA (0.20),
+    # used when a strike's own quoted IV is missing or implausible.
+    fallback_sigma: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     # Flat margin-multiple placeholder -- reporting only, never gates a
     # trade (see EngineConfig.margin_multiple_of_premium).
     margin_multiple_of_premium: Mapped[float] = mapped_column(
@@ -832,15 +866,16 @@ class MCXOptionsLeg(Base):
             sqlite_where=text("settled_at IS NULL"),
         ),
         CheckConstraint(
-            "opt_type IN ('PE', 'CE', 'ROLL')", name="ck_mcx_options_legs_opt_type"
+            "opt_type IN ('PE', 'CE', 'ROLL', 'STOP')",
+            name="ck_mcx_options_legs_opt_type",
         ),
         CheckConstraint(
             "action IN ('sell_put', 'sell_call', 'assigned', 'called_away', "
-            "'put_expired_otm', 'call_expired_otm', 'roll')",
+            "'put_expired_otm', 'call_expired_otm', 'roll', 'stop_loss')",
             name="ck_mcx_options_legs_action",
         ),
         CheckConstraint(
-            "(opt_type = 'ROLL') = (strike IS NULL)",
+            "(opt_type IN ('ROLL', 'STOP')) = (strike IS NULL)",
             name="ck_mcx_options_legs_roll_has_no_strike",
         ),
     )
@@ -855,9 +890,10 @@ class MCXOptionsLeg(Base):
     # roll-specific date column, since exactly one of "option cycle expiry"
     # / "new futures contract expiry" is ever meaningful on a given row.
     cycle_expiry: Mapped[date] = mapped_column(Date, nullable=False)
-    # PE|CE|ROLL -- ROLL (added in migration 0023) marks a futures contract
-    # rollover event, which is not an option leg at all: it carries no
-    # strike/premium (see below) and no delta/OI selection.
+    # PE|CE|ROLL|STOP -- ROLL (migration 0023) marks a futures contract
+    # rollover event and STOP (migration 0027) a stop-loss flatten; neither is
+    # an option leg at all, so both carry no strike/premium (see below) and no
+    # delta/OI selection.
     opt_type: Mapped[str] = mapped_column(Text, nullable=False)
     # NULL only for a "roll" leg (migration 0023 made these nullable) -- a
     # roll has no strike or premium, it is a futures-only event.

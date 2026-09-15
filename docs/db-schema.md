@@ -255,11 +255,17 @@ erDiagram
     MCX_OPTIONS_SELECTIONS {
         uuid id PK
         uuid config_id FK
-        date cycle_date
+        date cycle_date "UNIQUE with config_id (0026) -- one cycle date is one decision"
         text regime "consolidating|trend_favorable|trend_unfavorable|null (no opinion)"
         numeric target_delta
         numeric selected_strike
         text reason "human-readable, rendered directly as prose on the dashboard"
+        numeric futures_price
+        text position_state
+        numeric position_basis
+        numeric position_unrealized_pnl
+        jsonb candidates_considered
+        date option_expiry
         timestamptz created_at
     }
 ```
@@ -299,5 +305,22 @@ erDiagram
   `roll` leg action. `basis` keeps the same convention as `wheel_basket_positions.basis`: the raw
   assignment strike, never premium-adjusted. There is no stop-loss anywhere in this state machine by
   deliberate design (`bot/research/mcx_options/engine.py`'s module docstring) — a position only ever
-  closes via expiry, assignment, or being called away; this is schema-only, the engine enforcing it
-  is a later phase (see `docs/pending-actions.md`). `mode` is likewise `"paper"`-only for now.
+  closes via expiry, assignment, or being called away. `mode` is likewise `"paper"`-only for now.
+- **Migrations 0026/0027 (independent code review, 2026-09-15).** The four `mcx_options_*` tables
+  originally shipped with no indexes and no constraints beyond PK/FK. `0026_mcx_options_guards`
+  adds indexes on the predicates the engine and dashboard actually query
+  (`selections(config_id, cycle_date, created_at)`, `positions(config_id, opened_at)`,
+  `legs(position_id)`); `UNIQUE (config_id, cycle_date)` on `mcx_options_selections` — one cycle
+  date is one decision, and a re-run now replaces that day's row rather than appending another
+  (three hand-run cycles on 2026-09-14 each left their own); partial unique indexes enforcing **at
+  most one open position per config** and **at most one unsettled leg per position** (the engine
+  previously used `.first()` for the former, silently orphaning the second, and `.one_or_none()`
+  for the latter, whose bare `MultipleResultsFound` wedged that commodity every day thereafter);
+  `UNIQUE (strategy_id, symbol)` on `mcx_options_configs`; and CHECK constraints pinning the
+  closed-set text columns — `status`, `state`, `opt_type`, `action`, `regime`, and **`mode`, the
+  live-trading gate, which was unconstrained free text**. A further CHECK ties 0023's
+  `strike`/`premium` nullability to the only rows entitled to it
+  (`(opt_type IN ('ROLL','STOP')) = (strike IS NULL)`). The upgrade de-duplicates existing
+  selection rows before adding the unique constraint.
+  `0027_mcx_options_risk_flags` then adds the default-OFF risk/selection columns described in
+  `docs/pending-actions.md` and widens the leg CHECKs to admit a `STOP` leg.

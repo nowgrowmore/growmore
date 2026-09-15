@@ -65,10 +65,30 @@ enabled `mcx_options_configs` row, per-config try/except so one commodity's fail
 another's. 23:59 IST is chosen to clear MCX's own seasonal non-agri close (23:30/23:55 IST) in
 every season without a season-aware trigger. `bot/research/provision_mcx_options_configs.py` is
 the idempotent `--dry-run`/`--apply` CLI that creates the `mcx_options_configs` rows for
-GOLDM/SILVERM — it always creates them `enabled=False`; nothing has actually enabled this strategy
-in any environment yet (see `docs/pending-actions.md`). Futures contract rollover is a known,
-loudly-flagged gap (see `docs/technical-debt.md`) — do not enable this strategy across a
-contract-month boundary until that is built.
+GOLDM/SILVERM — it always creates them `enabled=False`.
+
+An **independent code review on 2026-09-15** (after the strategy's first real paper cycles) changed
+several things here; see `docs/technical-debt.md` for the full list. The load-bearing ones:
+
+- **Settlement is due on or after a leg's expiry, not only on it.** Exact date equality meant one
+  missed cycle wedged that commodity permanently and silently.
+- **Only a strictly-future expiry is tradeable** (`live_data.MIN_OPTION_DTE_DAYS`): at `T_years = 0`
+  every Black-76 delta collapses to a 0/±1 boundary and the strike pick degenerates.
+- **Futures rollover no longer depends on an unrelated `bot_config` row.**
+  `roll_to_next_contract` was only ever reached from `run_all_enabled_configs`'s loop over enabled
+  `bot_config` rows, which this strategy never creates — so `Instrument.contract_expiry` would not
+  advance for GOLDM/SILVERM and the engine could keep quoting an expired `security_id`.
+  `mcx_options/scheduler_job.py` now runs the close-out/rollover check itself and **fails closed**,
+  skipping a commodity for the day rather than trading an expired contract.
+- **Migration 0026** adds the indexes, uniqueness (one selection row per cycle date, one open
+  position per config, one unsettled leg per position) and state CHECK constraints these tables
+  shipped without — including on `mode`, the live-trading gate, which was unconstrained text.
+- **Migration 0027** adds risk/selection flags (`stop_loss_premium_multiple`, `min_dte_days`/
+  `max_dte_days`, `min_credit_pct_of_strike`, `max_relative_spread`, `use_bid_for_entry_premium`,
+  `fallback_sigma`). **All are null/false by default and every code path treats that as disabled**,
+  so the strategy behaves exactly as before until the account owner sets one. They are the review's
+  *strategy* findings, which are judgement calls rather than bugs — see `docs/pending-actions.md`.
+  The `/mcx-options` page lists whichever are active, so an enabled one is never invisible.
 
 ## Components
 

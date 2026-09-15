@@ -98,20 +98,33 @@ class CandidateEvaluation:
     top_ask_price: Optional[float] = None
 
 
-def _is_executable(row: OptionChainRow) -> bool:
+def _is_executable(row: OptionChainRow, max_relative_spread: Optional[float] = None) -> bool:
     """True iff `row.ltp` is a real, currently-tradeable price -- i.e. Dhan
     quotes a two-sided market for this row and `ltp` falls within it
     (inclusive of the boundary prices themselves).
 
     See module docstring's "Executability gate" section for why this exists
     and why the OI floor alone is not sufficient.
+
+    `max_relative_spread` (DEFAULT-OFF, `MCXOptionsConfig.max_relative_spread`,
+    migration 0027) additionally rejects a row whose bid/ask is wider than
+    that fraction of its own mid. The gate above only establishes that `ltp`
+    sits INSIDE the spread, which the real 2026-09-14 SILVERM market of
+    38 / 2044.5 would satisfy for almost any `ltp` -- "inside a meaningless
+    spread" is not the same as tradeable. Left None, nothing changes.
     """
     bid, ask = row.top_bid_price, row.top_ask_price
     if bid is None or ask is None:
         return False
     if bid <= 0 or ask <= 0:
         return False
-    return bid <= row.ltp <= ask
+    if not (bid <= row.ltp <= ask):
+        return False
+    if max_relative_spread is not None:
+        mid = (bid + ask) / 2.0
+        if mid <= 0 or (ask - bid) / mid > max_relative_spread:
+            return False
+    return True
 
 
 def evaluate_candidates(
@@ -122,6 +135,7 @@ def evaluate_candidates(
     sigma: float,
     r: float,
     min_open_interest: int,
+    max_relative_spread: Optional[float] = None,
 ) -> list[CandidateEvaluation]:
     """Every `opt_type` row in `chain` that clears the `min_open_interest`
     floor, with its Black-76 delta computed (using the row's own quoted IV
@@ -141,7 +155,9 @@ def evaluate_candidates(
     survivors = [
         row
         for row in chain.rows
-        if row.opt_type == opt_type and row.oi >= min_open_interest and _is_executable(row)
+        if row.opt_type == opt_type
+        and row.oi >= min_open_interest
+        and _is_executable(row, max_relative_spread)
     ]
     evaluations = []
     for row in survivors:
@@ -166,6 +182,7 @@ def select_strike_by_target_delta(
     r: float,
     target_delta: float,
     min_open_interest: int,
+    max_relative_spread: Optional[float] = None,
 ) -> Optional[OptionChainRow]:
     """The chain row (of `opt_type`) whose |delta| is closest to
     `target_delta`. Rows of the other `opt_type`, with `oi < min_open_interest`,
@@ -180,7 +197,8 @@ def select_strike_by_target_delta(
     functions never compute delta independently/inconsistently.
     """
     candidates = evaluate_candidates(
-        chain, opt_type, futures_price, T_years, sigma, r, min_open_interest
+        chain, opt_type, futures_price, T_years, sigma, r, min_open_interest,
+        max_relative_spread,
     )
     if not candidates:
         return None

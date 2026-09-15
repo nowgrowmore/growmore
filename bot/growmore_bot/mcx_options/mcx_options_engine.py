@@ -439,6 +439,82 @@ def _floor_chain_for_covered_call(
     )
 
 
+def _effective_sigma(config: Any) -> float:
+    """The vol to fall back on for a strike whose own quoted IV is missing or
+    implausible -- `config.fallback_sigma` when set, else `DEFAULT_SIGMA`.
+
+    `DEFAULT_SIGMA` is one hard-coded 0.20 for both GOLDM and SILVERM, and
+    silver's realised vol is materially higher than gold's. Default-OFF
+    (migration 0027): unset means the module constant, exactly as before.
+    """
+    raw = getattr(config, "fallback_sigma", None)
+    return DEFAULT_SIGMA if raw is None else float(raw)
+
+
+def _premium_collected(session: Any, position: MCXOptionsPosition, lot_size: int) -> float:
+    """Total option premium written against `position` so far, gross and IN
+    RUPEES -- the denominator `stop_loss_premium_multiple` is expressed in.
+
+    `lot_size` matters and is not optional: `leg.premium` is quoted PER UNIT,
+    while `position.unrealized_pnl` (what this is compared against) is rupee
+    cash. Dropping it would make the stop threshold `lot_size` times too
+    tight -- 100x for GOLDM -- which in practice means stopping out of
+    essentially every position on its first adverse tick.
+
+    Summed from the position's own legs rather than read off `realized_pnl`,
+    which also carries assignment/roll/exit COSTS and would make the
+    threshold drift with them.
+    """
+    legs = session.query(MCXOptionsLeg).filter_by(position_id=position.id).all()
+    return sum(
+        float(leg.premium) * float(leg.lots) * lot_size
+        for leg in legs
+        if leg.premium is not None and leg.opt_type in ("PE", "CE")
+    )
+
+
+def _stop_out_position(
+    session: Any,
+    config: Any,
+    position: MCXOptionsPosition,
+    cycle_data: MCXCycleData,
+    now: datetime,
+) -> float:
+    """Flatten a long-futures position at today's price, crystallizing the
+    loss net of a real futures exit cost, and record a `STOP` leg.
+
+    Only ever called when `config.stop_loss_premium_multiple` is set -- the
+    strategy is stop-less by default and by design (see the module
+    docstring). Mirrors `_settle_leg`'s called-away branch: the move from
+    `basis` to the exit price is booked into `realized_pnl`, `unrealized_pnl`
+    is zeroed because the position carries no more exposure, and
+    `futures_qty` is cleared so nothing reads phantom exposure off a closed
+    row.
+    """
+    F = cycle_data.futures_price
+    qty = float(position.futures_qty)
+    basis = float(position.basis) if position.basis is not None else F
+
+    exit_mtm = (F - basis) * qty
+    exit_cost = leg_cost(abs(F * qty), "sell", DEFAULT_COST_MODEL)
+    position.realized_pnl = float(position.realized_pnl) + exit_mtm - exit_cost
+    position.unrealized_pnl = 0.0
+    position.futures_qty = 0
+    position.status = "closed"
+    position.state = "closed"
+    position.closed_at = now
+
+    lots = qty / cycle_data.lot_size if cycle_data.lot_size else 0.0
+    session.add(
+        MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=cycle_data.option_expiry,
+            opt_type="STOP", strike=None, premium=None, lots=lots, action="stop_loss",
+            opened_at=now, settled_at=now, pnl=exit_mtm - exit_cost,
+        )
+    )
+    return exit_mtm - exit_cost
+
+
 def _cap_chain_for_short_put(
     chain: OptionChainSnapshot, futures_price: float
 ) -> OptionChainSnapshot:
@@ -648,6 +724,45 @@ def run_cycle(
         # state, so calling it unconditionally is safe on every path.
         _mark_to_market(position, cycle_data)
 
+    # Stop-loss -- DEFAULT-OFF (migration 0027). Checked after the mark above,
+    # so it reads a fresh unrealized figure, and before any entry decision, so
+    # a stopped-out position never has a new leg written against it the same
+    # cycle. `stop_loss_premium_multiple` unset means the strategy's original
+    # stop-less design applies unchanged.
+    stop_multiple = getattr(config, "stop_loss_premium_multiple", None)
+    if (
+        stop_multiple is not None
+        and position is not None
+        and position.status == "open"
+        and position.state == "long_futures"
+    ):
+        collected = _premium_collected(session, position, cycle_data.lot_size)
+        allowed_loss = float(stop_multiple) * collected
+        # `collected > 0` is a real guard, not a formality: a long_futures
+        # position always came from an assigned put, so zero premium means the
+        # leg history is incomplete -- and an allowed loss of 0 would stop out
+        # a position sitting at exactly break-even. Refusing to act on
+        # incomplete data matches this engine's "no opinion, never permissive"
+        # discipline everywhere else.
+        if collected > 0 and float(position.unrealized_pnl) <= -allowed_loss:
+            booked = _stop_out_position(session, config, position, cycle_data, now)
+            logger.warning(
+                "mcx_options: STOPPED OUT config_id=%s at futures price %g -- unrealized loss "
+                "exceeded %g x the %g premium collected; booked %.2f",
+                config.id, cycle_data.futures_price, float(stop_multiple),
+                collected, booked,
+            )
+            _record_selection(
+                session, config, today, cycle_data,
+                reason=(
+                    f"Stop-loss hit: unrealized loss exceeded "
+                    f"{float(stop_multiple):g}x premium collected -- flattened the futures "
+                    f"position at {cycle_data.futures_price:g}"
+                ),
+                position=position,
+            )
+            return
+
     active_position = position if (position is not None and position.status == "open") else None
 
     if not entry_needed:
@@ -728,18 +843,22 @@ def run_cycle(
         # A short put must be genuinely OTM -- see _cap_chain_for_short_put.
         chain = _cap_chain_for_short_put(chain, cycle_data.futures_price)
 
+    sigma = _effective_sigma(config)
+    max_spread = getattr(config, "max_relative_spread", None)
     candidates = evaluate_candidates(
         chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
-        T_years=cycle_data.T_years, sigma=DEFAULT_SIGMA, r=RISK_FREE_RATE,
+        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
         min_open_interest=int(config.min_open_interest),
+        max_relative_spread=None if max_spread is None else float(max_spread),
     )
     candidates_considered = [
         {"strike": c.strike, "delta": c.delta, "oi": c.oi, "ltp": c.ltp} for c in candidates
     ]
     picked = select_strike_by_target_delta(
         chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
-        T_years=cycle_data.T_years, sigma=DEFAULT_SIGMA, r=RISK_FREE_RATE,
+        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
         target_delta=target_delta, min_open_interest=int(config.min_open_interest),
+        max_relative_spread=None if max_spread is None else float(max_spread),
     )
 
     if picked is None:
@@ -750,6 +869,34 @@ def run_cycle(
             candidates_considered=candidates_considered, position=active_position,
         )
         return
+
+    # A seller hits the BID, not the last-traded price -- DEFAULT-OFF
+    # (migration 0027), because switching it on changes every P&L number the
+    # dashboard has shown so far and breaks comparability with the offline
+    # backtest. Falls back to `ltp` when Dhan quotes no bid for the row (the
+    # executability gate has already established there IS one for any row
+    # that got this far, so this is belt-and-braces).
+    entry_premium = picked.ltp
+    if getattr(config, "use_bid_for_entry_premium", False) and picked.top_bid_price:
+        entry_premium = float(picked.top_bid_price)
+
+    # Premium-richness gate -- DEFAULT-OFF. The engine otherwise writes its
+    # target delta at whatever the market pays, however thin.
+    min_credit_pct = getattr(config, "min_credit_pct_of_strike", None)
+    if min_credit_pct is not None:
+        required = float(min_credit_pct) * float(picked.strike)
+        if entry_premium < required:
+            _record_selection(
+                session, config, today, cycle_data, regime=side_regime.value,
+                target_delta=target_delta,
+                reason=(
+                    f"Best strike {picked.strike:g} pays {entry_premium:g}, below the required "
+                    f"credit of {float(min_credit_pct):g} x strike ({required:g}) -- "
+                    "skipped entry"
+                ),
+                candidates_considered=candidates_considered, position=active_position,
+            )
+            return
 
     if active_position is None:
         active_position = MCXOptionsPosition(
@@ -788,14 +935,14 @@ def run_cycle(
     # fully-resolved outcome once SETTLED (see `_settle_leg`), not the
     # entry credit; the raw `premium` column already shows what an open
     # leg collected.
-    entry_leg_amount = _entry_leg_amount(picked.ltp, entry_lots, cycle_data.lot_size)
+    entry_leg_amount = _entry_leg_amount(entry_premium, entry_lots, cycle_data.lot_size)
     active_position.realized_pnl = float(active_position.realized_pnl) + entry_leg_amount
 
     action = "sell_call" if opt_type == "CE" else "sell_put"
     session.add(
         MCXOptionsLeg(
             id=uuid.uuid4(), position_id=active_position.id, cycle_expiry=cycle_data.option_expiry,
-            opt_type=opt_type, strike=picked.strike, premium=picked.ltp, lots=entry_lots,
+            opt_type=opt_type, strike=picked.strike, premium=entry_premium, lots=entry_lots,
             action=action, opened_at=now,
         )
     )
