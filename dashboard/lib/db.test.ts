@@ -15,9 +15,9 @@ import {
   getRecentSignals,
   getRecentSignalsForConfigs,
   getMCXOptionsConfigs,
-  getMCXOptionsLegs,
-  getMCXOptionsPositions,
-  getMCXOptionsSelections,
+  getMCXOptionsLegsForConfigs,
+  getMCXOptionsPositionsForConfigs,
+  getMCXOptionsSelectionsForConfigs,
   getWheelBasketConfigs,
   getWheelBasketLegs,
   getWheelBasketPositions,
@@ -411,39 +411,115 @@ describe("getMCXOptionsConfigs", () => {
   });
 });
 
-describe("getMCXOptionsPositions", () => {
-  it("returns the positions for one config", async () => {
-    const fakeRows = [{ id: "pos-1", state: "long_futures" }];
+// These three used to be per-config getters, which the /mcx-options page
+// called in a 3N + 1 fan-out under `force-dynamic` with a 60s auto-refresh.
+// They are now batched over every config id at once -- so each one also has
+// to key its rows back to the right config, which is the part worth testing
+// (an off-by-one in the old index-zipping would have silently shown GOLDM's
+// positions under SILVERM).
+describe("getMCXOptionsPositionsForConfigs", () => {
+  it("groups the positions by config_id", async () => {
+    const fakeRows = [
+      { id: "pos-1", config_id: "config-1", state: "long_futures" },
+      { id: "pos-2", config_id: "config-2", state: "flat" },
+      { id: "pos-3", config_id: "config-1", state: "closed" },
+    ];
     const fakeSql = makeFakeSql(fakeRows);
     __setTestClient(fakeSql as never);
 
-    const result = await getMCXOptionsPositions("config-1");
+    const result = await getMCXOptionsPositionsForConfigs(["config-1", "config-2"]);
 
-    expect(result).toBe(fakeRows);
+    expect(result["config-1"].map((p) => p.id)).toEqual(["pos-1", "pos-3"]);
+    expect(result["config-2"].map((p) => p.id)).toEqual(["pos-2"]);
+  });
+
+  it("returns an empty bucket per config, and never queries, with no configs", async () => {
+    const fakeSql = makeFakeSql([]);
+    __setTestClient(fakeSql as never);
+
+    expect(await getMCXOptionsPositionsForConfigs([])).toEqual({});
+    expect(fakeSql).not.toHaveBeenCalled();
+  });
+
+  it("gives a config with no rows an empty array rather than undefined", async () => {
+    const fakeSql = makeFakeSql([{ id: "pos-1", config_id: "config-1" }]);
+    __setTestClient(fakeSql as never);
+
+    const result = await getMCXOptionsPositionsForConfigs(["config-1", "config-2"]);
+
+    expect(result["config-2"]).toEqual([]);
   });
 });
 
-describe("getMCXOptionsLegs", () => {
-  it("returns the legs joined through positions for one config", async () => {
-    const fakeRows = [{ id: "leg-1", action: "sell_put" }];
+describe("getMCXOptionsLegsForConfigs", () => {
+  it("groups the legs by the config_id joined through positions", async () => {
+    const fakeRows = [
+      { id: "leg-1", config_id: "config-1", action: "sell_put" },
+      { id: "leg-2", config_id: "config-2", action: "roll" },
+    ];
     const fakeSql = makeFakeSql(fakeRows);
     __setTestClient(fakeSql as never);
 
-    const result = await getMCXOptionsLegs("config-1");
+    const result = await getMCXOptionsLegsForConfigs(["config-1", "config-2"]);
 
-    expect(result).toBe(fakeRows);
+    expect(result["config-1"].map((l) => l.id)).toEqual(["leg-1"]);
+    expect(result["config-2"].map((l) => l.id)).toEqual(["leg-2"]);
   });
 });
 
-describe("getMCXOptionsSelections", () => {
-  it("returns the selection log for one config", async () => {
-    const fakeRows = [{ id: "sel-1", regime: "consolidating" }];
+describe("getMCXOptionsSelectionsForConfigs", () => {
+  it("groups the selection log by config_id", async () => {
+    const fakeRows = [
+      { id: "sel-1", config_id: "config-1", regime: "consolidating" },
+      { id: "sel-2", config_id: "config-1", regime: "trend_unfavorable" },
+    ];
     const fakeSql = makeFakeSql(fakeRows);
     __setTestClient(fakeSql as never);
 
-    const result = await getMCXOptionsSelections("config-1");
+    const result = await getMCXOptionsSelectionsForConfigs(["config-1"]);
 
-    expect(result).toBe(fakeRows);
+    expect(result["config-1"].map((s) => s.id)).toEqual(["sel-1", "sel-2"]);
+  });
+
+  it("trims a huge candidates_considered blob but keeps the true total", async () => {
+    // The first real production cycles evaluated 144 (GOLDM) and 176
+    // (SILVERM) strikes. Shipping 300 such rows to render ten entries each
+    // was most of this page's payload.
+    const many = Array.from({ length: 144 }, (_, i) => ({
+      strike: 200000 + i * 500,
+      delta: -0.5 + i * 0.002,
+      oi: 100 + i,
+      ltp: 50 + i,
+    }));
+    const fakeSql = makeFakeSql([
+      {
+        id: "sel-1",
+        config_id: "config-1",
+        selected_strike: "207000",
+        target_delta: "0.30",
+        candidates_considered: many,
+      },
+    ]);
+    __setTestClient(fakeSql as never);
+
+    const [row] = (await getMCXOptionsSelectionsForConfigs(["config-1"]))["config-1"];
+
+    expect(row.candidates_considered!.length).toBeLessThan(many.length);
+    expect(row.candidates_total).toBe(144);
+  });
+
+  it("leaves a small candidate list untouched", async () => {
+    const few = [{ strike: 207000, delta: -0.3, oi: 500, ltp: 42 }];
+    const fakeSql = makeFakeSql([
+      { id: "sel-1", config_id: "config-1", selected_strike: null, target_delta: null,
+        candidates_considered: few },
+    ]);
+    __setTestClient(fakeSql as never);
+
+    const [row] = (await getMCXOptionsSelectionsForConfigs(["config-1"]))["config-1"];
+
+    expect(row.candidates_considered).toEqual(few);
+    expect(row.candidates_total).toBe(1);
   });
 });
 

@@ -42,4 +42,15 @@ test.describe("preview smoke", () => {
     expect(response?.status()).toBe(200);
     await expect(page.getByRole("heading", { name: /wheel basket/i })).toBeVisible();
   });
+
+  // /mcx-options was the one route missing from this suite -- and it is the
+  // route that actually went down in production on 2026-09-14 ("cached plan
+  // must not change result type", after migrations 0023/0024; see lib/db.ts's
+  // `prepare: false` comment). A smoke test would have caught it. Added by
+  // independent code review, 2026-09-15.
+  test("MCX Options page loads and renders its heading", async ({ page }) => {
+    const response = await page.goto("/mcx-options");
+    expect(response?.status()).toBe(200);
+    await expect(page.getByRole("heading", { name: /mcx options/i })).toBeVisible();
+  });
 });

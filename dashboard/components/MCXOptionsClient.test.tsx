@@ -20,6 +20,7 @@ function config(overrides: Partial<MCXOptionsConfig> = {}): MCXOptionsConfig {
     trend_favorable_target_delta: "0.50",
     min_open_interest: 100,
     margin_multiple_of_premium: "3.0",
+    futures_roll_cost_per_lot: "0",
     updated_at: "2026-09-06T00:00:00Z",
     ...overrides,
   };
@@ -365,7 +366,7 @@ describe("MCXOptionsClient", () => {
       />
     );
     // Both rows' expiry is shown, even though neither has a settled leg yet.
-    expect(screen.getAllByText("9/24/2026")).toHaveLength(2);
+    expect(screen.getAllByText("24 Sept 2026")).toHaveLength(2);
     // The two same-day cycles render distinct, non-date-only timestamps.
     const earlyRow = screen.getByText(/207000/).closest("tr") as HTMLElement;
     const laterRow = screen.getByText(/232000/).closest("tr") as HTMLElement;
@@ -434,5 +435,246 @@ describe("MCXOptionsClient", () => {
     );
     expect(screen.getByText("GOLDM options wheel")).toBeInTheDocument();
     expect(screen.getByText("SILVERM options wheel")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Independent code review, 2026-09-15. Each case below pins one defect the
+// review found on this page -- see each test's own comment.
+// ---------------------------------------------------------------------------
+
+function rollLeg(overrides: Partial<MCXOptionsLeg> = {}): MCXOptionsLeg {
+  return {
+    id: "leg-roll",
+    position_id: "pos-1",
+    cycle_expiry: "2026-10-28", // the NEW futures contract's expiry, not an option's
+    opt_type: "ROLL",
+    strike: null,
+    premium: null,
+    lots: "1",
+    action: "roll",
+    opened_at: "2026-09-30T00:00:00Z",
+    settled_at: "2026-09-30T00:00:00Z",
+    assigned: false,
+    called_away: false,
+    pnl: "-450",
+    ...overrides,
+  };
+}
+
+describe("MCXOptionsClient — review fixes", () => {
+  it("renders a ROLL leg as a roll, not as a ₹0 option that expired OTM", () => {
+    // D1: `formatCurrency(toNumber(null))` rendered the roll's null
+    // strike/premium as "₹0.00", and because a roll has assigned=false,
+    // called_away=false and settled_at set, the outcome ladder fell through
+    // to "Expired OTM". The page's own intro prose promises rolls show up
+    // "as a 'roll' leg" -- they did, with invented numbers and a wrong
+    // outcome.
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{ "config-1": [rollLeg()] }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    const row = screen.getByText("ROLL").closest("tr")!;
+    expect(within(row).getByText("Rolled")).toBeInTheDocument();
+    expect(within(row).queryByText("Expired OTM")).not.toBeInTheDocument();
+    expect(within(row).queryByText("₹0.00")).not.toBeInTheDocument();
+    // The roll's transaction cost is still a real, meaningful number.
+    expect(within(row).getByText("-₹450.00")).toBeInTheDocument();
+  });
+
+  it("renders date-only columns in IST, not in the viewer's timezone", () => {
+    // D2: Postgres `date` columns (oid 1082) come back from postgres.js as
+    // JS Date objects at UTC MIDNIGHT, and every render called
+    // `.toLocaleDateString()` with no timeZone -- so any viewer west of UTC
+    // saw a 24 Sep expiry as 23 Sep, and SSR (UTC on Vercel) disagreed with
+    // the client on the same row. The bot is rigorously IST-aware; the UI
+    // was the only timezone-naive layer.
+    const leg: MCXOptionsLeg = {
+      ...rollLeg(),
+      id: "leg-pe",
+      opt_type: "PE",
+      strike: "59000",
+      premium: "500",
+      action: "sell_put",
+      cycle_expiry: new Date("2026-09-24") as unknown as string,
+      settled_at: null,
+      pnl: null,
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{ "config-1": [leg] }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    const row = screen.getByText("PE").closest("tr")!;
+    expect(within(row).getByText("24 Sept 2026")).toBeInTheDocument();
+    expect(within(row).queryByText("23 Sept 2026")).not.toBeInTheDocument();
+  });
+
+  it("renders a genuinely zero unrealized P&L as ₹0.00, not as '—'", () => {
+    // D4: the same falsy-zero bug already fixed for `leg.pnl` survived in six
+    // other places. It is currently masked only because postgres.js returns
+    // `numeric` as the string "0.00" (truthy) -- one `::float8` cast, JSON
+    // round-trip or hand-built fixture and a real 0 silently reads as
+    // missing data. Zero unrealized P&L is the NORMAL state for a flat
+    // position, not an absent one.
+    const selection: MCXOptionsSelection = {
+      id: "sel-zero",
+      config_id: "config-1",
+      cycle_date: "2026-09-14",
+      regime: "consolidating",
+      target_delta: "0.30",
+      selected_strike: null,
+      reason: "no strike cleared the filters",
+      futures_price: "6000",
+      position_state: "flat",
+      position_basis: null,
+      position_unrealized_pnl: 0 as unknown as string,
+      candidates_considered: [],
+      option_expiry: "2026-09-24",
+      created_at: "2026-09-14T18:29:00Z",
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": [selection] }}
+        onToggle={vi.fn()}
+      />
+    );
+    const row = screen.getByText("no strike cleared the filters").closest("tr")!;
+    // formatCurrency deliberately omits the sign for an exact zero.
+    // (Other cells on this row legitimately show "—" -- selected_strike and
+    // position_basis really are null here. Before the fix, the unrealized
+    // cell joined them and this ₹0.00 did not exist anywhere on the row.)
+    expect(within(row).getByText("₹0.00")).toBeInTheDocument();
+  });
+
+  it("does not crash on a malformed candidates_considered entry", () => {
+    // D5: `c.delta.toFixed(2)` / `c.oi.toLocaleString()` run against
+    // untrusted JSONB. A null/string/missing field threw during render, and
+    // with no error.tsx anywhere under app/ that blanked the entire app
+    // shell rather than just this cell.
+    const selection: MCXOptionsSelection = {
+      id: "sel-bad",
+      config_id: "config-1",
+      cycle_date: "2026-09-14",
+      regime: "consolidating",
+      target_delta: "0.30",
+      selected_strike: "5900",
+      reason: "entered PE at strike 5900",
+      futures_price: "6000",
+      position_state: "flat",
+      position_basis: null,
+      position_unrealized_pnl: null,
+      candidates_considered: [
+        { strike: 5900, delta: -0.3, oi: 5000, ltp: 42.5 },
+        { strike: 5850, delta: null, oi: "lots", ltp: 30 },
+        { delta: -0.2, oi: 10, ltp: 20 },
+      ] as never,
+      option_expiry: "2026-09-24",
+      created_at: "2026-09-14T18:29:00Z",
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": [selection] }}
+        onToggle={vi.fn()}
+      />
+    );
+    // The one well-formed candidate still renders; the junk is dropped.
+    expect(screen.getByText(/Δ-0\.30/)).toBeInTheDocument();
+  });
+
+  it("shows each leg's lots so premium can be reconciled against realized P&L", () => {
+    // D6: `realized_pnl` is booked as `premium * lots * lot_size`, but the
+    // trade-history table showed only the PER-UNIT premium with no lots
+    // column anywhere -- for SILVERM that is a 5x gap the reader had to know
+    // about out of band.
+    const leg: MCXOptionsLeg = {
+      ...rollLeg(),
+      id: "leg-pe",
+      opt_type: "PE",
+      strike: "59000",
+      premium: "500",
+      lots: "3",
+      action: "sell_put",
+      settled_at: null,
+      pnl: null,
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{ "config-1": [leg] }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    const row = screen.getByText("PE").closest("tr")!;
+    expect(within(row).getByText("3")).toBeInTheDocument();
+  });
+
+  it("renders target delta as a delta, not as a percentage", () => {
+    // D7: the header showed a delta of 0.30 as "30%" while the candidate
+    // list right beside it showed "Δ-0.30" -- the same quantity in two
+    // incompatible conventions, with opposite signs. Delta is a unitless
+    // hedge ratio.
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText(/Δ0\.30/)).toBeInTheDocument();
+    expect(screen.queryByText(/30%/)).not.toBeInTheDocument();
+  });
+
+  it("sums unrealized P&L over the same positions the table shows it for", () => {
+    // D10: the card summed `unrealized_pnl` over ALL open positions while
+    // the table printed "—" unless state === 'long_futures', so a stale
+    // value on a flat position would appear in the total with nothing in
+    // the table to account for it.
+    const flatWithStaleUnrealized: MCXOptionsPosition = {
+      id: "pos-flat",
+      config_id: "config-1",
+      status: "open",
+      state: "flat",
+      basis: null,
+      futures_qty: "0",
+      futures_contract_expiry: null,
+      opened_at: "2026-09-01T00:00:00Z",
+      closed_at: null,
+      realized_pnl: "1000",
+      unrealized_pnl: "9999",
+    };
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{ "config-1": [flatWithStaleUnrealized] }}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    const card = screen
+      .getAllByText("Unrealized P&L")
+      .find((el) => el.tagName === "DT")!
+      .closest("div")!;
+    expect(within(card).getByText("₹0.00")).toBeInTheDocument();
   });
 });

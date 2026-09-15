@@ -1,3 +1,5 @@
+import type { PgDate } from "./format";
+
 // Row shapes mirroring docs/db-schema.md. `numeric` columns come back from
 // @neondatabase/serverless as strings (node-postgres default), so they are
 // typed as `string` here and parsed on the way into formatting/aggregation
@@ -296,6 +298,16 @@ export interface WheelBasketSelection {
 // expiry independent of the option's expiry. No stop-loss ever closes a
 // position by deliberate design -- only expiry (OTM), assignment (ITM put),
 // or being called away (ITM call).
+//
+// NOTE ON DATE COLUMNS (found by independent code review, 2026-09-15): these
+// were all declared `string` and are NOT strings at runtime. postgres.js
+// parses `date` (oid 1082) and `timestamptz` into JS `Date` objects -- a
+// `date` becoming UTC MIDNIGHT specifically. Declaring them `string` meant
+// every test fixture passed a shape production never produces, and
+// `title={s.cycle_date}` rendered "Mon Sep 14 2026 00:00:00 GMT+0000
+// (Coordinated Universal Time)" instead of "2026-09-14". `PgDate` (see
+// lib/format.ts) is the honest type; render it with `formatIstDate` /
+// `formatIstDateTime`, never a bare `.toLocaleDateString()`.
 export interface MCXOptionsConfig {
   id: string;
   strategy_id: string;
@@ -307,7 +319,11 @@ export interface MCXOptionsConfig {
   trend_favorable_target_delta: string;
   min_open_interest: number;
   margin_multiple_of_premium: string;
-  updated_at: string;
+  // Flat placeholder for a futures roll's bid/ask spread, rupees per lot
+  // (migration 0023) -- NOT a real sourced roll-spread figure. Surfaced on
+  // the page precisely because it is a caveat worth watching.
+  futures_roll_cost_per_lot: string;
+  updated_at: PgDate;
 }
 
 export interface MCXOptionsPosition {
@@ -319,9 +335,9 @@ export interface MCXOptionsPosition {
   // received is booked as its own cash P&L at entry, never netted in.
   basis: string | null;
   futures_qty: string;
-  futures_contract_expiry: string | null;
-  opened_at: string;
-  closed_at: string | null;
+  futures_contract_expiry: PgDate | null;
+  opened_at: PgDate;
+  closed_at: PgDate | null;
   realized_pnl: string;
   unrealized_pnl: string;
 }
@@ -329,7 +345,7 @@ export interface MCXOptionsPosition {
 export interface MCXOptionsLeg {
   id: string;
   position_id: string;
-  cycle_expiry: string;
+  cycle_expiry: PgDate;
   opt_type: string; // PE|CE|ROLL
   // NULL only for a "roll" leg (opt_type="ROLL") -- a futures contract
   // rollover event, which is not an option leg and has no strike/premium.
@@ -339,8 +355,8 @@ export interface MCXOptionsLeg {
   // sell_put | assigned | sell_call | call_expired_otm | called_away | roll
   // | put_expired_otm
   action: string;
-  opened_at: string;
-  settled_at: string | null;
+  opened_at: PgDate;
+  settled_at: PgDate | null;
   assigned: boolean;
   called_away: boolean;
   pnl: string | null;
@@ -355,10 +371,16 @@ export interface MCXOptionsCandidate {
   ltp: number;
 }
 
+// The raw JSONB shape as it actually arrives: written by the bot, never
+// validated on the way back out. Anything here may be missing, null, or the
+// wrong type -- see `sanitizeCandidates` in lib/mcx-options-candidates.ts,
+// which is what turns this into `MCXOptionsCandidate[]`.
+export type MCXOptionsCandidateRaw = Partial<Record<keyof MCXOptionsCandidate, unknown>>;
+
 export interface MCXOptionsSelection {
   id: string;
   config_id: string;
-  cycle_date: string;
+  cycle_date: PgDate;
   // consolidating|trend_favorable|trend_unfavorable, or null for "no
   // opinion" (treated the same as trend_unfavorable: never permissive).
   regime: string | null;
@@ -377,13 +399,18 @@ export interface MCXOptionsSelection {
   position_unrealized_pnl: string | null;
   // Every OI-surviving candidate evaluated this cycle (not just the
   // winner), null on cycles where entry isn't even attempted.
-  candidates_considered: MCXOptionsCandidate[] | null;
+  candidates_considered: MCXOptionsCandidateRaw[] | null;
   // The expiry actually being considered this cycle (migration 0025) --
   // populated even on a SKIPPED cycle, unlike MCXOptionsLeg.cycle_expiry
   // which only exists for a cycle that wrote a leg. Null on rows written
   // before this migration.
-  option_expiry: string | null;
-  created_at: string;
+  option_expiry: PgDate | null;
+  created_at: PgDate;
+  // How many candidates were REALLY evaluated this cycle, before the server
+  // trimmed `candidates_considered` down to the decision-relevant subset it
+  // ships (see `trimSelectionCandidates` in lib/db.ts). Not a database
+  // column; null when nothing needed trimming.
+  candidates_total?: number | null;
 }
 
 export interface AuditLogEntry {

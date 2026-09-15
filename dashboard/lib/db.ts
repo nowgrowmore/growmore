@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { rankCandidates, sanitizeCandidates } from "./mcx-options-candidates";
 import type {
   AuditLogEntry,
   BacktestRun,
@@ -573,39 +574,101 @@ export async function getMCXOptionsConfigs(): Promise<MCXOptionsConfig[]> {
   return rows as unknown as MCXOptionsConfig[];
 }
 
-export async function getMCXOptionsPositions(configId: string): Promise<MCXOptionsPosition[]> {
+// The /mcx-options page used to issue 3N + 1 queries -- one per config for
+// each of positions/legs/selections -- under `force-dynamic` with a 60s
+// AutoRefresh, so every open tab replayed all of them every minute. These
+// batched variants take every config id at once, the same idiom
+// `getRecentSignalsForConfigs`/`getLastConfigStateChangeForConfigs` above
+// already use. Found by independent code review, 2026-09-15.
+
+export async function getMCXOptionsPositionsForConfigs(
+  configIds: string[]
+): Promise<Record<string, MCXOptionsPosition[]>> {
+  const byConfig: Record<string, MCXOptionsPosition[]> = {};
+  for (const id of configIds) byConfig[id] = [];
+  if (configIds.length === 0) return byConfig;
+
   const sql = getClient();
   const rows = await sql`
     select * from mcx_options_positions
-    where config_id = ${configId}
+    where config_id = any(${configIds}::uuid[])
     order by opened_at desc
   `;
-  return rows as unknown as MCXOptionsPosition[];
+  for (const row of rows as unknown as MCXOptionsPosition[]) {
+    byConfig[row.config_id]?.push(row);
+  }
+  return byConfig;
 }
 
-export async function getMCXOptionsLegs(configId: string): Promise<MCXOptionsLeg[]> {
+export async function getMCXOptionsLegsForConfigs(
+  configIds: string[]
+): Promise<Record<string, MCXOptionsLeg[]>> {
+  const byConfig: Record<string, MCXOptionsLeg[]> = {};
+  for (const id of configIds) byConfig[id] = [];
+  if (configIds.length === 0) return byConfig;
+
   const sql = getClient();
   const rows = await sql`
-    select l.* from mcx_options_legs l
+    select l.*, p.config_id from mcx_options_legs l
     join mcx_options_positions p on p.id = l.position_id
-    where p.config_id = ${configId}
+    where p.config_id = any(${configIds}::uuid[])
     order by l.opened_at desc
   `;
-  return rows as unknown as MCXOptionsLeg[];
+  for (const row of rows as unknown as (MCXOptionsLeg & { config_id: string })[]) {
+    byConfig[row.config_id]?.push(row);
+  }
+  return byConfig;
 }
 
-export async function getMCXOptionsSelections(
-  configId: string,
+export async function getMCXOptionsSelectionsForConfigs(
+  configIds: string[],
   limit = 300
-): Promise<MCXOptionsSelection[]> {
+): Promise<Record<string, MCXOptionsSelection[]>> {
+  const byConfig: Record<string, MCXOptionsSelection[]> = {};
+  for (const id of configIds) byConfig[id] = [];
+  if (configIds.length === 0) return byConfig;
+
   const sql = getClient();
   const rows = await sql`
-    select * from mcx_options_selections
-    where config_id = ${configId}
+    select * from (
+      select *, row_number() over (
+        partition by config_id order by cycle_date desc, created_at desc
+      ) as rn
+      from mcx_options_selections
+      where config_id = any(${configIds}::uuid[])
+    ) ranked
+    where rn <= ${limit}
     order by cycle_date desc, created_at desc
-    limit ${limit}
   `;
-  return rows as unknown as MCXOptionsSelection[];
+  for (const row of rows as unknown as (MCXOptionsSelection & { rn: number })[]) {
+    byConfig[row.config_id]?.push(trimSelectionCandidates(row));
+  }
+  return byConfig;
+}
+
+//: A single cycle's `candidates_considered` can hold every strike on the
+//: chain -- the first real production cycles evaluated 144 (GOLDM) and 176
+//: (SILVERM). Shipping 300 such rows over the RSC wire to render ten entries
+//: each is most of this page's payload. Trim to the decision-relevant set
+//: here, on the server, using the SAME ranking helper the client renders with
+//: so the two can never disagree, and carry the original count through as
+//: `candidates_total` so the UI's "+N more" stays truthful.
+const MAX_CANDIDATES_SENT = 25;
+
+function trimSelectionCandidates(row: MCXOptionsSelection): MCXOptionsSelection {
+  const clean = sanitizeCandidates(row.candidates_considered);
+  if (clean === null || clean.length <= MAX_CANDIDATES_SENT) {
+    return { ...row, candidates_total: clean?.length ?? null };
+  }
+  return {
+    ...row,
+    candidates_considered: rankCandidates(clean, {
+      selectedStrike: row.selected_strike !== null ? Number(row.selected_strike) : null,
+      targetDelta: row.target_delta !== null ? Number(row.target_delta) : null,
+      limit: MAX_CANDIDATES_SENT,
+    }),
+    candidates_total: clean.length,
+  };
 }
 
 export async function setMCXOptionsConfigEnabled(id: string, enabled: boolean): Promise<void> {

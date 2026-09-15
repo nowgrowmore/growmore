@@ -1,8 +1,8 @@
 import {
   getMCXOptionsConfigs,
-  getMCXOptionsLegs,
-  getMCXOptionsPositions,
-  getMCXOptionsSelections,
+  getMCXOptionsLegsForConfigs,
+  getMCXOptionsPositionsForConfigs,
+  getMCXOptionsSelectionsForConfigs,
 } from "@/lib/db";
 import { MCXOptionsClient } from "@/components/MCXOptionsClient";
 import { toggleMCXOptionsConfigEnabled } from "./actions";
@@ -11,14 +11,15 @@ export const dynamic = "force-dynamic";
 
 export default async function MCXOptionsPage() {
   const configs = await getMCXOptionsConfigs();
-  const [positions, legs, selections] = await Promise.all([
-    Promise.all(configs.map((c) => getMCXOptionsPositions(c.id))),
-    Promise.all(configs.map((c) => getMCXOptionsLegs(c.id))),
-    Promise.all(configs.map((c) => getMCXOptionsSelections(c.id))),
+  // Three batched queries regardless of how many configs exist -- these
+  // return rows already keyed by config_id, so there is no index-zipping
+  // step that could silently attribute GOLDM's positions to SILVERM.
+  const configIds = configs.map((c) => c.id);
+  const [positionsByConfigId, legsByConfigId, selectionsByConfigId] = await Promise.all([
+    getMCXOptionsPositionsForConfigs(configIds),
+    getMCXOptionsLegsForConfigs(configIds),
+    getMCXOptionsSelectionsForConfigs(configIds),
   ]);
-  const positionsByConfigId = Object.fromEntries(configs.map((c, i) => [c.id, positions[i]]));
-  const legsByConfigId = Object.fromEntries(configs.map((c, i) => [c.id, legs[i]]));
-  const selectionsByConfigId = Object.fromEntries(configs.map((c, i) => [c.id, selections[i]]));
 
   return (
     <div className="flex flex-col gap-4">

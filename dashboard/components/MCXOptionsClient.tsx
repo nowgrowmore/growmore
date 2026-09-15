@@ -1,9 +1,17 @@
 "use client";
 
-import { formatCurrency, formatPercent, formatPositionAge, toNumber } from "@/lib/format";
+import {
+  formatCurrency,
+  formatIstDate,
+  formatIstDateTime,
+  formatNumber,
+  formatPositionAge,
+  toNumber,
+} from "@/lib/format";
+import { rankCandidates, sanitizeCandidates } from "@/lib/mcx-options-candidates";
 import { StrategyToggle } from "@/components/StrategyToggle";
 import type {
-  MCXOptionsCandidate,
+  MCXOptionsCandidateRaw,
   MCXOptionsConfig,
   MCXOptionsLeg,
   MCXOptionsPosition,
@@ -57,9 +65,10 @@ function OpenLegSummary({ leg }: { leg: MCXOptionsLeg | null }) {
   const side = leg.opt_type === "CE" ? "call" : "put";
   return (
     <span className="text-[color:var(--text-secondary)]">
-      Short {leg.opt_type} ({side}) @ {leg.strike ? formatCurrency(toNumber(leg.strike)) : "—"}
-      {leg.premium ? `, premium ${formatCurrency(toNumber(leg.premium))}` : ""}, exp{" "}
-      {new Date(leg.cycle_expiry).toLocaleDateString()}
+      Short {leg.opt_type} ({side}) @{" "}
+      {leg.strike !== null ? formatCurrency(toNumber(leg.strike)) : "—"}
+      {leg.premium !== null ? `, premium ${formatCurrency(toNumber(leg.premium))}` : ""}, exp{" "}
+      {formatIstDate(leg.cycle_expiry)}
     </span>
   );
 }
@@ -77,61 +86,43 @@ function regimeLabel(regime: string | null): string {
   }
 }
 
-//: Liquidity floors to try, loosest first as a fallback when the market's
-//: too thin for the stricter ones to leave anything -- MCX options can have
-//: very sparse OI far from the money, so a fixed non-relaxing threshold
-//: would sometimes show nothing at all. Never actually gates the engine
-//: (that's `config.min_open_interest`, currently 0) -- this is display-only
-//: noise reduction so a 144-candidate dump doesn't bury the strikes that
-//: mattered to the decision.
-const OI_DISPLAY_FLOORS = [10, 1, 0];
+//: How many candidates to show inline. The server already trims the payload
+//: to a bounded set (see lib/db.ts) using the same ranking helper, so this is
+//: the display cap on top of that, not the thing keeping the page small.
 const MAX_CANDIDATES_SHOWN = 10;
 
 function CandidatesEvaluated({
   candidates,
+  candidatesTotal,
   selectedStrike,
   targetDelta,
 }: {
-  candidates: MCXOptionsCandidate[] | null;
+  candidates: MCXOptionsCandidateRaw[] | null;
+  candidatesTotal: number | null;
   selectedStrike: string | null;
   targetDelta: string | null;
 }) {
-  if (candidates === null) {
+  // Never trust the raw JSONB -- see lib/mcx-options-candidates.ts.
+  const clean = sanitizeCandidates(candidates);
+  if (clean === null) {
     return <span className="text-[color:var(--text-muted)]">—</span>;
   }
-  if (candidates.length === 0) {
+  if (clean.length === 0) {
     return <span className="text-[color:var(--text-muted)]">none cleared filters</span>;
   }
   const selected = selectedStrike !== null ? toNumber(selectedStrike) : null;
   const target = targetDelta !== null ? toNumber(targetDelta) : null;
 
-  // Liquid-enough subset, loosening the OI floor until something survives.
-  let liquid = candidates;
-  for (const floor of OI_DISPLAY_FLOORS) {
-    const survivors = candidates.filter((c) => c.oi >= floor);
-    if (survivors.length > 0) {
-      liquid = survivors;
-      break;
-    }
-  }
-
-  // Rank by closeness to the delta the engine was actually targeting (the
-  // real selection criterion), not by strike -- so "top 10" means the 10
-  // most relevant to the decision, not just the 10 lowest strikes.
-  const ranked = [...liquid].sort((a, b) => {
-    if (target === null) return Math.abs(a.delta) - Math.abs(b.delta);
-    return Math.abs(Math.abs(a.delta) - target) - Math.abs(Math.abs(b.delta) - target);
+  const shown = rankCandidates(clean, {
+    selectedStrike: selected,
+    targetDelta: target,
+    limit: MAX_CANDIDATES_SHOWN,
   });
 
-  const shown = ranked.slice(0, MAX_CANDIDATES_SHOWN);
-  // Always surface the picked strike, even if it fell just outside the cap.
-  if (selected !== null && !shown.some((c) => c.strike === selected)) {
-    const pickedRow = candidates.find((c) => c.strike === selected);
-    if (pickedRow) shown.push(pickedRow);
-  }
-  shown.sort((a, b) => a.strike - b.strike);
-
-  const hiddenCount = candidates.length - shown.length;
+  // `candidatesTotal` is the count BEFORE the server trimmed the payload, so
+  // "+N more" stays honest about how many strikes were really evaluated.
+  const total = candidatesTotal ?? clean.length;
+  const hiddenCount = total - shown.length;
 
   return (
     <div className="flex flex-col gap-1">
@@ -161,6 +152,7 @@ function CandidatesEvaluated({
   );
 }
 
+
 export function MCXOptionsClient({
   configs,
   positionsByConfigId,
@@ -184,10 +176,13 @@ export function MCXOptionsClient({
           .sort((a, b) => (a.cycle_date < b.cycle_date ? 1 : a.cycle_date > b.cycle_date ? -1 : 0));
         const openPositions = positions.filter((p) => p.status === "open");
         const totalRealized = positions.reduce((sum, p) => sum + toNumber(p.realized_pnl), 0);
-        const totalUnrealized = openPositions.reduce(
-          (sum, p) => sum + toNumber(p.unrealized_pnl),
-          0
-        );
+        // Same predicate the table uses below -- only a long_futures position
+        // carries unrealized exposure. Summing over every open position meant
+        // a stale value on a flat row could appear in this total with nothing
+        // in the table to account for it.
+        const totalUnrealized = openPositions
+          .filter((p) => p.state === "long_futures")
+          .reduce((sum, p) => sum + toNumber(p.unrealized_pnl), 0);
         const latestSelection = selections[0] ?? null;
 
         return (
@@ -199,13 +194,15 @@ export function MCXOptionsClient({
               <div>
                 <h3 className="text-sm font-semibold">{config.symbol} options wheel</h3>
                 <p className="mt-1 text-xs text-[color:var(--text-secondary)]">
+                  {/* Delta is a unitless hedge ratio, not a percentage -- this
+                      used to render 0.30 as "30%" while the candidate list
+                      directly below showed the same quantity as "Δ-0.30". */}
                   Mode: <span className="capitalize">{config.mode}</span> · Lots {config.lots} ·
-                  Target delta {formatPercent(toNumber(config.consolidating_target_delta) * 100, 0)}
-                  {" "}(consolidating) / {formatPercent(
-                    toNumber(config.trend_favorable_target_delta) * 100,
-                    0
-                  )}{" "}
-                  (trend favorable) · Min OI {config.min_open_interest}
+                  Target delta Δ{formatNumber(toNumber(config.consolidating_target_delta))}{" "}
+                  (consolidating) / Δ
+                  {formatNumber(toNumber(config.trend_favorable_target_delta))}{" "}
+                  (trend favorable) · Min OI {config.min_open_interest} · Roll cost{" "}
+                  {formatCurrency(toNumber(config.futures_roll_cost_per_lot))}/lot
                 </p>
               </div>
               <StrategyToggle configId={config.id} initialEnabled={config.enabled} onToggle={onToggle} />
@@ -231,7 +228,7 @@ export function MCXOptionsClient({
               <div>
                 <dt className="text-xs text-[color:var(--text-muted)]">Last cycle</dt>
                 <dd className="text-lg font-semibold tabular-nums">
-                  {latestSelection ? new Date(latestSelection.cycle_date).toLocaleDateString() : "—"}
+                  {latestSelection ? formatIstDate(latestSelection.cycle_date) : "—"}
                 </dd>
               </div>
             </dl>
@@ -270,13 +267,11 @@ export function MCXOptionsClient({
                             <OpenLegSummary leg={openLegFor(legs, p.id)} />
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {p.basis ? formatCurrency(toNumber(p.basis)) : "—"}
+                            {p.basis !== null ? formatCurrency(toNumber(p.basis)) : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">{toNumber(p.futures_qty)}</td>
                           <td className="px-3 py-2">
-                            {p.futures_contract_expiry
-                              ? new Date(p.futures_contract_expiry).toLocaleDateString()
-                              : "—"}
+                            {formatIstDate(p.futures_contract_expiry)}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {p.state === "long_futures"
@@ -296,7 +291,7 @@ export function MCXOptionsClient({
 
             <section className="mt-6">
               <h4 className="mb-2 text-xs font-semibold uppercase text-[color:var(--text-secondary)]">
-                Selection log{latestSelection ? ` — ${new Date(latestSelection.cycle_date).toLocaleDateString()}` : ""}
+                Selection log{latestSelection ? ` — ${formatIstDate(latestSelection.cycle_date)}` : ""}
               </h4>
               {selections.length === 0 ? (
                 <p className="text-sm text-[color:var(--text-muted)]">No selection cycle recorded yet.</p>
@@ -321,8 +316,8 @@ export function MCXOptionsClient({
                     <tbody>
                       {selections.map((s) => (
                         <tr key={s.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
-                          <td className="px-3 py-2 tabular-nums" title={s.cycle_date}>
-                            {new Date(s.created_at).toLocaleString()}
+                          <td className="px-3 py-2 tabular-nums" title={formatIstDate(s.cycle_date)}>
+                            {formatIstDateTime(s.created_at)}
                           </td>
                           <td className="px-3 py-2">
                             <span
@@ -336,31 +331,39 @@ export function MCXOptionsClient({
                             </span>
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {s.target_delta ? formatPercent(toNumber(s.target_delta) * 100, 0) : "—"}
+                            {s.target_delta !== null
+                              ? `Δ${formatNumber(toNumber(s.target_delta))}`
+                              : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {s.selected_strike ? formatCurrency(toNumber(s.selected_strike)) : "—"}
+                            {s.selected_strike !== null ? formatCurrency(toNumber(s.selected_strike)) : "—"}
                           </td>
                           <td className="px-3 py-2">
-                            {s.option_expiry ? new Date(s.option_expiry).toLocaleDateString() : "—"}
+                            {formatIstDate(s.option_expiry)}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {s.futures_price ? formatCurrency(toNumber(s.futures_price)) : "—"}
+                            {s.futures_price !== null ? formatCurrency(toNumber(s.futures_price)) : "—"}
                           </td>
                           <td className="px-3 py-2">
-                            {s.position_state ? stateLabel(s.position_state) : "—"}
+                            {s.position_state !== null ? stateLabel(s.position_state) : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {s.position_basis ? formatCurrency(toNumber(s.position_basis)) : "—"}
+                            {s.position_basis !== null ? formatCurrency(toNumber(s.position_basis)) : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {s.position_unrealized_pnl
+                            {/* `!== null`, not a truthy test: a genuine 0 is the
+                                NORMAL reading for a flat position, and used to
+                                render as "—" (absent data) the moment anything
+                                coerced these numerics away from postgres.js's
+                                truthy "0.00" string. */}
+                            {s.position_unrealized_pnl !== null
                               ? formatCurrency(toNumber(s.position_unrealized_pnl), { signDisplay: true })
                               : "—"}
                           </td>
                           <td className="px-3 py-2">
                             <CandidatesEvaluated
                               candidates={s.candidates_considered}
+                              candidatesTotal={s.candidates_total ?? null}
                               selectedStrike={s.selected_strike}
                               targetDelta={s.target_delta}
                             />
@@ -389,6 +392,7 @@ export function MCXOptionsClient({
                         <th className="px-3 py-2 font-medium">Action</th>
                         <th className="px-3 py-2 font-medium text-right">Strike</th>
                         <th className="px-3 py-2 font-medium text-right">Premium</th>
+                        <th className="px-3 py-2 font-medium text-right">Lots</th>
                         <th className="px-3 py-2 font-medium">Expiry</th>
                         <th className="px-3 py-2 font-medium">Outcome</th>
                         <th className="px-3 py-2 font-medium text-right">P&amp;L</th>
@@ -399,21 +403,37 @@ export function MCXOptionsClient({
                         <tr key={leg.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
                           <td className="px-3 py-2 font-medium">{leg.opt_type}</td>
                           <td className="px-3 py-2 capitalize">{leg.action.replace(/_/g, " ")}</td>
+                          {/* A ROLL leg is a futures contract rollover, not an
+                              option: migration 0023 made strike/premium nullable
+                              precisely for it. `toNumber(null)` rendered both as
+                              "₹0.00", and since a roll has assigned=false,
+                              called_away=false and settled_at set, the outcome
+                              ladder below fell through to "Expired OTM" -- an
+                              invented price and a wrong outcome on a row the
+                              page's own intro promises to show properly. */}
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {formatCurrency(toNumber(leg.strike))}
+                            {leg.strike !== null ? formatCurrency(toNumber(leg.strike)) : "—"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
-                            {formatCurrency(toNumber(leg.premium))}
+                            {leg.premium !== null ? formatCurrency(toNumber(leg.premium)) : "—"}
                           </td>
-                          <td className="px-3 py-2">{new Date(leg.cycle_expiry).toLocaleDateString()}</td>
+                          {/* Premium is quoted PER UNIT; realized P&L is booked as
+                              premium x lots x lot_size, so without this column the
+                              two could never be reconciled by eye. */}
+                          <td className="px-3 py-2 text-right tabular-nums">
+                            {formatNumber(toNumber(leg.lots), 0)}
+                          </td>
+                          <td className="px-3 py-2">{formatIstDate(leg.cycle_expiry)}</td>
                           <td className="px-3 py-2 text-[color:var(--text-secondary)]">
-                            {leg.assigned
-                              ? "Assigned"
-                              : leg.called_away
-                                ? "Called away"
-                                : leg.settled_at
-                                  ? "Expired OTM"
-                                  : "Open"}
+                            {leg.opt_type === "ROLL"
+                              ? "Rolled"
+                              : leg.assigned
+                                ? "Assigned"
+                                : leg.called_away
+                                  ? "Called away"
+                                  : leg.settled_at !== null
+                                    ? "Expired OTM"
+                                    : "Open"}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {leg.settled_at === null ? (

@@ -31,11 +31,59 @@ export function formatPercent(value: number | null | undefined, digits = 2): str
   return `${value.toFixed(digits)}%`;
 }
 
+// Postgres `date` and `timestamptz` columns do NOT arrive as strings. The
+// postgres.js driver parses oid 1082 (`date`) with `new Date(x)`, which
+// yields UTC MIDNIGHT, and timestamps as real `Date` instants. Rendering
+// either with a bare `.toLocaleDateString()` formats it in the VIEWER's
+// timezone, so a 24-Sep expiry read as 23 Sep for anyone west of UTC -- and
+// SSR (UTC on Vercel) disagreed with the client on the very same row, which
+// is a hydration mismatch as well as a wrong date.
+//
+// Everything this dashboard shows is an MCX/NSE trading date decided in IST
+// (the bot's own scheduler is pinned to MCX_TIMEZONE), so IST is the only
+// correct rendering timezone regardless of where the page is being read.
+// Found by independent code review, 2026-09-15.
+export const IST_TIME_ZONE = "Asia/Kolkata";
+
+/** A Postgres date/timestamp column as it actually reaches the client: a
+ * `Date` from the driver, or a string in a hand-built fixture/serialized
+ * payload. */
+export type PgDate = string | Date;
+
+/** A trading DATE, always rendered in IST, e.g. "24 Sep 2026". */
+export function formatIstDate(value: PgDate | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: IST_TIME_ZONE,
+  });
+}
+
+/** A precise INSTANT (e.g. `created_at`), always rendered in IST. */
+export function formatIstDateTime(value: PgDate | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: IST_TIME_ZONE,
+  });
+}
+
 /** How long a position has been open, e.g. "3d 4h", "12h", "45m" -- coarse
  * (days+hours, or hours, or minutes; never all three) since this is a quick
  * "how stale is this" glance, not a precise duration. */
-export function formatPositionAge(openedAt: string): string {
-  const ms = Math.max(0, Date.now() - new Date(openedAt).getTime());
+export function formatPositionAge(openedAt: PgDate): string {
+  const opened = openedAt instanceof Date ? openedAt : new Date(openedAt);
+  const ms = Math.max(0, Date.now() - opened.getTime());
   const totalMinutes = Math.floor(ms / (1000 * 60));
   const days = Math.floor(totalMinutes / (60 * 24));
   const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
