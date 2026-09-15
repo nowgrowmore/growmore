@@ -62,9 +62,11 @@
     `Instrument.contract_expiry`/`security_id` never advanced — so the engine could keep quoting an
     **expired contract's `security_id`**, and `_roll_futures_position` was dead code in production.
     `mcx_options/scheduler_job.py` now runs the close-out/rollover check itself and fails closed.
-    **Still needs owner verification:** whether enabled `bot_config` rows exist for GOLDM/SILVERM
-    in production, and therefore whether any past cycle ran against a stale contract — see
-    `docs/pending-actions.md`.
+    **Checked against production 2026-09-15: no past cycle traded an expired contract.** Both
+    symbols do have enabled (paper) futures `bot_config` rows, so the rollover was reaching them,
+    and both `contract_expiry` values were still in the future. The coupling was latent rather
+    than live — but disabling those unrelated futures configs would have silently broken this
+    strategy.
   - **Fixed — smaller correctness items.** A called-away position kept phantom `futures_qty`; a
     covered call was sized from `config.lots` rather than the futures actually held (editing
     `lots` mid-position would quietly make it partly naked); nothing stopped the picker selling an

@@ -343,19 +343,33 @@ An independent review of `bot/growmore_bot/mcx_options/` and the `/mcx-options` 
 strategy's first real paper cycles. Correctness bugs are already fixed and pushed (see
 `docs/technical-debt.md`). What is left here is what only you can decide or do.
 
+### Already done for you (2026-09-15)
+
+- [x] **Migrations `0026_mcx_options_guards` and `0027_mcx_options_risk_flags` applied to
+  production Neon.** Verified afterwards: all indexes/constraints present, all risk flags
+  null/false, `mcx_options_legs`/`_positions`/`_configs` untouched. The only data change was
+  0026's de-duplication of `mcx_options_selections`, which removed **4 of 6 rows** — the extra
+  rows written by the three hand-run cycles on 2026-09-14, keeping the newest per config per
+  date. All six rows were backed up first to
+  `~/mcx_options_selections_backup_2026-09-15.json`. Note what this means: the surviving rows for
+  that date are the final "position already has an open leg" reads, so the *narrative* of the
+  original "entered PE at strike …" rows is gone from the selection log — but what was actually
+  traded is still fully recorded in `mcx_options_legs`.
+- [x] **Checked whether any past cycle traded an expired contract — it did not.** Both GOLDM and
+  SILVERM do have enabled (paper) `bot_config` rows for their futures strategies, so
+  `roll_to_next_contract` was in fact reaching them, and their `contract_expiry` values
+  (2026-10-05 and 2026-11-30) are both still in the future. So this was latent rather than live —
+  but it was reaching them *by accident*, and disabling those unrelated futures configs would
+  have silently broken the options strategy. That coupling is now removed.
+
 ### Do first
 
-- [ ] **Check whether any past cycle traded an expired contract.** Futures rollover used to be
-  reachable only from the futures tick's loop over enabled `bot_config` rows, which this strategy
-  never creates. If GOLDM/SILVERM have no enabled futures `bot_config`, then
-  `Instrument.contract_expiry`/`security_id` were never advancing and cycles may have been priced
-  against a contract that had already expired. The code now rolls these instruments itself and
-  fails closed, but **past selection rows may be worthless** — worth knowing before drawing any
-  conclusion from them. (I could not check this myself: reads against the production database are
-  blocked in my sandbox.)
-- [ ] **Re-run `provision_mcx_options_configs --apply`** against production. `min_open_interest`
-  was never written by that script, so both configs have been running with the OI floor at **0** —
-  a complete no-op. The script now sets a conservative `10`.
+- [ ] **Re-run `bot/research/provision_mcx_options_configs.py --apply`** against production.
+  `min_open_interest` was never written by that script, so both configs are still running with the
+  OI floor at **0** — a complete no-op, meaning only the bid/ask executability gate filters
+  anything. The script now sets a conservative `10`. I could not run this myself: writing config
+  rows to the shared production database is blocked in my sandbox. Dry-run output confirms it
+  would update both rows and leave `enabled` untouched.
 - [ ] **Treat every P&L figure shown so far as provisional.** Option transaction costs are modelled
   as exactly zero (the real Dhan commodity-options rates are still unsourced — the existing
   `MCX_COMMODITY_OPTION_COST_MODEL` deliberately refuses to invent them), and the option lot size
