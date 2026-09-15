@@ -19,9 +19,14 @@ from datetime import date
 from typing import Any, Optional
 
 from growmore_bot.broker.dhan_client import DhanApiError
+from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
 from growmore_bot.mcx_options import live_data
 from growmore_bot.mcx_options.mcx_options_engine import run_cycle
 from growmore_bot.persistence.models import Instrument, MCXOptionsConfig
+from growmore_bot.scheduler.contract_rollover import (
+    is_past_close_out_cutoff,
+    roll_to_next_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +104,84 @@ def _fetch_cycle_data_with_retry(
     raise last_error
 
 
+def _ensure_contract_is_current(
+    session: Any, dhan_client: Any, instrument: Any, cycle_date: date
+) -> bool:
+    """Make sure `instrument` is not still pointing at a contract that is past
+    its close-out cutoff, rolling it forward if it is. Returns True when the
+    instrument is safe to trade this cycle.
+
+    **Why this lives here at all** (found by independent code review,
+    2026-09-15): `roll_to_next_contract` used to be reachable from exactly one
+    place -- inside `scheduler.run.run_all_enabled_configs`'s loop over
+    `BotConfig.enabled == True`. This strategy is configured exclusively
+    through `mcx_options_configs` and never creates a `bot_config` row, so
+    unless a commodity ALSO happened to have a separate enabled futures
+    `BotConfig`, its `Instrument.contract_expiry`/`security_id` never
+    advanced. Two consequences, both silent:
+
+      1. `live_data.fetch_cycle_data` kept requesting quotes, historical bars
+         and option chains for an EXPIRED contract's `security_id`;
+      2. `mcx_options_engine.run_cycle`'s own futures-rollover detection
+         compares a position's `futures_contract_expiry` against that same
+         Instrument field, so it could never become true --
+         `_roll_futures_position` was effectively dead code in production.
+
+    Rolling here (rather than extending the 5-minute tick's instrument set)
+    keeps the dependency pointing the same direction the rest of this module
+    already does, and means the roll happens immediately before the cycle that
+    needs it.
+
+    **Failing closed is deliberate.** If the contract is past cutoff and the
+    roll does not succeed -- the instrument master is unreachable, or
+    `roll_to_next_contract` refuses to guess the next contract -- this returns
+    False and the caller skips the commodity for the day. Trading an expired
+    contract's `security_id` is strictly worse than missing a cycle: every
+    quote, strike selection and settlement decision would be made against a
+    contract that no longer exists. The existing manual rollover process
+    (docs/pending-actions.md) remains the fallback, exactly as it is for the
+    futures tick.
+    """
+    if not is_past_close_out_cutoff(
+        instrument.symbol, instrument.contract_expiry, cycle_date
+    ):
+        return True
+
+    logger.warning(
+        "mcx_options: %s's contract (expiry %s) is past its close-out cutoff -- attempting "
+        "an automatic rollover before running today's cycle",
+        instrument.symbol,
+        instrument.contract_expiry,
+    )
+    try:
+        csv_text = fetch_instrument_master_csv()
+        rolled = roll_to_next_contract(session, dhan_client, instrument, csv_text)
+    except Exception:  # noqa: BLE001 -- see this function's docstring: fail closed
+        logger.exception(
+            "mcx_options: automatic rollover attempt failed for %s -- skipping this "
+            "commodity's cycle today rather than trading an expired contract",
+            instrument.symbol,
+        )
+        return False
+
+    if not rolled:
+        logger.warning(
+            "mcx_options: could not roll %s to its next contract -- skipping this "
+            "commodity's cycle today rather than trading an expired contract. Manual "
+            "rollover (see docs/pending-actions.md) is still available.",
+            instrument.symbol,
+        )
+        return False
+
+    logger.info(
+        "mcx_options: rolled %s to its next contract (expiry now %s) -- proceeding with "
+        "today's cycle",
+        instrument.symbol,
+        instrument.contract_expiry,
+    )
+    return True
+
+
 def run_mcx_options_configs(session: Any, dhan_client: Any, today: Optional[date] = None) -> None:
     """Fetch every enabled `MCXOptionsConfig` row and run one daily cycle
     each: `live_data.fetch_cycle_data` builds that commodity's market data,
@@ -124,6 +207,9 @@ def run_mcx_options_configs(session: Any, dhan_client: Any, today: Optional[date
             )
             continue
         try:
+            # Never trade an expired contract -- see _ensure_contract_is_current.
+            if not _ensure_contract_is_current(session, dhan_client, instrument, cycle_date):
+                continue
             cycle_data = _fetch_cycle_data_with_retry(dhan_client, instrument, cycle_date)
             run_cycle(session, config, cycle_data, today=cycle_date)
         except Exception:  # noqa: BLE001 -- one commodity must not lose the whole cycle

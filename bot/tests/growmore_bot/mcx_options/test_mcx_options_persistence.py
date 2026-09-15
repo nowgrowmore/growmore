@@ -281,16 +281,23 @@ def test_regime_values_accepted(session):
     session.add(cfg)
     session.flush()
 
-    for regime, delta in [
-        ("consolidating", 0.30),
-        ("trend_favorable", 0.50),
-        ("trend_unfavorable", None),
-    ]:
+    # One row per cycle_date: migration 0026 added
+    # UNIQUE (config_id, cycle_date), because one cycle_date is one decision
+    # (three hand-run production cycles on 2026-09-14 each appended their own
+    # row for that same date).
+    for day, (regime, delta) in enumerate(
+        [
+            ("consolidating", 0.30),
+            ("trend_favorable", 0.50),
+            ("trend_unfavorable", None),
+        ],
+        start=14,
+    ):
         session.add(
             MCXOptionsSelection(
                 id=uuid.uuid4(),
                 config_id=cfg.id,
-                cycle_date=date(2026, 9, 14),
+                cycle_date=date(2026, 9, day),
                 regime=regime,
                 target_delta=delta,
             )

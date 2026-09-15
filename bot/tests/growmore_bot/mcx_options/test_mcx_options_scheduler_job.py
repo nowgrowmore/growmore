@@ -267,3 +267,108 @@ def test_no_inter_config_delay_with_a_single_enabled_config(session):
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     sleep_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# B6 (independent review, 2026-09-15): futures contract rollover used to reach
+# these instruments only by accident.
+#
+# `roll_to_next_contract` is called from exactly one place in the old code:
+# inside `scheduler.run.run_all_enabled_configs`'s loop over
+# `BotConfig.enabled == True`. The MCX options strategy is configured
+# exclusively through `mcx_options_configs` and never creates a `bot_config`
+# row, so unless GOLDM/SILVERM happened to ALSO have a separate enabled
+# futures BotConfig, `Instrument.contract_expiry`/`security_id` never
+# advanced -- meaning this engine kept requesting quotes and option chains
+# for an EXPIRED contract's security_id, and `run_cycle`'s own rollover
+# detection (which compares against that same Instrument field) could never
+# fire.
+# ---------------------------------------------------------------------------
+
+
+def _instrument_past_cutoff(session, symbol: str) -> Instrument:
+    inst = _instrument(session, symbol)
+    inst.contract_expiry = TODAY  # close-out cutoff is before the expiry itself
+    session.flush()
+    return inst
+
+
+def test_rolls_the_instrument_contract_before_running_the_cycle(session):
+    strategy = _strategy(session)
+    _instrument_past_cutoff(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.is_past_close_out_cutoff", return_value=True), \
+         patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv", return_value="csv"), \
+         patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract", return_value=True) as roll, \
+         patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    roll.assert_called_once()
+    assert roll.call_args.args[2].symbol == "GOLDM"
+    # The roll succeeded, so the cycle still runs -- now against the NEW
+    # contract, which is exactly what lets run_cycle detect that a held
+    # futures position needs rolling too.
+    run_cycle_mock.assert_called_once()
+
+
+def test_skips_the_commodity_when_the_contract_is_past_cutoff_and_the_roll_fails(session):
+    """Trading an EXPIRED contract's security_id is strictly worse than
+    skipping a day: every quote, option chain and settlement decision would
+    be against a contract that no longer exists.
+    """
+    strategy = _strategy(session)
+    _instrument_past_cutoff(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.is_past_close_out_cutoff", return_value=True), \
+         patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv", return_value="csv"), \
+         patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract", return_value=False), \
+         patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    fetch.assert_not_called()
+    run_cycle_mock.assert_not_called()
+
+
+def test_does_not_attempt_a_rollover_before_the_close_out_cutoff(session):
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.is_past_close_out_cutoff", return_value=False), \
+         patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv") as csv, \
+         patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract") as roll, \
+         patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    csv.assert_not_called()
+    roll.assert_not_called()
+    run_cycle_mock.assert_called_once()
+
+
+def test_a_failing_instrument_master_fetch_skips_the_commodity_rather_than_trading_expired(session):
+    strategy = _strategy(session)
+    _instrument_past_cutoff(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.is_past_close_out_cutoff", return_value=True), \
+         patch(
+             "growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv",
+             side_effect=RuntimeError("instrument master unreachable"),
+         ), \
+         patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    fetch.assert_not_called()
+    run_cycle_mock.assert_not_called()

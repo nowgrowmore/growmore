@@ -21,6 +21,7 @@ from growmore_bot.persistence.models import Base, MCXOptionsConfig, Strategy
 from research.provision_mcx_options_configs import (
     CONSOLIDATING_TARGET_DELTA,
     LOTS,
+    MIN_OPEN_INTEREST,
     STRATEGY_NAME,
     STRATEGY_VERSION,
     TREND_FAVORABLE_TARGET_DELTA,
@@ -140,3 +141,48 @@ def test_dry_run_makes_no_changes_even_when_a_strategy_row_already_exists(monkey
     assert rc == 0
 
     assert len(_configs(engine)) == len(WANTED_SYMBOLS)  # unchanged, still just the applied ones
+
+
+
+# ---------------------------------------------------------------------------
+# B8 (independent review, 2026-09-15): the OI floor was never provisioned.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_creates_configs_with_a_real_min_open_interest_floor(monkeypatch):
+    """`min_open_interest` was never written by this script, so production sat
+    at the column's server default of 0 -- the OI floor was a complete no-op
+    and the bid/ask executability gate was the only filter doing any work.
+    """
+    engine = _sqlite_session_factory(monkeypatch)
+
+    assert main(["--apply"]) == 0
+
+    configs = _configs(engine)
+    assert len(configs) == len(WANTED_SYMBOLS)
+    for cfg in configs:
+        assert int(cfg.min_open_interest) == MIN_OPEN_INTEREST
+        assert int(cfg.min_open_interest) > 0
+
+
+def test_apply_refreshes_min_open_interest_on_an_existing_row(monkeypatch):
+    """A row provisioned before this floor existed must be brought up to it on
+    the next `--apply`, the same way the deltas and lots already are -- and
+    the owner's own `enabled` flag must still never be touched.
+    """
+    engine = _sqlite_session_factory(monkeypatch)
+    assert main(["--apply"]) == 0
+
+    Session = sessionmaker(bind=engine, future=True)
+    with Session() as session:
+        cfg = session.query(MCXOptionsConfig).filter_by(symbol=WANTED_SYMBOLS[0]).one()
+        cfg.min_open_interest = 0
+        cfg.enabled = True
+        session.commit()
+
+    assert main(["--apply"]) == 0
+
+    with Session() as session:
+        cfg = session.query(MCXOptionsConfig).filter_by(symbol=WANTED_SYMBOLS[0]).one()
+        assert int(cfg.min_open_interest) == MIN_OPEN_INTEREST
+        assert cfg.enabled is True

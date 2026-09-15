@@ -35,7 +35,36 @@ outstanding": a short put sold against no futures position is still `flat`)::
                                                           (called away)
 
 No stop-loss anywhere, by deliberate design (matches the offline backtest):
-a leg only ever resolves via expiry/assignment/being-called-away.
+a leg only ever resolves via expiry/assignment/being-called-away. (A
+flag-gated, default-OFF stop-loss is proposed in docs/pending-actions.md --
+until the account owner enables it, this remains literally true.)
+
+**Settlement is due on OR AFTER the leg's expiry, never only ON it.** The
+check is `open_leg.cycle_expiry <= today`. Exact equality (what this used to
+do) meant a single missed cycle -- the VPS down or restarting at 23:59, an
+MCX partial-session holiday absent from `market_hours.MCX_HOLIDAYS_2026`, or
+a `DhanApiError` that exhausted `scheduler_job`'s retries -- left the leg
+unsettled FOREVER: that date never came round again, so `entry_needed`
+stayed False on every later cycle and the commodity silently stopped trading
+with nothing but a log line to show for it. A late settlement is logged as
+such, because the ITM/OTM call is then made against today's futures price
+rather than the expiry day's (found by independent code review, 2026-09-15).
+
+**Moneyness guards on both sides.** `_floor_chain_for_covered_call` keeps a
+covered call at or above the position's basis; `_cap_chain_for_short_put`
+keeps a short put strictly below the futures price. The target-delta picker
+ranks purely on |delta| and has no notion of moneyness, so at
+`trend_favorable_target_delta = 0.50` (an ATM delta) it would otherwise
+happily sell a put at or through the futures price -- a near-certain
+assignment booked as premium income.
+
+**One cycle_date is one decision.** Every code path records its outcome via
+`_record_selection`, which REPLACES that day's `MCXOptionsSelection` row
+rather than appending another. Three production cycles were hand-run on
+2026-09-14 (19:13, 20:42, 23:59 IST) and each left its own row for the same
+date, so the dashboard showed that day three times with three different
+"why" strings. Migration 0026 adds the matching `UNIQUE (config_id,
+cycle_date)`.
 
 **Regime gating**: `growmore_bot.mcx_options.regime.classify_today` is
 called directly on `cycle_data.futures_bars` (a pure function of already-
@@ -57,6 +86,17 @@ ledger. This is called out explicitly rather than silently doing nothing
 (PaperPosition.realized_pnl/unrealized_pnl similarly aren't updated by
 `wheel_basket_engine.py` at all -- this at least keeps `unrealized_pnl`
 live).
+
+`_mark_to_market` is called ONCE per cycle, unconditionally, for whatever
+position exists -- it is a no-op for any non-`long_futures` state, so every
+code path below can share the one call. It used to live only on the "a leg
+is live and not due yet" branch, which meant `unrealized_pnl` (and the
+`position_unrealized_pnl` snapshot written to `MCXOptionsSelection`) went
+stale on exactly the cycles that matter most: the cycle a put was ASSIGNED
+(the futures position opens already underwater by `(F - strike) * qty`, and
+that read as 0), and any cycle where a new covered call was skipped by
+regime or by the strike filters. Found by independent code review,
+2026-09-15.
 
 **Futures contract rollover -- implemented by reusing the existing
 Instrument-level rollover mechanism, not by re-deriving next-contract logic
@@ -163,6 +203,7 @@ attempted -- `growmore_bot.mcx_options.live_data` only ever calls
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import replace
 from datetime import date, datetime, timezone
@@ -178,6 +219,29 @@ from growmore_bot.mcx_options.strike_selection import (
     select_strike_by_target_delta,
 )
 from growmore_bot.persistence.models import MCXOptionsLeg, MCXOptionsPosition, MCXOptionsSelection
+
+logger = logging.getLogger(__name__)
+
+
+class MCXOptionsStateError(RuntimeError):
+    """A persisted invariant this engine relies on has been violated -- e.g.
+    two `status="open"` positions for one config, or two unsettled legs on one
+    position.
+
+    Raised rather than silently working around, because every "work around
+    it" option is worse: `.first()` on a duplicate open position orphans the
+    other one forever (never settled, never marked to market), and a bare
+    `MultipleResultsFound` from `.one_or_none()` reaches
+    `scheduler_job.run_mcx_options_configs`'s blanket `except Exception` as an
+    anonymous traceback that silently skips that commodity EVERY day
+    thereafter. A named error at least says what is wrong in the log line the
+    operator eventually reads.
+
+    Migration 0026 adds the partial unique indexes that make these states
+    unreachable going forward; this stays as the belt to that braces, and as
+    the thing that catches a state which predates the migration.
+    """
+
 
 #: Fallback vol used when a candidate strike's own quoted IV is missing --
 #: see strike_selection.py's per-strike fallback discipline. Matches
@@ -222,14 +286,23 @@ def _settle_leg(
     qty = float(leg.lots) * cycle_data.lot_size
     leg.settled_at = now
 
-    # `strike` is nullable at the schema level only to accommodate a "roll"
-    # leg (migration 0023) -- this function only ever settles a genuine PE/CE
-    # option leg (run_cycle never calls it on a roll leg), which always has
-    # one, so this narrows the type back down for the comparisons below.
-    assert leg.strike is not None, "an option leg being settled must have a strike"
-    # `premium` is nullable for the same reason (a "roll" leg) -- narrows
-    # back down for `_entry_leg_amount` below, same reasoning as `strike`.
-    assert leg.premium is not None, "an option leg being settled must have a premium"
+    # `strike`/`premium` are nullable at the schema level only to accommodate
+    # a "roll" leg (migration 0023) -- this function only ever settles a
+    # genuine PE/CE option leg (run_cycle never calls it on a roll leg),
+    # which always has both, so this narrows the types back down for the
+    # comparisons below. Raised, not `assert`ed: `python -O` strips asserts,
+    # and without them a None strike would reach `F < leg.strike` and fail
+    # somewhere far less legible.
+    if leg.strike is None:
+        raise MCXOptionsStateError(
+            f"MCXOptionsLeg {leg.id} (opt_type={leg.opt_type!r}) is being settled but has no "
+            "strike -- only a ROLL leg may have a null strike, and ROLL legs are never settled"
+        )
+    if leg.premium is None:
+        raise MCXOptionsStateError(
+            f"MCXOptionsLeg {leg.id} (opt_type={leg.opt_type!r}) is being settled but has no "
+            "premium -- only a ROLL leg may have a null premium, and ROLL legs are never settled"
+        )
 
     # The premium this leg earned when it was WRITTEN was already credited
     # into `position.realized_pnl` at entry time (see run_cycle's "entered"
@@ -280,6 +353,11 @@ def _settle_leg(
                 exit_mtm = (float(leg.strike) - float(position.basis)) * qty
                 exit_cost = leg_cost(float(leg.strike) * qty, "sell", DEFAULT_COST_MODEL)
                 position.realized_pnl = float(position.realized_pnl) + exit_mtm - exit_cost
+            # The futures are gone -- they were sold at the call strike. Left
+            # non-zero, this closed position kept reporting phantom exposure
+            # that the dashboard's current-position table reads straight off
+            # the row (found by independent code review, 2026-09-15).
+            position.futures_qty = 0
         else:  # OTM: keep the futures position, mark it to market
             leg.action = "call_expired_otm"
             if position.basis is not None:
@@ -361,6 +439,28 @@ def _floor_chain_for_covered_call(
     )
 
 
+def _cap_chain_for_short_put(
+    chain: OptionChainSnapshot, futures_price: float
+) -> OptionChainSnapshot:
+    """A short put must be genuinely OUT of the money -- drops PE rows at or
+    above `futures_price`; leaves every other row untouched.
+
+    The mirror image of `_floor_chain_for_covered_call`, and it exists for
+    the same reason: the target-delta picker ranks purely on |delta| and has
+    no notion of moneyness, so at `trend_favorable_target_delta = 0.50` (an
+    ATM delta) it could and would pick a strike at or through the futures
+    price. Selling an ITM put is not premium income -- it is buying the
+    underlying at a worse price and calling the difference a credit. The
+    offline backtest (`research/mcx_options/strike_selection.py`) has no such
+    guard either; it never bit there because bhavcopy chains are dense and
+    symmetric around spot, which a live Dhan chain need not be.
+    """
+    return replace(
+        chain,
+        rows=[r for r in chain.rows if not (r.opt_type == "PE" and r.strike >= futures_price)],
+    )
+
+
 def _position_snapshot(position: Optional[MCXOptionsPosition]) -> dict:
     """The (state, basis, unrealized_pnl) fields `MCXOptionsSelection`
     records every cycle -- a snapshot of `position`'s CURRENT values (post
@@ -379,6 +479,107 @@ def _position_snapshot(position: Optional[MCXOptionsPosition]) -> dict:
     }
 
 
+def _record_selection(
+    session: Any,
+    config: Any,
+    today: date,
+    cycle_data: MCXCycleData,
+    *,
+    reason: str,
+    position: Optional[MCXOptionsPosition],
+    regime: Optional[str] = None,
+    target_delta: Optional[float] = None,
+    selected_strike: Optional[float] = None,
+    candidates_considered: Optional[list] = None,
+) -> None:
+    """Write EXACTLY ONE `MCXOptionsSelection` row per (config, cycle_date),
+    replacing that day's row in place if the cycle is re-run.
+
+    One cycle_date is one decision. Three production cycles were run by hand
+    on 2026-09-14 (19:13, 20:42 and 23:59 IST) and each appended its own row
+    for the same date, so the dashboard's selection log showed the same day
+    three times with three different "why" strings and no way to tell which
+    one the engine actually acted on. A re-run is a CORRECTION of that day's
+    decision, not an additional one.
+
+    Migration 0026 adds `UNIQUE (config_id, cycle_date)` to enforce this at
+    the database level; this function is what keeps the engine from tripping
+    that constraint, and it also collapses any duplicate rows that predate
+    the migration.
+
+    Every column is written on every call (falling back to the defaults in
+    this signature) so a re-run can never leave a stale value from the
+    earlier run's code path sitting in an unrelated column.
+    """
+    fields = dict(
+        regime=regime,
+        target_delta=target_delta,
+        selected_strike=selected_strike,
+        reason=reason,
+        futures_price=cycle_data.futures_price,
+        option_expiry=cycle_data.option_expiry,
+        candidates_considered=candidates_considered,
+        **_position_snapshot(position),
+    )
+
+    existing = (
+        session.query(MCXOptionsSelection)
+        .filter_by(config_id=config.id, cycle_date=today)
+        .all()
+    )
+    if existing:
+        row = existing[0]
+        for key, value in fields.items():
+            setattr(row, key, value)
+        for duplicate in existing[1:]:
+            logger.warning(
+                "mcx_options: collapsing a duplicate MCXOptionsSelection row for "
+                "config_id=%s cycle_date=%s (one cycle_date is one decision)",
+                config.id,
+                today,
+            )
+            session.delete(duplicate)
+        return
+
+    session.add(
+        MCXOptionsSelection(id=uuid.uuid4(), config_id=config.id, cycle_date=today, **fields)
+    )
+
+
+def _open_position_for(session: Any, config: Any) -> Optional[MCXOptionsPosition]:
+    """The config's single open position, or None. Raises rather than picking
+    one when there are somehow two -- see `MCXOptionsStateError`.
+    """
+    open_positions = (
+        session.query(MCXOptionsPosition).filter_by(config_id=config.id, status="open").all()
+    )
+    if len(open_positions) > 1:
+        raise MCXOptionsStateError(
+            f"config_id={config.id} (symbol={getattr(config, 'symbol', '?')!r}) has "
+            f"{len(open_positions)} open positions: {[str(p.id) for p in open_positions]}. "
+            "Exactly one is expected -- refusing to guess which one to trade, because the "
+            "other would then be orphaned (never settled, never marked to market)."
+        )
+    return open_positions[0] if open_positions else None
+
+
+def _open_leg_for(session: Any, position: MCXOptionsPosition) -> Optional[MCXOptionsLeg]:
+    """The position's single unsettled leg, or None. Raises rather than
+    letting `.one_or_none()`'s anonymous `MultipleResultsFound` reach the
+    scheduler's blanket handler -- see `MCXOptionsStateError`.
+    """
+    open_legs = (
+        session.query(MCXOptionsLeg).filter_by(position_id=position.id, settled_at=None).all()
+    )
+    if len(open_legs) > 1:
+        raise MCXOptionsStateError(
+            f"position_id={position.id} has {len(open_legs)} unsettled legs: "
+            f"{[str(leg.id) for leg in open_legs]}. Exactly one is expected -- this engine "
+            "writes at most one leg per position at a time."
+        )
+    return open_legs[0] if open_legs else None
+
+
 def run_cycle(
     session: Any, config: Any, cycle_data: MCXCycleData, today: date,
 ) -> None:
@@ -391,15 +592,12 @@ def run_cycle(
     """
     now = datetime.now(timezone.utc)
 
-    position: Optional[MCXOptionsPosition] = (
-        session.query(MCXOptionsPosition).filter_by(config_id=config.id, status="open").first()
-    )
+    position = _open_position_for(session, config)
 
     # Roll a held futures position FIRST, before any settle/entry decision --
     # see module docstring. A mismatch means the Instrument-level rollover
-    # mechanism (contract_rollover.roll_to_next_contract, run earlier in the
-    # same tick) has already advanced the underlying contract out from under
-    # this position.
+    # mechanism (contract_rollover.roll_to_next_contract) has already advanced
+    # the underlying contract out from under this position.
     if (
         position is not None
         and position.state == "long_futures"
@@ -411,19 +609,44 @@ def run_cycle(
 
     entry_needed = True
     if position is not None:
-        open_leg = (
-            session.query(MCXOptionsLeg)
-            .filter_by(position_id=position.id, settled_at=None)
-            .one_or_none()
-        )
-        if open_leg is not None and open_leg.cycle_expiry == today:
+        open_leg = _open_leg_for(session, position)
+        # `<=`, not `==`. Exact equality meant that a single missed cycle --
+        # the VPS down or restarting at 23:59, an MCX partial-session holiday
+        # absent from MCX_HOLIDAYS_2026, or a DhanApiError that exhausted
+        # scheduler_job's retries -- left the leg unsettled FOREVER: that date
+        # never came round again, `entry_needed` stayed False on every later
+        # cycle, and the commodity silently stopped trading with nothing but a
+        # log line to show for it. Found by independent code review
+        # 2026-09-15.
+        if open_leg is not None and open_leg.cycle_expiry <= today:
+            if open_leg.cycle_expiry < today:
+                logger.warning(
+                    "mcx_options: settling leg %s LATE -- its cycle_expiry was %s but this is "
+                    "the first cycle since, running on %s. The ITM/OTM call below is made "
+                    "against TODAY's futures price, not the expiry day's, so the outcome may "
+                    "differ from what the exchange actually settled.",
+                    open_leg.id,
+                    open_leg.cycle_expiry,
+                    today,
+                )
             _settle_leg(position, open_leg, cycle_data, now)
             entry_needed = True  # settling always leaves room for a fresh decision
         elif open_leg is not None:
             entry_needed = False  # a leg is live and not due yet
-            _mark_to_market(position, cycle_data)
         # else: an open position with no open leg at all -- fall through and
         # let entry_needed=True try to write one (should not normally arise).
+
+        # Mark to market ONCE, here, for every code path below. This used to
+        # live only on the "live leg, not due" branch, which meant a
+        # long_futures position's unrealized_pnl (and the selection-log
+        # snapshot built from it) went stale on exactly the cycles that
+        # matter most: the cycle a put was ASSIGNED (the position is already
+        # underwater by (F - strike) * qty the moment it opens, and that read
+        # as 0), and any cycle where a new covered call was skipped by regime
+        # or by the strike filters. Found by independent code review
+        # 2026-09-15. `_mark_to_market` is a no-op for any non-long_futures
+        # state, so calling it unconditionally is safe on every path.
+        _mark_to_market(position, cycle_data)
 
     active_position = position if (position is not None and position.status == "open") else None
 
@@ -442,42 +665,52 @@ def run_cycle(
         reason = "position already has an open leg, not due for settlement today"
         if basis is not None and unrealized is not None:
             reason += f" (basis {float(basis):g}, unrealized P&L {float(unrealized):.2f})"
-        session.add(
-            MCXOptionsSelection(
-                id=uuid.uuid4(), config_id=config.id, cycle_date=today,
-                regime=hold_side_regime.value if hold_side_regime is not None else None,
-                target_delta=None, selected_strike=None, reason=reason,
-                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
-                **_position_snapshot(active_position),
-            )
+        _record_selection(
+            session, config, today, cycle_data,
+            regime=hold_side_regime.value if hold_side_regime is not None else None,
+            reason=reason, position=active_position,
         )
         return
 
     opt_type = "CE" if (active_position is not None and active_position.state == "long_futures") else "PE"
 
     regime_label = regime_module.classify_today(cycle_data.futures_bars)
+
+    # No tradeable expiry => no meaningful strike pick. `live_data
+    # .fetch_cycle_data` already refuses to return an expiry dated today (see
+    # its MIN_OPTION_DTE_DAYS), so this is a defence-in-depth guard for any
+    # other caller that hand-builds an MCXCycleData: at T=0 every Black-76
+    # delta is its 0/+-1 boundary, the whole chain ties on |delta - target|,
+    # and the pick degenerates to "first strike in ascending order".
+    if cycle_data.T_years <= 0:
+        _record_selection(
+            session, config, today, cycle_data,
+            regime=(
+                regime_label.for_option_type(opt_type).value if regime_label is not None else None
+            ),
+            reason=(
+                f"Option expiry {cycle_data.option_expiry} leaves no time to expiry "
+                "(T_years=0) -- skipped entry rather than picking a strike off "
+                "boundary deltas"
+            ),
+            position=active_position,
+        )
+        return
+
     if regime_label is None:
-        session.add(
-            MCXOptionsSelection(
-                id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=None,
-                target_delta=None, selected_strike=None,
-                reason="No regime label for today (insufficient warm-up data) -- skipped entry",
-                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
-                **_position_snapshot(active_position),
-            )
+        _record_selection(
+            session, config, today, cycle_data,
+            reason="No regime label for today (insufficient warm-up data) -- skipped entry",
+            position=active_position,
         )
         return
 
     side_regime = regime_label.for_option_type(opt_type)
     if side_regime == Regime.TREND_UNFAVORABLE:
-        session.add(
-            MCXOptionsSelection(
-                id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
-                target_delta=None, selected_strike=None,
-                reason=f"{side_regime.value} regime for {opt_type} -- skipped entry",
-                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
-                **_position_snapshot(active_position),
-            )
+        _record_selection(
+            session, config, today, cycle_data, regime=side_regime.value,
+            reason=f"{side_regime.value} regime for {opt_type} -- skipped entry",
+            position=active_position,
         )
         return
 
@@ -488,8 +721,12 @@ def run_cycle(
     )
 
     chain = cycle_data.option_chain
-    if opt_type == "CE" and active_position is not None and active_position.basis is not None:
-        chain = _floor_chain_for_covered_call(chain, float(active_position.basis))
+    if opt_type == "CE":
+        if active_position is not None and active_position.basis is not None:
+            chain = _floor_chain_for_covered_call(chain, float(active_position.basis))
+    else:
+        # A short put must be genuinely OTM -- see _cap_chain_for_short_put.
+        chain = _cap_chain_for_short_put(chain, cycle_data.futures_price)
 
     candidates = evaluate_candidates(
         chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
@@ -506,15 +743,11 @@ def run_cycle(
     )
 
     if picked is None:
-        session.add(
-            MCXOptionsSelection(
-                id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
-                target_delta=target_delta, selected_strike=None,
-                reason="No strike cleared the OI/basis filter -- skipped entry",
-                futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
-                candidates_considered=candidates_considered,
-                **_position_snapshot(active_position),
-            )
+        _record_selection(
+            session, config, today, cycle_data, regime=side_regime.value,
+            target_delta=target_delta,
+            reason="No strike cleared the moneyness/OI/executability filters -- skipped entry",
+            candidates_considered=candidates_considered, position=active_position,
         )
         return
 
@@ -526,6 +759,26 @@ def run_cycle(
         session.add(active_position)
         session.flush()
 
+    # A COVERED call is covered by the futures actually held, not by whatever
+    # `config.lots` happens to say today. These are normally the same number,
+    # but `lots` is an operator-editable config column and the position may
+    # have been opened under a different value -- in which case sizing the
+    # call off `config.lots` would quietly write a partially NAKED short call.
+    # Found by independent code review 2026-09-15.
+    entry_lots = float(config.lots)
+    if opt_type == "CE" and active_position is not None:
+        held_qty = float(active_position.futures_qty)
+        if held_qty > 0 and cycle_data.lot_size:
+            held_lots = held_qty / cycle_data.lot_size
+            if held_lots != entry_lots:
+                logger.warning(
+                    "mcx_options: sizing the covered call for config_id=%s from the futures "
+                    "actually held (%g lots) rather than config.lots (%g) -- writing %g lots "
+                    "would leave %g lots of the call uncovered",
+                    config.id, held_lots, entry_lots, entry_lots, entry_lots - held_lots,
+                )
+            entry_lots = held_lots
+
     # The premium collected for selling this option is real cash credited
     # the moment it is sold -- book it into realized_pnl right here, at
     # entry, not deferred to settlement. See module docstring's "Option
@@ -535,31 +788,27 @@ def run_cycle(
     # fully-resolved outcome once SETTLED (see `_settle_leg`), not the
     # entry credit; the raw `premium` column already shows what an open
     # leg collected.
-    entry_leg_amount = _entry_leg_amount(picked.ltp, config.lots, cycle_data.lot_size)
+    entry_leg_amount = _entry_leg_amount(picked.ltp, entry_lots, cycle_data.lot_size)
     active_position.realized_pnl = float(active_position.realized_pnl) + entry_leg_amount
 
     action = "sell_call" if opt_type == "CE" else "sell_put"
     session.add(
         MCXOptionsLeg(
             id=uuid.uuid4(), position_id=active_position.id, cycle_expiry=cycle_data.option_expiry,
-            opt_type=opt_type, strike=picked.strike, premium=picked.ltp, lots=config.lots,
+            opt_type=opt_type, strike=picked.strike, premium=picked.ltp, lots=entry_lots,
             action=action, opened_at=now,
         )
     )
 
-    session.add(
-        MCXOptionsSelection(
-            id=uuid.uuid4(), config_id=config.id, cycle_date=today, regime=side_regime.value,
-            target_delta=target_delta, selected_strike=picked.strike,
-            reason=(
-                f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
-                f"entered {opt_type} at strike {picked.strike}"
-            ),
-            futures_price=cycle_data.futures_price, option_expiry=cycle_data.option_expiry,
-            candidates_considered=candidates_considered,
-            **_position_snapshot(active_position),
-        )
+    _record_selection(
+        session, config, today, cycle_data, regime=side_regime.value,
+        target_delta=target_delta, selected_strike=picked.strike,
+        reason=(
+            f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
+            f"entered {opt_type} at strike {picked.strike}"
+        ),
+        candidates_considered=candidates_considered, position=active_position,
     )
 
 
-__all__ = ["run_cycle", "DEFAULT_SIGMA", "RISK_FREE_RATE"]
+__all__ = ["run_cycle", "MCXOptionsStateError", "DEFAULT_SIGMA", "RISK_FREE_RATE"]

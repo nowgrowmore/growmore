@@ -69,6 +69,24 @@ from growmore_bot.broker.dhan_client import Bar, DhanClient, OptionChainSnapshot
 #: wheel_basket/live_iv_rank.py over-fetches for its own indicator warm-up).
 FUTURES_HISTORY_WARMUP_DAYS = 180
 
+#: Minimum days-to-expiry for an option expiry to be considered tradeable at
+#: all. Found by independent code review 2026-09-15: the old filter accepted
+#: an expiry dated TODAY, which gives `T_years == 0`, and at T=0
+#: `pricing.black76_delta` returns its BOUNDARY values -- 0.0 or +-1.0 for
+#: every strike on the board. `select_strike_by_target_delta` then finds the
+#: whole chain equidistant from the target delta and `min` breaks the tie by
+#: returning the first entry in strike-ascending order: the deepest OTM
+#: strike listed, worth approximately nothing. Worse, the leg written that
+#: way carries `cycle_expiry == today`, and the settlement path would have to
+#: see that same date again to resolve it.
+#:
+#: 1 day (i.e. strictly after today) is the minimum that makes the delta math
+#: meaningful at all; it is deliberately NOT a strategy-level DTE preference
+#: (see docs/pending-actions.md's proposed `min_dte_days`/`max_dte_days`
+#: config columns for that -- this constant is a correctness floor, not a
+#: tunable).
+MIN_OPTION_DTE_DAYS = 1
+
 
 @dataclass(frozen=True)
 class MCXCycleData:
@@ -134,9 +152,10 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
     classifier's trailing window.
 
     Raises `ValueError` loudly (never returns a fabricated/partial result)
-    if Dhan returns no historical bars at all, or no expiry on/after
-    `today` -- both real "can't decide today" outcomes the caller
-    (`mcx_options_engine`) must not be handed silently as zeros.
+    if Dhan returns no historical bars at all, or no expiry at least
+    `MIN_OPTION_DTE_DAYS` after `today` -- both real "can't decide today"
+    outcomes the caller (`mcx_options_engine`) must not be handed silently
+    as zeros.
     """
     from_date = today - timedelta(days=FUTURES_HISTORY_WARMUP_DAYS)
     bars = dhan_client.get_historical_ohlc(
@@ -154,11 +173,19 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
 
     raw_expiries = dhan_client.get_expiry_list(instrument)
     parsed_expiries = [_parse_expiry(e) for e in raw_expiries]
-    upcoming = sorted(e for e in parsed_expiries if e >= today)
+    # Strictly in the future, by at least MIN_OPTION_DTE_DAYS -- an expiry
+    # dated today is NOT tradeable here; see that constant's docstring.
+    upcoming = sorted(
+        e for e in parsed_expiries if (e - today).days >= MIN_OPTION_DTE_DAYS
+    )
     if not upcoming:
         raise ValueError(
-            f"No upcoming option expiry (on or after {today.isoformat()}) returned by Dhan "
-            f"for {getattr(instrument, 'symbol', instrument)!r}"
+            f"No tradeable option expiry (at least {MIN_OPTION_DTE_DAYS} day(s) after "
+            f"{today.isoformat()}) returned by Dhan for "
+            f"{getattr(instrument, 'symbol', instrument)!r} -- Dhan listed "
+            f"{sorted(parsed_expiries)!r}. An expiry dated today is deliberately "
+            "excluded (T_years would be 0, which collapses every Black-76 delta to a "
+            "0/+-1 boundary and makes the target-delta strike pick meaningless)."
         )
     option_expiry = upcoming[0]
 
@@ -179,4 +206,9 @@ def fetch_cycle_data(dhan_client: DhanClient, instrument: Any, today: date) -> M
     )
 
 
-__all__ = ["MCXCycleData", "FUTURES_HISTORY_WARMUP_DAYS", "fetch_cycle_data"]
+__all__ = [
+    "MCXCycleData",
+    "FUTURES_HISTORY_WARMUP_DAYS",
+    "MIN_OPTION_DTE_DAYS",
+    "fetch_cycle_data",
+]

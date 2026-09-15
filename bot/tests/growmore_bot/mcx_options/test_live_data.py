@@ -227,3 +227,34 @@ def test_raises_loudly_on_unparseable_expiry_string():
     client = _FakeDhanClient(bars, ["not-a-date"], _some_chain())
     with pytest.raises(ValueError):
         fetch_cycle_data(client, _Instrument(), today=TODAY)
+
+
+def test_skips_an_expiry_that_is_today_and_picks_the_next_one():
+    """B2 (independent review, 2026-09-15): an expiry dated TODAY gives
+    T_years == 0, which collapses every Black-76 delta to its 0/+-1 boundary
+    and makes the target-delta strike pick meaningless -- and the leg it
+    would write carries `cycle_expiry == today`, which the settlement path
+    can never see again. Only a strictly future expiry is tradeable.
+    """
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[today.isoformat(), (today + timedelta(days=10)).isoformat()],
+        chain=_some_chain(),
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today)
+
+    assert cycle.option_expiry == today + timedelta(days=10)
+    assert cycle.T_years > 0
+
+
+def test_raises_loudly_when_the_only_expiry_left_is_today():
+    """Rather than silently entering at T_years == 0 -- see the test above."""
+    today = date(2026, 9, 14)
+    client = _FakeDhanClient(
+        bars=_some_bars(), expiries=[today.isoformat()], chain=_some_chain()
+    )
+
+    with pytest.raises(ValueError, match="expiry"):
+        fetch_cycle_data(client, _Instrument(), today)

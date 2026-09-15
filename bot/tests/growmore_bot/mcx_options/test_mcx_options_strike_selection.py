@@ -382,3 +382,56 @@ def test_evaluate_candidates_excludes_row_with_zero_bid_or_ask():
     )
 
     assert candidates == []
+
+
+# ---------------------------------------------------------------------------
+# B7 (independent review, 2026-09-15): Dhan's quoted IV is not sanity-checked.
+# ---------------------------------------------------------------------------
+
+
+def test_implausible_row_iv_falls_back_to_the_supplied_sigma():
+    """A REAL production row on 2026-09-14 quoted implied_volatility=259.33%
+    (see dhan_client.OptionChainRow's docstring). Feeding sigma=2.59 into
+    Black-76 flattens delta toward 0.5 for every strike, which makes the
+    whole target-delta pick meaningless. An IV outside the plausible band is
+    treated exactly like a MISSING one -- fall back to `sigma`, never drop
+    the row and never trust the number.
+    """
+    absurd = _row(90.0, "PE", iv=2.5933)
+    chain = OptionChainSnapshot(spot=F, rows=[absurd])
+
+    [candidate] = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+        min_open_interest=1,
+    )
+
+    assert candidate.delta == pytest.approx(black76_delta("PE", F, 90.0, T, SIGMA, R))
+
+
+def test_implausibly_low_row_iv_also_falls_back_to_the_supplied_sigma():
+    """The same guard at the other end -- a near-zero quoted IV would push
+    every delta to a 0/-1 boundary just as unusably.
+    """
+    chain = OptionChainSnapshot(spot=F, rows=[_row(90.0, "PE", iv=0.0001)])
+
+    [candidate] = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+        min_open_interest=1,
+    )
+
+    assert candidate.delta == pytest.approx(black76_delta("PE", F, 90.0, T, SIGMA, R))
+
+
+def test_a_plausible_row_iv_is_still_used_verbatim():
+    """The clamp must not quietly disable the per-strike IV that makes this
+    module better than a flat chain-wide sigma in the first place.
+    """
+    row_iv = 0.42
+    chain = OptionChainSnapshot(spot=F, rows=[_row(90.0, "PE", iv=row_iv)])
+
+    [candidate] = evaluate_candidates(
+        chain, opt_type="PE", futures_price=F, T_years=T, sigma=SIGMA, r=R,
+        min_open_interest=1,
+    )
+
+    assert candidate.delta == pytest.approx(black76_delta("PE", F, 90.0, T, row_iv, R))

@@ -15,7 +15,22 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -675,6 +690,14 @@ class MCXOptionsConfig(Base):
     """
 
     __tablename__ = "mcx_options_configs"
+    # Migration 0026. `mode` is the live-trading gate and was previously
+    # unconstrained text; `(strategy_id, symbol)` is what
+    # research/provision_mcx_options_configs.py's `.one_or_none()` lookup has
+    # always assumed.
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "symbol", name="uq_mcx_options_configs_strategy_symbol"),
+        CheckConstraint("mode IN ('paper', 'live')", name="ck_mcx_options_configs_mode"),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     strategy_id: Mapped[uuid.UUID] = mapped_column(
@@ -736,6 +759,27 @@ class MCXOptionsPosition(Base):
     """
 
     __tablename__ = "mcx_options_positions"
+    # Migration 0026. The partial unique index is the DB-side backstop for the
+    # invariant `mcx_options_engine._open_position_for` raises on: a second
+    # open position would be orphaned forever (never settled, never marked to
+    # market) because `run_cycle` only ever acts on one.
+    __table_args__ = (
+        Index("ix_mcx_options_positions_config_opened", "config_id", "opened_at"),
+        Index(
+            "uq_mcx_options_positions_one_open_per_config",
+            "config_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
+        CheckConstraint(
+            "status IN ('open', 'closed')", name="ck_mcx_options_positions_status"
+        ),
+        CheckConstraint(
+            "state IN ('flat', 'long_futures', 'closed')",
+            name="ck_mcx_options_positions_state",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     config_id: Mapped[uuid.UUID] = mapped_column(
@@ -774,6 +818,32 @@ class MCXOptionsLeg(Base):
     """
 
     __tablename__ = "mcx_options_legs"
+    # Migration 0026. The roll CHECK ties 0023's strike/premium nullability to
+    # the one reason it was relaxed -- before it, a PE/CE leg with a null
+    # strike was schema-legal and only a (python -O strippable) `assert`
+    # stood in the way.
+    __table_args__ = (
+        Index("ix_mcx_options_legs_position", "position_id"),
+        Index(
+            "uq_mcx_options_legs_one_unsettled_per_position",
+            "position_id",
+            unique=True,
+            postgresql_where=text("settled_at IS NULL"),
+            sqlite_where=text("settled_at IS NULL"),
+        ),
+        CheckConstraint(
+            "opt_type IN ('PE', 'CE', 'ROLL')", name="ck_mcx_options_legs_opt_type"
+        ),
+        CheckConstraint(
+            "action IN ('sell_put', 'sell_call', 'assigned', 'called_away', "
+            "'put_expired_otm', 'call_expired_otm', 'roll')",
+            name="ck_mcx_options_legs_action",
+        ),
+        CheckConstraint(
+            "(opt_type = 'ROLL') = (strike IS NULL)",
+            name="ck_mcx_options_legs_roll_has_no_strike",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     position_id: Mapped[uuid.UUID] = mapped_column(
@@ -821,6 +891,20 @@ class MCXOptionsSelection(Base):
     """
 
     __tablename__ = "mcx_options_selections"
+    # Migration 0026. One cycle_date is ONE decision -- re-running a cycle
+    # replaces that day's row (see mcx_options_engine._record_selection),
+    # it never stacks a second one behind it.
+    __table_args__ = (
+        Index("ix_mcx_options_selections_config_cycle", "config_id", "cycle_date", "created_at"),
+        UniqueConstraint(
+            "config_id", "cycle_date", name="uq_mcx_options_selections_config_cycle"
+        ),
+        CheckConstraint(
+            "regime IS NULL OR regime IN "
+            "('consolidating', 'trend_favorable', 'trend_unfavorable')",
+            name="ck_mcx_options_selections_regime",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     config_id: Mapped[uuid.UUID] = mapped_column(

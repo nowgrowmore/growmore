@@ -54,6 +54,27 @@ CONSOLIDATING_TARGET_DELTA = 0.30
 TREND_FAVORABLE_TARGET_DELTA = 0.50
 LOTS = 1
 
+#: Minimum open interest a strike must carry to be considered at all.
+#:
+#: Found by independent code review 2026-09-15: this script never wrote
+#: `min_open_interest`, so every production row sat at the column's server
+#: default of **0** -- i.e. the OI floor the engine passes to
+#: `strike_selection.evaluate_candidates` was a complete no-op, and the
+#: bid/ask executability gate was the only filter doing any work at all.
+#:
+#: 10 is a deliberately CONSERVATIVE "this strike has a real, ongoing market"
+#: floor, in the same spirit as `growmore_bot/options/strike_selection.py`'s
+#: `MIN_STRIKE_VOLUME = 1` ("a strike must have actually printed to be
+#: sellable") -- it is NOT a sourced or tuned figure, and it is not a view on
+#: what liquidity these contracts "should" have. It is set low enough that it
+#: cannot plausibly starve the strategy of candidates while still excluding
+#: the oi=0/oi=1 rows the 2026-09-14 phantom-quote incident came from.
+#:
+#: TUNE THIS against real data: `mcx_options_selections.candidates_considered`
+#: now records the OI of every evaluated strike on every cycle, and the
+#: /mcx-options selection log surfaces it. See docs/pending-actions.md.
+MIN_OPEN_INTEREST = 10
+
 WANTED_SYMBOLS = ["GOLDM", "SILVERM"]
 
 
@@ -92,7 +113,7 @@ def main(argv=None) -> int:
                 changes.append(
                     f"CREATE   {symbol:9} consolidating={CONSOLIDATING_TARGET_DELTA} "
                     f"trend_favorable={TREND_FAVORABLE_TARGET_DELTA} lots={LOTS} "
-                    f"enabled=False mode=paper"
+                    f"min_open_interest={MIN_OPEN_INTEREST} enabled=False mode=paper"
                 )
                 if apply:
                     session.add(
@@ -106,6 +127,7 @@ def main(argv=None) -> int:
                             lots=LOTS,
                             consolidating_target_delta=CONSOLIDATING_TARGET_DELTA,
                             trend_favorable_target_delta=TREND_FAVORABLE_TARGET_DELTA,
+                            min_open_interest=MIN_OPEN_INTEREST,
                         )
                     )
                 continue
@@ -117,6 +139,7 @@ def main(argv=None) -> int:
                 float(existing.consolidating_target_delta) != CONSOLIDATING_TARGET_DELTA
                 or float(existing.trend_favorable_target_delta) != TREND_FAVORABLE_TARGET_DELTA
                 or int(existing.lots) != LOTS
+                or int(existing.min_open_interest) != MIN_OPEN_INTEREST
             )
             changes.append(
                 f"{'UPDATE ' if tunables_changed else 'exists '} {symbol:9} "
@@ -126,6 +149,7 @@ def main(argv=None) -> int:
                 existing.consolidating_target_delta = CONSOLIDATING_TARGET_DELTA
                 existing.trend_favorable_target_delta = TREND_FAVORABLE_TARGET_DELTA
                 existing.lots = LOTS
+                existing.min_open_interest = MIN_OPEN_INTEREST
 
         print()
         for c in changes:

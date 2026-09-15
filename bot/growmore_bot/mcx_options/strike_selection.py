@@ -15,10 +15,12 @@ an IV out of the way `research/mcx_options/strike_selection.py` must (MCX
 bhavcopy rows carry settlement prices, not IV). This module therefore uses
 `row.iv` directly when present, and falls back to the caller-supplied
 `sigma` (expected to be something like a realised-vol estimate from the
-underlying futures series) ONLY for a strike whose IV is missing -- the same
+underlying futures series) for a strike whose IV is missing -- the same
 per-strike (not chain-wide) fallback discipline the research module
 documents, so one illiquid strike never throws away every other strike's
-real market-implied delta.
+real market-implied delta. An IV that is PRESENT but implausible is treated
+identically to a missing one -- see `MIN_PLAUSIBLE_IV`/`MAX_PLAUSIBLE_IV`
+and the real 259.33% production print that made that necessary.
 
 **Executability gate**: confirmed 2026-09-14 against a REAL production pick
 -- Dhan's `last_price` can be a stale/phantom number that has nothing to do
@@ -46,6 +48,36 @@ from typing import Optional
 
 from growmore_bot.broker.dhan_client import OptionChainRow, OptionChainSnapshot
 from growmore_bot.mcx_options.pricing import black76_delta
+
+#: The band a quoted `OptionChainRow.iv` must fall inside to be trusted as a
+#: real market-implied vol. Confirmed 2026-09-14 against a REAL production
+#: row: Dhan quoted `implied_volatility=259.33%` for a SILVERM PE (the same
+#: phantom row the executability gate was added for). Feeding sigma=2.59 into
+#: Black-76 flattens every strike's delta toward 0.5, which makes the whole
+#: target-delta pick meaningless -- the picker would then be choosing on
+#: noise while looking like it was choosing on delta. The bounds are
+#: deliberately WIDE (2% to 150% annualised): they are a garbage filter, not
+#: a view on what gold/silver vol "should" be -- a genuine 80% vol print
+#: during a bullion shock must still be used verbatim.
+MIN_PLAUSIBLE_IV = 0.02
+MAX_PLAUSIBLE_IV = 1.50
+
+
+def _usable_iv(row_iv: Optional[float], sigma: float) -> float:
+    """The vol to price this row with: its own quoted IV when that IV is both
+    present and plausible, else the caller-supplied `sigma`.
+
+    An implausible IV is treated exactly like a MISSING one -- fall back,
+    never drop the row (that would throw away a perfectly tradeable strike
+    over a bad vol print) and never trust the number. See
+    `MIN_PLAUSIBLE_IV`/`MAX_PLAUSIBLE_IV` above for the confirmed production
+    incident this guards.
+    """
+    if row_iv is None:
+        return sigma
+    if not (MIN_PLAUSIBLE_IV <= row_iv <= MAX_PLAUSIBLE_IV):
+        return sigma
+    return row_iv
 
 
 @dataclass(frozen=True)
@@ -113,7 +145,7 @@ def evaluate_candidates(
     ]
     evaluations = []
     for row in survivors:
-        vol = row.iv if row.iv is not None else sigma
+        vol = _usable_iv(row.iv, sigma)
         delta = black76_delta(opt_type, futures_price, row.strike, T_years, vol, r)
         evaluations.append(
             CandidateEvaluation(
@@ -159,4 +191,10 @@ def select_strike_by_target_delta(
     return by_strike[best.strike]
 
 
-__all__ = ["CandidateEvaluation", "evaluate_candidates", "select_strike_by_target_delta"]
+__all__ = [
+    "CandidateEvaluation",
+    "MIN_PLAUSIBLE_IV",
+    "MAX_PLAUSIBLE_IV",
+    "evaluate_candidates",
+    "select_strike_by_target_delta",
+]

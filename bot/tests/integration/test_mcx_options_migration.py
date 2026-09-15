@@ -118,3 +118,242 @@ def test_mcx_options_tables_created_with_expected_defaults(migrated_engine):
         assert position.status == "open"
         assert float(position.futures_qty) == 0
         assert float(position.realized_pnl) == 0
+
+
+# ---------------------------------------------------------------------------
+# Migrations 0023/0024/0025/0026 had NO integration coverage at all before the
+# independent review of 2026-09-15 -- this module only ever asserted
+# `mcx_options_configs`/`_positions` server defaults from 0022, and never
+# touched `mcx_options_legs` or `mcx_options_selections`. Everything below
+# runs against real Postgres, where the JSONB variant, the partial unique
+# indexes and the CHECK constraints actually mean something (the model tests
+# all run on SQLite).
+# ---------------------------------------------------------------------------
+
+
+def _config_row(session, symbol: str = "GOLDM"):
+    from growmore_bot.persistence.models import MCXOptionsConfig, Strategy
+
+    strategy = Strategy(id=uuid.uuid4(), name=f"mcx_{uuid.uuid4().hex[:8]}", version="1.0", params={})
+    session.add(strategy)
+    session.flush()
+    cfg = MCXOptionsConfig(id=uuid.uuid4(), strategy_id=strategy.id, symbol=symbol, lots=1)
+    session.add(cfg)
+    session.flush()
+    return cfg
+
+
+def _position_row(session, cfg, *, flush: bool = True, **overrides):
+    from growmore_bot.persistence.models import MCXOptionsPosition
+
+    fields = dict(
+        id=uuid.uuid4(), config_id=cfg.id, state="flat",
+        opened_at=datetime.now(timezone.utc),
+    )
+    fields.update(overrides)
+    position = MCXOptionsPosition(**fields)
+    session.add(position)
+    if flush:
+        session.flush()
+    return position
+
+
+def test_roll_leg_can_have_null_strike_and_premium(migrated_engine):
+    """Migration 0023 relaxed `strike`/`premium` to nullable, and 0026's
+    CHECK now ties that nullability to the one case it exists for.
+    """
+    from datetime import date
+
+    from growmore_bot.persistence.models import MCXOptionsLeg
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        position = _position_row(session, cfg, state="long_futures", basis=6000.0, futures_qty=100)
+        leg = MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=date(2026, 10, 28),
+            opt_type="ROLL", strike=None, premium=None, lots=1, action="roll",
+            opened_at=datetime.now(timezone.utc), settled_at=datetime.now(timezone.utc),
+            pnl=-450.0,
+        )
+        session.add(leg)
+        session.commit()
+        session.refresh(leg)
+
+        assert leg.strike is None and leg.premium is None
+
+        # Clean up before leaving: 0023's own `downgrade()` restores
+        # `premium` to NOT NULL, which the module fixture's
+        # `command.downgrade(..., "base")` teardown would trip over if this
+        # row (legitimately null-premium under 0023+) were left behind.
+        session.delete(leg)
+        session.commit()
+
+
+def test_option_leg_may_not_have_a_null_strike(migrated_engine):
+    """0026's `ck_mcx_options_legs_roll_has_no_strike`: before it, a PE/CE leg
+    with a null strike was schema-legal and only a `python -O`-strippable
+    `assert` stood in the way.
+    """
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from growmore_bot.persistence.models import MCXOptionsLeg
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        position = _position_row(session, cfg)
+        session.add(
+            MCXOptionsLeg(
+                id=uuid.uuid4(), position_id=position.id, cycle_expiry=date(2026, 9, 24),
+                opt_type="PE", strike=None, premium=50.0, lots=1, action="sell_put",
+                opened_at=datetime.now(timezone.utc),
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_selection_snapshot_columns_exist_and_candidates_round_trip_as_jsonb(migrated_engine):
+    """Migrations 0024 (snapshot columns + `candidates_considered` JSONB) and
+    0025 (`option_expiry`) -- neither had any integration coverage.
+    """
+    from datetime import date
+
+    from growmore_bot.persistence.models import MCXOptionsSelection
+
+    candidates = [{"strike": 6000.0, "delta": -0.3, "oi": 5000.0, "ltp": 42.5}]
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        selection = MCXOptionsSelection(
+            id=uuid.uuid4(), config_id=cfg.id, cycle_date=date(2026, 9, 14),
+            regime="consolidating", target_delta=0.30, selected_strike=6000.0,
+            reason="entered", futures_price=6050.0, position_state="flat",
+            position_basis=None, position_unrealized_pnl=0,
+            candidates_considered=candidates, option_expiry=date(2026, 9, 24),
+        )
+        session.add(selection)
+        session.commit()
+        session.refresh(selection)
+
+        assert selection.candidates_considered == candidates
+        assert selection.option_expiry == date(2026, 9, 24)
+        assert float(selection.position_unrealized_pnl) == 0.0
+        session.rollback()
+
+
+def test_one_selection_row_per_config_and_cycle_date(migrated_engine):
+    """0026's `uq_mcx_options_selections_config_cycle`. Three production
+    cycles were hand-run on 2026-09-14 and each appended its own row for that
+    same date -- one cycle_date is one decision.
+    """
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from growmore_bot.persistence.models import MCXOptionsSelection
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        for reason in ("first run", "second run"):
+            session.add(
+                MCXOptionsSelection(
+                    id=uuid.uuid4(), config_id=cfg.id, cycle_date=date(2026, 9, 14),
+                    reason=reason,
+                )
+            )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_only_one_open_position_per_config(migrated_engine):
+    """0026's partial unique index. A second open position would be orphaned
+    forever -- `run_cycle` only ever acts on one.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        _position_row(session, cfg, status="open", flush=False)
+        _position_row(session, cfg, status="open", flush=False)
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+    # ...but any number of CLOSED positions alongside one open one is normal:
+    # a put expiring OTM closes its position and the next cycle opens a new one.
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        _position_row(session, cfg, status="closed", flush=False)
+        _position_row(session, cfg, status="closed", flush=False)
+        _position_row(session, cfg, status="open", flush=False)
+        session.commit()
+
+
+def test_only_one_unsettled_leg_per_position(migrated_engine):
+    """0026's other partial unique index -- the state that used to raise a
+    bare MultipleResultsFound and silently wedge that commodity every day.
+    """
+    from datetime import date
+
+    from sqlalchemy.exc import IntegrityError
+
+    from growmore_bot.persistence.models import MCXOptionsLeg
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        position = _position_row(session, cfg)
+        for strike in (5900.0, 5800.0):
+            session.add(
+                MCXOptionsLeg(
+                    id=uuid.uuid4(), position_id=position.id, cycle_expiry=date(2026, 9, 24),
+                    opt_type="PE", strike=strike, premium=50.0, lots=1, action="sell_put",
+                    opened_at=datetime.now(timezone.utc),
+                )
+            )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_mode_is_constrained_to_paper_or_live(migrated_engine):
+    """0026's `ck_mcx_options_configs_mode`. `mode` is the live-trading gate
+    and was previously unconstrained free text.
+    """
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import IntegrityError
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        session.commit()
+        with pytest.raises(IntegrityError):
+            session.execute(
+                sa_text("UPDATE mcx_options_configs SET mode = 'LIVE!' WHERE id = :id"),
+                {"id": cfg.id},
+            )
+            session.commit()
+        session.rollback()
+
+
+def test_the_hot_query_indexes_exist(migrated_engine):
+    """0026's indexes cover exactly the predicates the engine and the
+    /mcx-options dashboard query on -- before them every one was a seq scan
+    plus a sort, re-run on every 60s dashboard refresh.
+    """
+    from sqlalchemy import text as sa_text
+
+    with migrated_engine.connect() as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                sa_text(
+                    "SELECT indexname FROM pg_indexes WHERE tablename LIKE 'mcx_options_%'"
+                )
+            )
+        }
+
+    assert "ix_mcx_options_selections_config_cycle" in names
+    assert "ix_mcx_options_positions_config_opened" in names
+    assert "ix_mcx_options_legs_position" in names
