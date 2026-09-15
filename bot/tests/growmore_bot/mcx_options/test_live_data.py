@@ -14,10 +14,18 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from growmore_bot.broker.dhan_client import Bar, OptionChainRow, OptionChainSnapshot
+from growmore_bot.broker.dhan_client import Bar, OptionChainRow, OptionChainSnapshot, Quote
 from growmore_bot.mcx_options.live_data import fetch_cycle_data
 
 TODAY = date(2026, 9, 14)
+
+#: Mirrors the real confirmed 2026-09-15 production numbers: the historical
+#: daily-bar endpoint's last available close (stale, several days behind)
+#: versus a genuinely live quote's `ltp` (231946.0 vs 234477.0 in the real
+#: incident) -- deliberately different so a test asserting `futures_price`
+#: comes from the quote (not the bar) can't pass by accident.
+STALE_BAR_CLOSE = 234477.0
+LIVE_QUOTE_LTP = 231946.0
 
 
 @dataclass
@@ -29,14 +37,20 @@ class _Instrument:
     contract_expiry: date | None = None
 
 
+def _quote(ltp: float = LIVE_QUOTE_LTP, close: float = STALE_BAR_CLOSE) -> Quote:
+    return Quote(ltp=ltp, open=close, high=close, low=close, close=close)
+
+
 class _FakeDhanClient:
-    def __init__(self, bars, expiries, chain):
+    def __init__(self, bars, expiries, chain, quote=None):
         self._bars = bars
         self._expiries = expiries
         self._chain = chain
+        self._quote = quote if quote is not None else _quote()
         self.historical_calls = []
         self.expiry_calls = []
         self.chain_calls = []
+        self.quote_calls = []
 
     def get_historical_ohlc(self, instrument, from_date, to_date, interval="day"):
         self.historical_calls.append((instrument, from_date, to_date, interval))
@@ -49,6 +63,10 @@ class _FakeDhanClient:
     def get_option_chain(self, instrument, expiry):
         self.chain_calls.append((instrument, expiry))
         return self._chain
+
+    def get_quote(self, instrument):
+        self.quote_calls.append(instrument)
+        return self._quote
 
 
 def _bar(d: date, close: float) -> Bar:
@@ -82,12 +100,56 @@ def test_fetches_futures_history_option_chain_and_computes_T_years():
     result = fetch_cycle_data(client, instrument, today=TODAY)
 
     assert result.futures_bars == tuple(bars)
-    assert result.futures_price == bars[-1].close
+    # futures_price must come from the live quote, not the (potentially
+    # stale-by-days) last historical bar -- see the dedicated tests below
+    # for the confirmed-real-incident regression coverage.
+    assert result.futures_price == LIVE_QUOTE_LTP
     assert result.option_chain is chain
     assert result.option_expiry == expiry
     assert result.T_years == pytest.approx(10 / 365.25)
     assert result.lot_size == 100
     assert client.chain_calls == [(instrument, expiry.isoformat())]
+    assert client.quote_calls == [instrument]
+
+
+def test_futures_price_comes_from_the_live_quote_not_the_stale_historical_bar():
+    """Regression test for the confirmed 2026-09-15 production incident:
+    Dhan's historical daily-bar endpoint lagged real-time by multiple days
+    (querying `to_date=today` did not include the last 1-2 sessions), so
+    `bars[-1].close` was several days stale at decision time -- including
+    at `_settle_leg`'s ITM/OTM determination, which could produce a WRONG
+    assignment/expiry decision for a real (paper) position. `futures_price`
+    must instead come from `dhan_client.get_quote(instrument).ltp`, a
+    genuinely real-time number, independent of how stale the historical
+    bars are.
+    """
+    bars = _some_bars(start_close=STALE_BAR_CLOSE - 89)  # last bar close == STALE_BAR_CLOSE
+    assert bars[-1].close == STALE_BAR_CLOSE
+    expiry = TODAY + timedelta(days=10)
+    client = _FakeDhanClient(
+        bars, [expiry.isoformat()], _some_chain(), quote=_quote(ltp=LIVE_QUOTE_LTP, close=STALE_BAR_CLOSE)
+    )
+
+    result = fetch_cycle_data(client, _Instrument(), today=TODAY)
+
+    assert result.futures_price == LIVE_QUOTE_LTP
+    assert result.futures_price != bars[-1].close
+    # The historical bars are still fetched and carried through unchanged --
+    # they remain the regime classifier's trailing window (see
+    # live_data.py's module/MCXCycleData docstrings for why that staleness
+    # is comparatively tolerable, unlike using a stale price for settlement).
+    assert result.futures_bars == tuple(bars)
+
+
+def test_quote_is_fetched_for_the_same_instrument_passed_in():
+    bars = _some_bars()
+    expiry = TODAY + timedelta(days=10)
+    instrument = _Instrument()
+    client = _FakeDhanClient(bars, [expiry.isoformat()], _some_chain())
+
+    fetch_cycle_data(client, instrument, today=TODAY)
+
+    assert client.quote_calls == [instrument]
 
 
 def test_carries_the_instrument_contract_expiry_for_rollover_detection():
