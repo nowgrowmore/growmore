@@ -15,6 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from growmore_bot.broker.dhan_client import Bar, OptionChainRow, OptionChainSnapshot, Quote
+from growmore_bot.mcx_options import live_data as live_data_module
 from growmore_bot.mcx_options.live_data import fetch_cycle_data
 
 TODAY = date(2026, 9, 14)
@@ -26,6 +27,15 @@ TODAY = date(2026, 9, 14)
 #: comes from the quote (not the bar) can't pass by accident.
 STALE_BAR_CLOSE = 234477.0
 LIVE_QUOTE_LTP = 231946.0
+
+
+@pytest.fixture(autouse=True)
+def _no_inter_chain_sleep(monkeypatch):
+    """Fetching several chains spaces the calls out for Dhan's burst limit.
+    That delay is real and wanted in production; paying it in unit tests just
+    makes the suite slow, so it is zeroed here rather than stubbed per test.
+    """
+    monkeypatch.setattr(live_data_module, "INTER_CHAIN_DELAY_SECONDS", 0)
 
 
 @dataclass
@@ -108,7 +118,11 @@ def test_fetches_futures_history_option_chain_and_computes_T_years():
     assert result.option_expiry == expiry
     assert result.T_years == pytest.approx(10 / 365.25)
     assert result.lot_size == 100
-    assert client.chain_calls == [(instrument, expiry.isoformat())]
+    # Two chains by default (live_data.DEFAULT_EXPIRY_COUNT): the weekly put
+    # ladder can straddle two expiry months, so it needs both boards. The
+    # NEAREST is still the primary `option_chain`/`option_expiry`.
+    assert client.chain_calls[0] == (instrument, expiry.isoformat())
+    assert len(client.chain_calls) == 2
     assert client.quote_calls == [instrument]
 
 
@@ -332,3 +346,99 @@ def test_the_dte_window_can_never_undercut_the_hard_correctness_floor():
     cycle = fetch_cycle_data(client, _Instrument(), today, min_dte_days=0)
 
     assert cycle.option_expiry == today + timedelta(days=10)
+
+
+# ---------------------------------------------------------------------------
+# Multi-expiry cycle data + the "roll to next month inside N days" entry rule
+# (MCXOptionsConfig.entry_min_dte_days). The weekly ladder can straddle two
+# expiries, so one chain is no longer enough.
+# ---------------------------------------------------------------------------
+
+
+def test_fetches_a_chain_for_each_targeted_expiry():
+    today = date(2026, 9, 14)
+    near, far = today + timedelta(days=11), today + timedelta(days=42)
+    client = _FakeDhanClient(
+        bars=_some_bars(),
+        expiries=[near.isoformat(), far.isoformat()],
+        chain=_some_chain(),
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, expiry_count=2)
+
+    assert sorted(cycle.chains_by_expiry) == [near, far]
+    assert len(client.chain_calls) == 2
+    # The nearest tradeable expiry stays the primary one, so every existing
+    # caller of `option_expiry`/`option_chain` is unaffected.
+    assert cycle.option_expiry == near
+    assert cycle.option_chain is cycle.chains_by_expiry[near]
+
+
+def test_entry_min_dte_skips_a_near_expiry_and_targets_the_next_month():
+    """The "if it's within ~10 days of the monthly expiry, sell next month's
+    instead" rule. Note the near expiry is still TRADEABLE (it clears
+    MIN_OPTION_DTE_DAYS) -- it is simply not one we want to OPEN into.
+    """
+    today = date(2026, 9, 18)
+    near = today + timedelta(days=6)   # inside the 10-day entry window
+    far = today + timedelta(days=37)
+    client = _FakeDhanClient(
+        bars=_some_bars(), expiries=[near.isoformat(), far.isoformat()], chain=_some_chain()
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, entry_min_dte_days=10)
+
+    assert cycle.entry_expiries == [far]
+    assert near not in cycle.entry_expiries
+
+
+def test_entry_expiries_defaults_to_every_fetched_expiry_when_the_rule_is_off():
+    today = date(2026, 9, 14)
+    near, far = today + timedelta(days=11), today + timedelta(days=42)
+    client = _FakeDhanClient(
+        bars=_some_bars(), expiries=[near.isoformat(), far.isoformat()], chain=_some_chain()
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, expiry_count=2)
+
+    assert cycle.entry_expiries == [near, far]
+
+
+def test_falls_back_to_the_nearest_tradeable_expiry_when_none_clears_the_entry_window():
+    """Settlement and covered calls must keep working even when nothing is far
+    enough out to OPEN a fresh put into -- `fetch_cycle_data` must not raise
+    just because the entry preference is unsatisfiable.
+    """
+    today = date(2026, 9, 18)
+    near = today + timedelta(days=4)
+    client = _FakeDhanClient(
+        bars=_some_bars(), expiries=[near.isoformat()], chain=_some_chain()
+    )
+
+    cycle = fetch_cycle_data(client, _Instrument(), today, entry_min_dte_days=10)
+
+    assert cycle.option_expiry == near   # still usable for settlement
+    assert cycle.entry_expiries == []    # but nothing to open into
+
+
+def test_spaces_out_the_per_expiry_chain_calls(monkeypatch):
+    """Dhan's confirmed burst limit (the 2026-09-15 incident) already forces a
+    pause between commodities; fetching several chains for ONE commodity adds
+    calls in exactly the same window.
+    """
+    today = date(2026, 9, 14)
+    near, far = today + timedelta(days=11), today + timedelta(days=42)
+    client = _FakeDhanClient(
+        bars=_some_bars(), expiries=[near.isoformat(), far.isoformat()], chain=_some_chain()
+    )
+    # Undo the suite-wide zeroing so the real spacing is what's asserted.
+    monkeypatch.setattr(live_data_module, "INTER_CHAIN_DELAY_SECONDS", 1.5)
+    sleeps: list[float] = []
+
+    cycle = fetch_cycle_data(
+        client, _Instrument(), today, expiry_count=2, sleep=sleeps.append
+    )
+
+    assert len(cycle.chains_by_expiry) == 2
+    assert len(sleeps) == 1  # no pause before the first chain
+    assert sleeps[0] == 1.5

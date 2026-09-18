@@ -134,6 +134,44 @@ def is_mcx_trading_day(now: datetime) -> bool:
     return now_ist.date() not in MCX_HOLIDAYS_2026
 
 
+def _as_ist_date(when: date | datetime) -> date:
+    """`when` as an IST calendar date. A plain `date` is taken at face value;
+    a `datetime` is converted (a naive one is assumed to already be IST, the
+    same assumption `is_mcx_trading_day` makes).
+    """
+    if isinstance(when, datetime):
+        if when.tzinfo is not None:
+            return when.astimezone(MCX_TIMEZONE).date()
+        return MCX_TIMEZONE.localize(when).date()
+    return when
+
+
+def is_first_mcx_trading_day_of_week(when: date | datetime) -> bool:
+    """True iff `when` is the FIRST MCX trading day of its Monday-started
+    week -- the day the MCX options strategy runs its weekly round of new
+    put entries.
+
+    Deliberately not a plain `weekday() == 0` check: when a Monday is a full
+    MCX closure (2026-01-26, Republic Day, is one), that week's first
+    tradeable day is the Tuesday, and a naive Monday test would skip the
+    week's entry round entirely. Reuses `is_mcx_trading_day`, so it inherits
+    the same real holiday list -- and the same documented gaps: partial
+    session holidays are absent, and the list is 2026-only (see this module's
+    docstring).
+
+    A weekend day is never the first trading day of its week, since it is not
+    a trading day at all.
+    """
+    today = _as_ist_date(when)
+    if not is_mcx_trading_day(datetime.combine(today, time(12, 0))):
+        return False
+    monday = today - timedelta(days=today.weekday())
+    earlier = (monday + timedelta(days=offset) for offset in range(today.weekday()))
+    return not any(
+        is_mcx_trading_day(datetime.combine(d, time(12, 0))) for d in earlier
+    )
+
+
 __all__ = [
     "is_market_open",
     "is_near_session_close",
@@ -144,4 +182,5 @@ __all__ = [
     "MCX_CLOSE_TIME_SUMMER",
     "MCX_CLOSE_TIME_WINTER",
     "MCX_HOLIDAYS_2026",
+    "is_first_mcx_trading_day_of_week",
 ]

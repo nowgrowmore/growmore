@@ -523,11 +523,11 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
             run_wheel_basket_configs(session, dhan_client, today=now.date())
 
     def _mcx_options_job() -> None:
-        # Separate from _job's 5-minute MCX tick loop, same shape as
-        # _wheel_basket_job above: the options-selling strategy's cycle is
-        # decided once a day (at/after that day's settlement), not
-        # intraday -- see growmore_bot.mcx_options.mcx_options_engine's
-        # module docstring.
+        # The EVENING half of the MCX options cycle: settle whatever the day's
+        # close decided, mark the book to market, apply the stop-loss. It
+        # opens nothing -- see _mcx_options_entry_job below for that half, and
+        # mcx_options_engine's module docstring for why the two need different
+        # prices and therefore different times.
         #
         # Cron time 23:59 IST: MCX's non-agri close is itself SEASONAL --
         # 23:30 IST while the US observes DST, 23:55 IST otherwise (see
@@ -551,15 +551,56 @@ def start(poll_interval_seconds: Optional[int] = None) -> None:
         )
         dhan_client.refresh_access_token_if_needed()
         with session_scope() as session:
-            run_mcx_options_configs(session, dhan_client, today=now.date())
+            run_mcx_options_configs(
+                session, dhan_client, today=now.date(), phase="settle"
+            )
+
+    def _mcx_options_entry_job() -> None:
+        # The MORNING half of the MCX options cycle, split out from
+        # _mcx_options_job above. Everything this does is order-shaped --
+        # rolling a futures contract, writing a covered call against an
+        # assigned position, selling this week's new puts -- and an order can
+        # only be placed while the exchange is open.
+        #
+        # 09:15 IST: MCX opens at 09:00 (market_hours.MCX_OPEN_TIME), and the
+        # first minutes of the session are the least representative quotes of
+        # the day. A quarter of an hour in, the option chain and the futures
+        # quote this decision rests on are real prices rather than opening
+        # noise, and there is still a whole session left to act in.
+        #
+        # This also closes a gap docs/technical-debt.md recorded against any
+        # future LIVE phase: a decision made at 23:59 could only ever have
+        # been placed at the next morning's open, leaving the underlying free
+        # to move overnight between the decision and the fill. Settlement
+        # stays in the evening job, where the day's real settlement price is
+        # what decides ITM/OTM.
+        from growmore_bot.mcx_options.scheduler_job import run_mcx_options_configs
+
+        now = datetime.now(MCX_TIMEZONE)
+        if not is_mcx_trading_day(now):
+            return
+
+        settings = Settings()
+        dhan_client = DhanClient(
+            client_id=settings.dhan_client_id, access_token=settings.dhan_access_token
+        )
+        dhan_client.refresh_access_token_if_needed()
+        with session_scope() as session:
+            run_mcx_options_configs(
+                session, dhan_client, today=now.date(), phase="entry"
+            )
 
     scheduler = BlockingScheduler(timezone=MCX_TIMEZONE)
     scheduler.add_job(_job, "interval", seconds=interval, next_run_time=datetime.now(MCX_TIMEZONE))
     # After NSE equity close (~15:30 IST) so the day's closing/settlement
     # quality prices are available for expiry-day assignment decisions.
     scheduler.add_job(_wheel_basket_job, CronTrigger(hour=15, minute=45, timezone=MCX_TIMEZONE))
-    # After MCX's own (seasonal) session close -- see _mcx_options_job's own
-    # comment for why 23:59 clears both the 23:30 and 23:55 close times.
+    # The MCX options strategy runs in two halves on different prices -- see
+    # each job's own comment. Morning (09:15) opens; evening (23:59, after
+    # MCX's seasonal close) settles.
+    scheduler.add_job(
+        _mcx_options_entry_job, CronTrigger(hour=9, minute=15, timezone=MCX_TIMEZONE)
+    )
     scheduler.add_job(_mcx_options_job, CronTrigger(hour=23, minute=59, timezone=MCX_TIMEZONE))
     logger.info("Starting scheduler, polling every %s seconds", interval)
     scheduler.start()

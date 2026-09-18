@@ -25,6 +25,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     Text,
     UniqueConstraint,
     Uuid,
@@ -757,6 +758,61 @@ class MCXOptionsConfig(Base):
     # Per-commodity replacement for mcx_options_engine.DEFAULT_SIGMA (0.20),
     # used when a strike's own quoted IV is missing or implausible.
     fallback_sigma: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    # ---- Weekly put ladder (migration 0028) ------------------------------
+    # How many NEW puts to attempt each week, on the first MCX trading day of
+    # that week, ON TOP of whatever is already open -- retried every trading
+    # morning until met. Counted by `MCXOptionsPosition.entry_week_start`, so
+    # a put sold Monday and assigned Wednesday still counts as that week's.
+    weekly_new_puts_target: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2", default=2
+    )
+    # Target the nearest expiry at least this many days out, else the next
+    # one -- the "if it's within ~10 days of the monthly expiry, sell the next
+    # month instead" rule. Distinct from live_data.MIN_OPTION_DTE_DAYS, which
+    # is a hard correctness floor rather than a preference.
+    entry_min_dte_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="10", default=10
+    )
+    # ---- Accumulation brakes ---------------------------------------------
+    # "2 new per week on top of whatever is open" compounds: monthly expiries
+    # are ~4 weeks apart, so a full month builds 6-8 concurrent short puts per
+    # instrument, MOST EXPIRING ON THE SAME DATE. These three bound that tail.
+    # Their defaults are permissive enough not to alter the intended
+    # behaviour -- they exist so it cannot run away. See
+    # docs/pending-actions.md for the exposure arithmetic.
+    max_concurrent_positions: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default="8"
+    )
+    #: The brake that actually addresses simultaneous assignment: a cap on how
+    #: many open positions may share one option expiry date.
+    max_positions_per_expiry: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default="4"
+    )
+    #: A new put's strike must differ from every already-open put's strike by
+    #: at least this fraction of the futures price -- otherwise the "ladder"
+    #: collapses onto one strike and diversifies nothing.
+    min_strike_separation_pct: Mapped[float | None] = mapped_column(
+        Numeric, nullable=True, server_default="0.01"
+    )
+    # ---- Candidate quality filters (all default-OFF) ---------------------
+    #: Delta for the SECOND put of a weekly pair, so the two are a genuine
+    #: ladder (e.g. 0.30 near + 0.18 far) rather than near-identical. NULL
+    #: means both use the regime's own target delta.
+    secondary_target_delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    #: Minimum (F - breakeven) / F, where breakeven = strike - premium: how
+    #: far the market must fall before the trade loses money. A more honest
+    #: risk read than delta alone.
+    min_breakeven_cushion_pct: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    #: Variance risk premium floor -- require the strike's implied vol to
+    #: exceed the underlying's realised vol by at least this much. Selling
+    #: when implied exceeds realised is the actual edge in put selling.
+    min_iv_minus_realised_vol: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    #: Traded-volume floor alongside `min_open_interest` -- mirrors
+    #: growmore_bot/options/strike_selection.py's MIN_STRIKE_VOLUME ("a strike
+    #: must have actually printed to be sellable").
+    min_volume: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", default=0
+    )
     # Flat margin-multiple placeholder -- reporting only, never gates a
     # trade (see EngineConfig.margin_multiple_of_premium).
     margin_multiple_of_premium: Mapped[float] = mapped_column(
@@ -799,13 +855,11 @@ class MCXOptionsPosition(Base):
     # market) because `run_cycle` only ever acts on one.
     __table_args__ = (
         Index("ix_mcx_options_positions_config_opened", "config_id", "opened_at"),
-        Index(
-            "uq_mcx_options_positions_one_open_per_config",
-            "config_id",
-            unique=True,
-            postgresql_where=text("status = 'open'"),
-            sqlite_where=text("status = 'open'"),
-        ),
+        # Migration 0028 DROPPED 0026's "one open position per config" partial
+        # unique index -- a laddered book of several concurrent short puts is
+        # now the whole point. The per-position "one unsettled leg" rule below
+        # is unchanged and still enforced.
+        Index("ix_mcx_options_positions_config_week", "config_id", "entry_week_start"),
         CheckConstraint(
             "status IN ('open', 'closed')", name="ck_mcx_options_positions_status"
         ),
@@ -833,6 +887,11 @@ class MCXOptionsPosition(Base):
     # own expiry arrives before the covered-call cycle resolves.
     futures_contract_expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The IST Monday of the week whose entry round opened this position
+    # (migration 0028). Derivable from `opened_at`, but that is UTC while the
+    # week boundary is IST -- storing it keeps the weekly-target query free of
+    # timezone arithmetic. NULL on positions predating 0028.
+    entry_week_start: Mapped[date | None] = mapped_column(Date, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     realized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
     unrealized_pnl: Mapped[float] = mapped_column(Numeric, nullable=False, default=0)
@@ -932,8 +991,16 @@ class MCXOptionsSelection(Base):
     # it never stacks a second one behind it.
     __table_args__ = (
         Index("ix_mcx_options_selections_config_cycle", "config_id", "cycle_date", "created_at"),
+        # Migration 0028: a cycle date can now carry SEVERAL entry attempts
+        # (the weekly round tries for more than one put), so 0026's
+        # "one cycle_date is one decision" gave way to one row per attempt.
+        # Re-running a cycle still corrects its rows in place rather than
+        # stacking duplicates, which is what 0026 was really protecting.
         UniqueConstraint(
-            "config_id", "cycle_date", name="uq_mcx_options_selections_config_cycle"
+            "config_id",
+            "cycle_date",
+            "attempt_seq",
+            name="uq_mcx_options_selections_config_cycle_attempt",
         ),
         CheckConstraint(
             "regime IS NULL OR regime IN "
@@ -947,6 +1014,18 @@ class MCXOptionsSelection(Base):
         UUID, ForeignKey("mcx_options_configs.id"), nullable=False
     )
     cycle_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Which attempt of that cycle this row records (migration 0028). The
+    # weekly entry round makes up to `weekly_new_puts_target` attempts in one
+    # morning; 0 for a settlement/roll/stop row, which is a single event.
+    attempt_seq: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default="0", default=0
+    )
+    # The position this row produced or relates to (migration 0028). Null when
+    # the attempt opened nothing. Without it, the position_* snapshot columns
+    # below are unattributable once a config holds several positions.
+    position_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID, ForeignKey("mcx_options_positions.id"), nullable=True
+    )
     regime: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_delta: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     selected_strike: Mapped[float | None] = mapped_column(Numeric, nullable=True)

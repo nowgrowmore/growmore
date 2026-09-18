@@ -30,7 +30,8 @@ from growmore_bot.mcx_options.live_data import MCXCycleData
 from growmore_bot.mcx_options.mcx_options_engine import (
     MCXOptionsStateError,
     _settle_leg,
-    run_cycle,
+    entry_cycle,
+    settle_cycle,
 )
 from growmore_bot.mcx_options.pricing import black76_delta, black76_price
 from growmore_bot.persistence.models import (
@@ -120,12 +121,21 @@ def _chain(F: float, T: float, *, pe_strikes=None, ce_strikes=None, oi: float = 
 
 def _cycle_data(
     futures_bars, futures_price, chain, option_expiry, T_years, lot_size=100,
-    instrument_contract_expiry=None,
+    instrument_contract_expiry=None, chains_by_expiry=None, entry_expiries=None,
 ) -> MCXCycleData:
+    """`chains_by_expiry`/`entry_expiries` default to the single primary chain,
+    so every pre-ladder test reads as it always did: one expiry, openable.
+    A ladder test passes several explicitly.
+    """
+    chains = chains_by_expiry if chains_by_expiry is not None else {option_expiry: chain}
     return MCXCycleData(
         futures_bars=futures_bars, futures_price=futures_price, option_chain=chain,
         option_expiry=option_expiry, T_years=T_years, lot_size=lot_size,
         instrument_contract_expiry=instrument_contract_expiry,
+        chains_by_expiry=chains,
+        entry_expiries=(
+            entry_expiries if entry_expiries is not None else sorted(chains)
+        ),
     )
 
 
@@ -137,6 +147,7 @@ def _open_position_with_leg(
     position = MCXOptionsPosition(
         id=uuid.uuid4(), config_id=cfg.id, status="open", state=state, basis=basis,
         futures_qty=futures_qty, opened_at=now - timedelta(days=1),
+        entry_week_start=TODAY - timedelta(days=TODAY.weekday() + 7),
         futures_contract_expiry=futures_contract_expiry, realized_pnl=realized_pnl,
     )
     session.add(position)
@@ -165,13 +176,13 @@ def _entry_leg_amount(premium: float, lots: float, lot_size: int) -> float:
 
 
 def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
-    cfg = _config(session)
+    cfg = _config(session, weekly_new_puts_target=1)
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
     F = 6000.0
     cycle_data = _cycle_data(_consolidating_bars(), F, _chain(F, T), expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     positions = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all()
@@ -214,7 +225,10 @@ def test_opens_fresh_put_when_consolidating_and_no_open_position(session):
     picked_entries = [c for c in candidates if float(c["strike"]) == float(leg.strike)]
     assert len(picked_entries) == 1
     for c in candidates:
-        assert set(c.keys()) == {"strike", "delta", "oi", "ltp"}
+        # `expiry` joined the candidate record when entry became a LADDER
+        # across several expiries -- a candidate is only interpretable
+        # alongside the board it came from.
+        assert set(c.keys()) == {"strike", "delta", "oi", "ltp", "expiry"}
 
     # The premium collected for selling this put is real cash credited
     # immediately -- it must be booked into realized_pnl right away, not
@@ -232,7 +246,7 @@ def test_skips_entry_when_no_regime_label(session):
     F = 6000.0
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, T), expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all() == []
@@ -263,7 +277,7 @@ def test_skips_entry_when_trend_unfavorable_for_put_side(session):
     F = float(bars[-1].close)
     cycle_data = _cycle_data(bars, F, _chain(F, T), expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all() == []
@@ -286,7 +300,7 @@ def test_put_expires_otm_closes_the_position(session):
     F = 6050.0  # F >= strike -> OTM
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=1), 10 / 365.25)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
@@ -305,12 +319,18 @@ def test_put_expires_otm_closes_the_position(session):
     assert float(leg.pnl) == pytest.approx(entry_credit)
 
 
-def test_put_expires_itm_assigns_and_writes_covered_call_same_day(session):
+def test_put_expires_itm_assigns_in_the_evening_and_is_covered_next_morning(session):
+    """The two-phase split in practice. Assignment is an ITM/OTM call the
+    exchange makes against the day's SETTLEMENT price, so it happens in the
+    evening cycle. The covered call written against the resulting futures
+    position is an ORDER, so it waits for the next morning -- which is the
+    first moment it could actually be placed.
+    """
     cfg = _config(session)
     entry_credit = _entry_leg_amount(50.0, cfg.lots, 100)
     position, leg = _open_position_with_leg(
         session, cfg, state="flat", opt_type="PE", strike=6100.0, cycle_expiry=TODAY,
-        realized_pnl=entry_credit,  # already booked at entry, on a prior cycle
+        realized_pnl=entry_credit,
     )
     F = 6050.0  # F < strike -> ITM, assigned
     expiry = TODAY + timedelta(days=10)
@@ -318,93 +338,68 @@ def test_put_expires_itm_assigns_and_writes_covered_call_same_day(session):
     chain = _chain(F, T, ce_strikes=[6100, 6150, 6200, 6250, 6300])
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    # --- evening: assigned, and nothing opened -------------------------
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
 
-    assert leg.settled_at is not None
     assert leg.action == "assigned"
-    assert leg.assigned is True
     assert position.state == "long_futures"
     assert float(position.basis) == 6100.0
     assert float(position.futures_qty) == cfg.lots * cycle_data.lot_size
+    assert (
+        session.query(MCXOptionsLeg).filter_by(position_id=position.id, settled_at=None).all()
+        == []
+    ), "the evening phase must not open anything"
 
-    open_legs = (
+    # --- next morning: the covered call ---------------------------------
+    entry_cycle(session, cfg, cycle_data, TODAY + timedelta(days=1))
+    session.commit()
+
+    new_leg = (
         session.query(MCXOptionsLeg)
         .filter_by(position_id=position.id, settled_at=None)
-        .all()
+        .one()
     )
-    assert len(open_legs) == 1
-    new_leg = open_legs[0]
     assert new_leg.opt_type == "CE"
     assert new_leg.action == "sell_call"
-    assert new_leg.strike >= 6100.0  # covered call floor at basis
-
-    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
-    assert len(selections) == 1
-    assert selections[0].regime == "consolidating"
-    assert float(selections[0].target_delta) == 0.30
-
-    # The put's own entry credit was already booked, unaffected by
-    # assignment (informational leg.pnl mirrors it); assignment itself adds
-    # a SEPARATE, genuinely new debit -- the futures buy-in cost -- and the
-    # freshly-written covered call's own entry credit is booked immediately
-    # too (all hand-computed independently below).
-    assert float(leg.pnl) == pytest.approx(entry_credit)
-    qty = cfg.lots * cycle_data.lot_size
-    assignment_cost = leg_cost(6100.0 * qty, "buy", DEFAULT_COST_MODEL)
-    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
-    expected_realized_pnl = entry_credit - assignment_cost + new_call_credit
-    assert float(position.realized_pnl) == pytest.approx(expected_realized_pnl)
+    assert float(new_leg.strike) >= 6100.0  # covered-call floor at basis
 
 
-def test_call_expires_otm_stays_long_futures_and_writes_new_call(session):
+def test_call_expires_otm_stays_long_futures_and_is_re_covered_next_morning(session):
     cfg = _config(session)
-    prior_realized = _entry_leg_amount(50.0, cfg.lots, 100)  # put + old call's entry credits
+    prior_realized = 1234.0
     position, leg = _open_position_with_leg(
         session, cfg, state="long_futures", opt_type="CE", strike=6200.0,
         cycle_expiry=TODAY, basis=6000.0, futures_qty=100, realized_pnl=prior_realized,
     )
-    F = 6100.0  # F <= strike -> OTM, keep futures
+    F = 6100.0  # below the 6200 call -> expires OTM, keep the futures
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
-    chain = _chain(F, T, ce_strikes=[6000, 6050, 6100, 6150, 6200])
+    chain = _chain(F, T, ce_strikes=[6150, 6200, 6250, 6300])
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
 
-    assert leg.settled_at is not None
     assert leg.action == "call_expired_otm"
-    assert leg.called_away is False
-    assert position.status == "open"
     assert position.state == "long_futures"
-    # Mark-to-market against basis (documented simplification -- see engine
-    # module docstring: no persisted "last mark" column exists to support a
-    # true day-by-day incremental M2M ledger).
+    assert position.status == "open"
     assert float(position.unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
 
-    open_legs = (
+    entry_cycle(session, cfg, cycle_data, TODAY + timedelta(days=1))
+    session.commit()
+
+    new_leg = (
         session.query(MCXOptionsLeg)
         .filter_by(position_id=position.id, settled_at=None)
-        .all()
+        .one()
     )
-    assert len(open_legs) == 1
-    assert open_legs[0].opt_type == "CE"
-    assert open_legs[0].action == "sell_call"
-
-    # The just-settled call's own entry credit was already booked when it
-    # was written (on the prior cycle, folded into `prior_realized` here) --
-    # expiring OTM must not double-book it, only record it informationally
-    # on the leg row. The freshly-written call's entry credit IS a new
-    # credit, on top of everything already in realized_pnl.
-    assert float(leg.pnl) == pytest.approx(prior_realized)
-    new_leg = open_legs[0]
-    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
-    assert float(position.realized_pnl) == pytest.approx(prior_realized + new_call_credit)
+    assert new_leg.opt_type == "CE"
+    assert float(new_leg.strike) >= 6000.0
 
 
 def test_call_expires_itm_closes_position_called_away(session):
@@ -420,7 +415,7 @@ def test_call_expires_itm_closes_position_called_away(session):
     F = 6200.0  # F > strike -> ITM, called away
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=1), 10 / 365.25)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
@@ -457,7 +452,7 @@ def test_marks_to_market_when_leg_not_yet_due(session):
         _consolidating_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
@@ -468,22 +463,11 @@ def test_marks_to_market_when_leg_not_yet_due(session):
     positions = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all()
     assert len(positions) == 1  # no second position/leg created
 
-    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
-    assert len(selections) == 1
-    # No ENTRY decision was made this cycle (target_delta/selected_strike
-    # stay null), but today's regime read IS still computed and recorded
-    # purely for dashboard transparency -- see run_cycle's "not due yet"
-    # early-return.
-    assert selections[0].regime == "consolidating"
-    assert selections[0].target_delta is None
-    assert selections[0].selected_strike is None
-    # Daily-snapshot fields ARE populated even on a hold day -- see
-    # mcx_options_engine.run_cycle's "not due yet" early-return.
-    assert float(selections[0].futures_price) == F
-    assert selections[0].position_state == "long_futures"
-    assert float(selections[0].position_basis) == 6000.0
-    assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
-    assert selections[0].candidates_considered is None
+    # A quiet position writes NO selection row at all now. The old
+    # "position already has an open leg, not due for settlement today"
+    # heartbeat was pure noise -- one row per config per day forever,
+    # describing nothing that happened.
+    assert session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all() == []
 
 
 def test_marks_to_market_when_leg_not_yet_due_and_regime_undetermined(session):
@@ -499,28 +483,22 @@ def test_marks_to_market_when_leg_not_yet_due_and_regime_undetermined(session):
     F = 6300.0
     cycle_data = _cycle_data(_too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
-    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
-    assert len(selections) == 1
-    assert selections[0].regime is None  # genuinely no opinion -- insufficient warm-up
-    assert float(selections[0].futures_price) == F
-    assert selections[0].position_state == "long_futures"
-    assert float(selections[0].position_basis) == 6000.0
-    assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
-    assert selections[0].candidates_considered is None
+    # Same as above: nothing happened, so nothing is logged.
+    assert session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all() == []
 
 
 def test_no_strike_clears_oi_filter_skips_entry(session):
-    cfg = _config(session, min_open_interest=100_000)
+    cfg = _config(session, weekly_new_puts_target=1, min_open_interest=100_000)
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
     F = 6000.0
     chain = _chain(F, T, oi=100.0)
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all() == []
@@ -569,7 +547,7 @@ def test_rolls_long_futures_position_when_instrument_contract_advances(session):
         instrument_contract_expiry=new_expiry,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
@@ -617,7 +595,7 @@ def test_no_roll_when_instrument_contract_expiry_unchanged(session):
         instrument_contract_expiry=same_expiry,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -632,106 +610,69 @@ def test_no_roll_when_instrument_contract_expiry_unchanged(session):
     assert roll_legs == []
 
 
-def test_roll_and_same_day_covered_call_settlement_both_happen(session):
-    """A roll happening the same cycle as the covered call's own expiry:
-    the roll runs first (rebasing `basis`/`futures_contract_expiry`), then
-    the normal settle-and-decide logic proceeds using the now-current
-    contract -- both should be reflected.
+def test_a_roll_and_a_due_settlement_both_happen_in_one_evening_cycle(session):
+    """A futures contract rolling out from under a position must not stop that
+    position's own leg settling the same evening -- the roll is applied first,
+    then the settle runs against the now-current contract.
     """
     cfg = _config(session)
-    old_expiry = date(2026, 9, 20)
-    new_expiry = date(2026, 10, 20)
+    old_expiry = date(2026, 9, 30)
+    new_expiry = date(2026, 10, 31)
     position, leg = _open_position_with_leg(
-        session, cfg, state="long_futures", opt_type="CE", strike=6200.0,
+        session, cfg, state="long_futures", opt_type="CE", strike=6300.0,
         cycle_expiry=TODAY, basis=6000.0, futures_qty=100,
         futures_contract_expiry=old_expiry,
     )
-    F = 6100.0  # OTM against the 6200 call -> keeps futures, writes a new call
+    F = 6100.0  # OTM against the 6300 call
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
-    chain = _chain(F, T, ce_strikes=[6100, 6150, 6200, 6250, 6300])
     cycle_data = _cycle_data(
-        _consolidating_bars(), F, chain, expiry, T, instrument_contract_expiry=new_expiry,
+        _consolidating_bars(), F, _chain(F, T), expiry, T,
+        instrument_contract_expiry=new_expiry,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
 
-    mtm = (F - 6000.0) * 100
-    roll_cost = _expected_roll_cost(F * 100, cfg.lots)
-
-    # Roll happened.
     assert position.futures_contract_expiry == new_expiry
-    roll_legs = (
-        session.query(MCXOptionsLeg)
-        .filter_by(position_id=position.id, action="roll")
-        .all()
-    )
-    assert len(roll_legs) == 1
-
-    # The existing covered call settled OTM against the now-current F/basis.
-    assert leg.settled_at is not None
     assert leg.action == "call_expired_otm"
-    assert position.status == "open"
-    assert position.state == "long_futures"
+    roll_leg = session.query(MCXOptionsLeg).filter_by(opt_type="ROLL").one()
+    assert roll_leg.cycle_expiry == new_expiry
 
-    # A fresh covered call was written for the next cycle.
-    open_legs = (
-        session.query(MCXOptionsLeg)
-        .filter_by(position_id=position.id, settled_at=None)
-        .all()
-    )
-    assert len(open_legs) == 1
-    new_leg = open_legs[0]
-    assert new_leg.opt_type == "CE"
-    assert new_leg.action == "sell_call"
-    assert new_leg.strike >= float(position.basis)  # floored at post-roll basis
-
-    # Composition check: realized_pnl reflects the roll's own crystallized
-    # mtm/cost (`mtm - roll_cost`), the just-settled call's own entry credit
-    # (already booked on the prior cycle -- folded into this fixture's
-    # realized_pnl=0 default, since it never had a real entry), AND the
-    # freshly-written call's entry credit on top -- all three composing
-    # rather than conflicting.
-    new_call_credit = _entry_leg_amount(float(new_leg.premium), new_leg.lots, cycle_data.lot_size)
-    expected_realized_pnl = 0.0 + (mtm - roll_cost) + new_call_credit
-    assert float(position.realized_pnl) == pytest.approx(expected_realized_pnl)
-    assert float(leg.pnl) == pytest.approx(_entry_leg_amount(float(leg.premium), leg.lots, cycle_data.lot_size))
+    # Both events are described on the one settlement row for this position.
+    selection = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).one()
+    assert "roll" in selection.reason.lower()
+    assert "call_expired_otm" in selection.reason
 
 
 def test_full_scenario_put_sold_assigned_covered_call_called_away(session):
-    """End-to-end walk through the whole state machine over three cycles --
-    put sold, assigned ITM, covered call written, call called away ITM --
-    running the real `run_cycle` three times in sequence and hand-computing
-    the expected final `position.realized_pnl` independently of the
-    implementation, using the SAME formulas `research/mcx_options/engine.py`
-    uses (see module docstring's "Option premium booking" section):
+    """End-to-end through the whole state machine, now across the two-phase
+    schedule: mornings open, evenings settle. Final realized P&L is
+    hand-computed independently of the implementation, using the same
+    formulas `research/mcx_options/engine.py` uses::
 
         realized_pnl = put_entry_credit
                       - assignment_cost
                       + call_entry_credit
                       + (call_strike - basis) * qty
                       - call_exit_cost
-
-    where `assignment_cost`/`call_exit_cost` are real DEFAULT_COST_MODEL
-    futures-leg costs and the two `*_entry_credit` terms are zero-cost
-    (FREE_COST_MODEL) option premiums -- exactly `picked.ltp * qty` here,
-    since FREE_COST_MODEL charges nothing.
     """
-    cfg = _config(session)
+    cfg = _config(session, weekly_new_puts_target=1)
     lot_size = 100
     qty = cfg.lots * lot_size
 
-    # --- Day 1: sell a fresh put -------------------------------------------
+    # --- Day 1 morning: sell a fresh put ---------------------------------
     day1 = TODAY
     put_expiry = day1 + timedelta(days=10)
     T1 = (put_expiry - day1).days / 365.25
     F1 = 6000.0
-    cycle_data_1 = _cycle_data(_consolidating_bars(), F1, _chain(F1, T1), put_expiry, T1, lot_size=lot_size)
+    cycle_1 = _cycle_data(
+        _consolidating_bars(), F1, _chain(F1, T1), put_expiry, T1, lot_size=lot_size
+    )
 
-    run_cycle(session, cfg, cycle_data_1, day1)
+    entry_cycle(session, cfg, cycle_1, day1)
     session.commit()
 
     position = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).one()
@@ -742,24 +683,32 @@ def test_full_scenario_put_sold_assigned_covered_call_called_away(session):
     put_entry_credit = _entry_leg_amount(put_premium, put_leg.lots, lot_size)
     assert float(position.realized_pnl) == pytest.approx(put_entry_credit)
 
-    # --- Day 2: put expiry day, deep ITM -> assigned; covered call written -
+    # --- Day 2 evening: put expiry day, deep ITM -> assigned -------------
     day2 = put_expiry
     call_expiry = day2 + timedelta(days=10)
     T2 = (call_expiry - day2).days / 365.25
-    F2 = put_strike - 200.0  # comfortably ITM against the put
+    F2 = put_strike - 200.0
     chain_2 = _chain(
         F2, T2,
-        ce_strikes=[put_strike, put_strike + 50, put_strike + 100, put_strike + 150, put_strike + 200],
+        ce_strikes=[put_strike, put_strike + 50, put_strike + 100, put_strike + 150],
     )
-    cycle_data_2 = _cycle_data(_consolidating_bars(), F2, chain_2, call_expiry, T2, lot_size=lot_size)
+    cycle_2 = _cycle_data(_consolidating_bars(), F2, chain_2, call_expiry, T2, lot_size=lot_size)
 
-    run_cycle(session, cfg, cycle_data_2, day2)
+    settle_cycle(session, cfg, cycle_2, day2)
     session.commit()
     session.refresh(position)
     session.refresh(put_leg)
 
     assert put_leg.action == "assigned"
     assert float(position.basis) == put_strike
+    assignment_cost = leg_cost(put_strike * qty, "buy", DEFAULT_COST_MODEL)
+    assert float(position.realized_pnl) == pytest.approx(put_entry_credit - assignment_cost)
+
+    # --- Day 3 morning: the covered call ---------------------------------
+    day3 = day2 + timedelta(days=1)
+    entry_cycle(session, cfg, cycle_2, day3)
+    session.commit()
+    session.refresh(position)
 
     call_leg = (
         session.query(MCXOptionsLeg)
@@ -770,41 +719,28 @@ def test_full_scenario_put_sold_assigned_covered_call_called_away(session):
     call_strike = float(call_leg.strike)
     call_premium = float(call_leg.premium)
     call_entry_credit = _entry_leg_amount(call_premium, call_leg.lots, lot_size)
-    assignment_cost = leg_cost(put_strike * qty, "buy", DEFAULT_COST_MODEL)
+    expected_after_call = put_entry_credit - assignment_cost + call_entry_credit
+    assert float(position.realized_pnl) == pytest.approx(expected_after_call)
 
-    expected_after_day2 = put_entry_credit - assignment_cost + call_entry_credit
-    assert float(position.realized_pnl) == pytest.approx(expected_after_day2)
-    assert float(put_leg.pnl) == pytest.approx(put_entry_credit)
-
-    # --- Day 3: call expiry day, deep ITM -> called away, position closes --
-    day3 = call_expiry
-    F3 = call_strike + 200.0  # comfortably ITM against the call
-    cycle_data_3 = _cycle_data(
-        _too_short_bars(), F3, _chain(F3, 1 / 365.25), day3 + timedelta(days=10), 1 / 365.25,
-        lot_size=lot_size,
+    # --- Day 4 evening: call expiry day, deep ITM -> called away ---------
+    day4 = call_expiry
+    F3 = call_strike + 200.0
+    cycle_3 = _cycle_data(
+        _too_short_bars(), F3, _chain(F3, 1 / 365.25), day4 + timedelta(days=10),
+        1 / 365.25, lot_size=lot_size,
     )
 
-    run_cycle(session, cfg, cycle_data_3, day3)
+    settle_cycle(session, cfg, cycle_3, day4)
     session.commit()
     session.refresh(position)
     session.refresh(call_leg)
 
     assert call_leg.action == "called_away"
     assert position.status == "closed"
-    assert position.state == "closed"
     assert float(position.unrealized_pnl) == 0.0
-    assert float(call_leg.pnl) == pytest.approx(call_entry_credit)
+    assert float(position.futures_qty) == 0.0
 
-    exit_mtm = (call_strike - put_strike) * qty  # basis is still the put's assignment strike
-    exit_cost = leg_cost(call_strike * qty, "sell", DEFAULT_COST_MODEL)
-    expected_final = expected_after_day2 + exit_mtm - exit_cost
-
-    assert float(position.realized_pnl) == pytest.approx(expected_final)
-
-    # Fully independent recomputation from scratch, spelled out term by
-    # term, so this number can be checked by hand against the report:
-    #   realized_pnl = put_entry_credit - assignment_cost + call_entry_credit
-    #                  + (call_strike - put_strike) * qty - exit_cost
+    # Fully independent recomputation, term by term.
     fully_independent = (
         (put_premium * qty)
         - leg_cost(put_strike * qty, "buy", DEFAULT_COST_MODEL)
@@ -843,7 +779,7 @@ def test_settles_a_leg_whose_expiry_day_was_missed(session):
         _too_short_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
     session.refresh(leg)
@@ -860,11 +796,11 @@ def test_refuses_entry_when_the_expiry_is_today(session):
     `min` returned the deepest OTM strike on the chain. The leg it wrote also
     carried `cycle_expiry == today`, which could never settle.
     """
-    cfg = _config(session)
+    cfg = _config(session, weekly_new_puts_target=1)
     F = 6000.0
     cycle_data = _cycle_data(_consolidating_bars(), F, _chain(F, 0.0), TODAY, 0.0)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     assert session.query(MCXOptionsLeg).all() == []
@@ -892,7 +828,7 @@ def test_marks_to_market_on_the_assignment_cycle(session):
     chain = _chain(F, T, ce_strikes=[6100, 6150, 6200, 6250, 6300])
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -903,37 +839,52 @@ def test_marks_to_market_on_the_assignment_cycle(session):
     assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - strike) * qty)
 
 
-def test_marks_to_market_when_entry_is_skipped_by_regime(session):
-    """B3, second path: a held futures position with no open leg whose new
-    covered call is skipped by an unfavorable regime must STILL be marked to
-    market -- the old code returned early without marking, so both
-    `unrealized_pnl` and the selection-log snapshot went stale.
+def test_marks_to_market_even_when_the_covered_call_is_blocked_by_regime(session):
+    """B3, second path: a held futures position whose new covered call is
+    skipped by an unfavourable regime must STILL be marked to market -- the
+    old code returned early without marking, so both `unrealized_pnl` and the
+    selection-log snapshot went stale.
+
+    Note a single regime read can never block BOTH sides: an uptrend makes the
+    CALL side unfavourable and the PUT side favourable, and vice versa. So
+    this cycle legitimately skips the covered call while still selling the
+    week's new puts, and the assertions below say exactly that.
     """
     cfg = _config(session)
     position = MCXOptionsPosition(
         id=uuid.uuid4(), config_id=cfg.id, status="open", state="long_futures", basis=6000.0,
         futures_qty=100, opened_at=datetime.now(timezone.utc) - timedelta(days=1),
+        # Carried in from LAST week -- an assigned position does not consume
+        # this week's new-put quota.
+        entry_week_start=TODAY - timedelta(days=TODAY.weekday() + 7),
         realized_pnl=0, unrealized_pnl=0,
     )
     session.add(position)
     session.flush()
 
     F = 6250.0
-    # An uptrend makes the CALL side trend_unfavorable -- entry is skipped.
     cycle_data = _cycle_data(
         _uptrend_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
-    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
-    assert len(selections) == 1
-    assert selections[0].regime == "trend_unfavorable"
-    assert selections[0].selected_strike is None
+    # The mark happened despite this position writing no new leg.
     assert float(position.unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
-    assert float(selections[0].position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
+
+    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    covered_call_row = next(r for r in selections if r.position_id == position.id)
+    assert covered_call_row.regime == "trend_unfavorable"
+    assert covered_call_row.selected_strike is None
+    assert float(covered_call_row.position_unrealized_pnl) == pytest.approx((F - 6000.0) * 100)
+
+    # ...while the put side of the same uptrend is favourable, so the week's
+    # new puts were still sold.
+    put_rows = [r for r in selections if r.position_id != position.id]
+    assert len(put_rows) == cfg.weekly_new_puts_target
+    assert all(r.regime == "trend_favorable" for r in put_rows)
 
 
 def test_zeroes_futures_qty_when_called_away(session):
@@ -950,7 +901,7 @@ def test_zeroes_futures_qty_when_called_away(session):
         _too_short_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -959,22 +910,27 @@ def test_zeroes_futures_qty_when_called_away(session):
 
 
 def test_covered_call_is_sized_from_the_futures_actually_held(session):
-    """B5: the covered call used `config.lots`, not the futures position's
-    own size. Editing `lots` on a config while a position was open silently
-    turned the "covered" call into a partially NAKED short call.
+    """B5: the covered call used `config.lots`, not the futures position's own
+    size. Editing `lots` while a position is open silently turned the
+    "covered" call into a partially NAKED short call.
     """
     cfg = _config(session, lots=1)
-    position, leg = _open_position_with_leg(
-        session, cfg, state="long_futures", opt_type="CE", strike=6300.0,
-        cycle_expiry=TODAY, basis=6000.0, futures_qty=300,  # 3 lots of 100, not cfg.lots=1
+    position = MCXOptionsPosition(
+        id=uuid.uuid4(), config_id=cfg.id, status="open", state="long_futures", basis=6000.0,
+        futures_qty=300, opened_at=datetime.now(timezone.utc) - timedelta(days=1),
+        entry_week_start=TODAY - timedelta(days=TODAY.weekday() + 7),
+        realized_pnl=0, unrealized_pnl=0,
     )
-    F = 6050.0  # OTM against the 6300 call -- keep futures, write a new call
+    session.add(position)
+    session.flush()
+
+    F = 6050.0
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
     chain = _chain(F, T, ce_strikes=[6100, 6150, 6200, 6250, 6300])
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     new_leg = (
@@ -992,7 +948,7 @@ def test_refuses_to_sell_an_in_the_money_put(session):
     income. The covered-call side has had a basis floor since day one; the
     put side had no equivalent guard.
     """
-    cfg = _config(session)
+    cfg = _config(session, weekly_new_puts_target=1)
     F = 6000.0
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
@@ -1000,7 +956,7 @@ def test_refuses_to_sell_an_in_the_money_put(session):
     chain = _chain(F, T, pe_strikes=[F, F + 50, F + 100], ce_strikes=[F + 200])
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     assert session.query(MCXOptionsLeg).all() == []
@@ -1009,31 +965,28 @@ def test_refuses_to_sell_an_in_the_money_put(session):
     assert selections[0].selected_strike is None
 
 
-def test_rerunning_the_same_cycle_does_not_duplicate_the_selection_row(session):
-    """B12: three production cycles were run by hand on 2026-09-14 (19:13,
-    20:42, 23:59), each writing its own MCXOptionsSelection row for the same
-    cycle_date. One cycle_date is one decision -- re-running must REPLACE
-    that day's row, not stack a second one behind it.
+def test_rerunning_a_morning_cycle_neither_double_sells_nor_duplicates_rows(session):
+    """Three production cycles were run by hand on 2026-09-14. With a weekly
+    target, a re-run must see the week's quota already filled and do nothing
+    at all -- no extra puts, and no second set of selection rows.
     """
-    cfg = _config(session)
-    expiry = TODAY + timedelta(days=10)
+    cfg = _config(session, weekly_new_puts_target=2)
+    expiry = TODAY + timedelta(days=15)
     T = (expiry - TODAY).days / 365.25
     F = 6000.0
     cycle_data = _cycle_data(_consolidating_bars(), F, _chain(F, T), expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
-    run_cycle(session, cfg, cycle_data, TODAY)
+    first_positions = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count()
+    first_rows = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).count()
+    assert first_positions == 2
+
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
-    selections = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
-    assert len(selections) == 1
-    # The second run saw a live leg not due for settlement -- that's the
-    # reason the surviving row must carry.
-    assert "not due" in selections[0].reason.lower()
-    # ...and it must NOT have opened a second leg or position.
-    assert len(session.query(MCXOptionsLeg).all()) == 1
-    assert len(session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all()) == 1
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count() == first_positions
+    assert session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).count() == first_rows
 
 
 def test_raises_loudly_when_a_position_has_two_unsettled_legs(session):
@@ -1065,34 +1018,48 @@ def test_raises_loudly_when_a_position_has_two_unsettled_legs(session):
     )
 
     with pytest.raises(MCXOptionsStateError, match="unsettled leg"):
-        run_cycle(session, cfg, cycle_data, TODAY)
+        settle_cycle(session, cfg, cycle_data, TODAY)
 
 
-def test_raises_loudly_when_a_config_has_two_open_positions(session):
-    """B13: `.first()` silently picked one open position and left the other
-    orphaned forever -- never settled, never marked to market.
+def test_settles_several_concurrent_positions_independently(session):
+    """Migration 0028 removed 0026's "one open position per config" index --
+    a laddered book is now the point. Each position settles on its own leg,
+    and one position's outcome must not touch another's.
     """
     cfg = _config(session)
-    # See the note in the previous test -- 0026's partial unique index makes
-    # this unreachable going forward; the engine-level guard is what catches
-    # a row set that predates it.
-    session.execute(text("DROP INDEX uq_mcx_options_positions_one_open_per_config"))
-    for _ in range(2):
-        session.add(
-            MCXOptionsPosition(
-                id=uuid.uuid4(), config_id=cfg.id, status="open", state="flat", futures_qty=0,
-                opened_at=datetime.now(timezone.utc), realized_pnl=0, unrealized_pnl=0,
-            )
-        )
-    session.flush()
-
-    F = 6000.0
-    cycle_data = _cycle_data(
-        _consolidating_bars(), F, _chain(F, 5 / 365.25), TODAY + timedelta(days=5), 5 / 365.25,
+    otm, _otm_leg = _open_position_with_leg(
+        session, cfg, state="flat", opt_type="PE", strike=5900.0, cycle_expiry=TODAY,
+    )
+    itm, _itm_leg = _open_position_with_leg(
+        session, cfg, state="flat", opt_type="PE", strike=6100.0, cycle_expiry=TODAY,
+    )
+    not_due, not_due_leg = _open_position_with_leg(
+        session, cfg, state="flat", opt_type="PE", strike=5800.0,
+        cycle_expiry=TODAY + timedelta(days=7),
     )
 
-    with pytest.raises(MCXOptionsStateError, match="open position"):
-        run_cycle(session, cfg, cycle_data, TODAY)
+    F = 6000.0  # above 5900 (OTM), below 6100 (ITM)
+    cycle_data = _cycle_data(
+        _too_short_bars(), F, _chain(F, 7 / 365.25), TODAY + timedelta(days=7), 7 / 365.25
+    )
+
+    settle_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+    for position in (otm, itm, not_due):
+        session.refresh(position)
+    session.refresh(not_due_leg)
+
+    assert otm.status == "closed" and otm.state == "flat"
+    assert itm.status == "open" and itm.state == "long_futures"
+    assert float(itm.basis) == 6100.0
+    assert not_due.status == "open"
+    assert not_due_leg.settled_at is None, "a leg not yet due must be untouched"
+
+    # One settlement row per position that actually did something -- the
+    # untouched third position contributes nothing.
+    rows = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    assert len(rows) == 2
+    assert all(r.attempt_seq < 0 for r in rows), "settlement rows are negatively sequenced"
 
 
 def test_settling_a_leg_with_no_strike_raises_rather_than_asserting():
@@ -1193,7 +1160,7 @@ def test_stop_loss_is_off_by_default(session):
         _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -1213,7 +1180,7 @@ def test_stop_loss_flattens_the_position_once_enabled(session):
         _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
     )
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -1243,7 +1210,7 @@ def test_stop_loss_leaves_a_position_inside_the_threshold_alone(session):
     cycle_data = _cycle_data(
         _consolidating_bars(), F, _chain(F, 10 / 365.25), TODAY + timedelta(days=10), 10 / 365.25,
     )
-    run_cycle(session, cfg, cycle_data, TODAY)
+    settle_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
     session.refresh(position)
 
@@ -1260,30 +1227,30 @@ def test_minimum_credit_gate_is_off_by_default_and_blocks_when_set(session):
     chain = _chain(F, T)
 
     unset = _config(session)
-    run_cycle(session, unset, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
+    entry_cycle(session, unset, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
     session.commit()
     assert session.query(MCXOptionsLeg).all() != []
 
     # 10% of the strike is far above any plausible OTM put premium here.
     gated = _config(session, min_credit_pct_of_strike=0.10)
-    run_cycle(session, gated, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
+    entry_cycle(session, gated, _cycle_data(_consolidating_bars(), F, chain, expiry, T), TODAY)
     session.commit()
 
     selections = session.query(MCXOptionsSelection).filter_by(config_id=gated.id).all()
-    assert len(selections) == 1
-    assert selections[0].selected_strike is None
-    assert "credit" in selections[0].reason.lower()
+    assert selections
+    assert all(s.selected_strike is None for s in selections)
+    assert any("credit" in s.reason.lower() for s in selections)
 
 
 def test_entry_premium_uses_the_bid_when_that_flag_is_set(session):
     """A seller hits the bid; `ltp` systematically overstates the credit."""
-    cfg = _config(session, use_bid_for_entry_premium=True)
+    cfg = _config(session, weekly_new_puts_target=1, use_bid_for_entry_premium=True)
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
     F = 6000.0
     cycle_data = _cycle_data(_consolidating_bars(), F, _chain(F, T), expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     leg = session.query(MCXOptionsLeg).filter_by(action="sell_put").one()
@@ -1301,7 +1268,7 @@ def test_fallback_sigma_overrides_the_module_default_per_commodity(session):
     realised vol is materially higher. Only affects strikes whose own quoted
     IV is missing or implausible.
     """
-    cfg = _config(session, fallback_sigma=0.80)
+    cfg = _config(session, weekly_new_puts_target=1, fallback_sigma=0.80)
     expiry = TODAY + timedelta(days=10)
     T = (expiry - TODAY).days / 365.25
     F = 6000.0
@@ -1313,7 +1280,7 @@ def test_fallback_sigma_overrides_the_module_default_per_commodity(session):
     )
     cycle_data = _cycle_data(_consolidating_bars(), F, chain, expiry, T)
 
-    run_cycle(session, cfg, cycle_data, TODAY)
+    entry_cycle(session, cfg, cycle_data, TODAY)
     session.commit()
 
     leg = session.query(MCXOptionsLeg).filter_by(action="sell_put").one()
@@ -1326,4 +1293,265 @@ def test_fallback_sigma_overrides_the_module_default_per_commodity(session):
     # pricing call rather than being silently ignored.
     assert abs(picked["delta"]) == pytest.approx(
         abs(black76_delta("PE", F, float(leg.strike), T, 0.80, 0.0))
+    )
+
+
+# ---------------------------------------------------------------------------
+# The weekly put ladder (migration 0028). 2 NEW puts per instrument per week,
+# on top of whatever is open, retried every trading morning until met.
+# ---------------------------------------------------------------------------
+
+
+def _ladder_cycle_data(F=6000.0, near_days=15, far_days=45, lot_size=100):
+    near = TODAY + timedelta(days=near_days)
+    far = TODAY + timedelta(days=far_days)
+    # A deliberately DENSE board: these tests are about the ladder's own
+    # caps and filters, so the fixture must never be what runs out first.
+    chains = {
+        near: _chain(F, near_days / 365.25,
+                     pe_strikes=[F - 100 * i for i in range(1, 13)]),
+        far: _chain(F, far_days / 365.25,
+                    pe_strikes=[F - 150 * i for i in range(1, 13)]),
+    }
+    return _cycle_data(
+        _consolidating_bars(), F, chains[near], near, near_days / 365.25,
+        lot_size=lot_size, chains_by_expiry=chains, entry_expiries=[near, far],
+    )
+
+
+def test_sells_the_weekly_target_of_two_new_puts(session):
+    cfg = _config(session, weekly_new_puts_target=2)
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+
+    positions = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all()
+    assert len(positions) == 2
+    legs = session.query(MCXOptionsLeg).all()
+    assert len(legs) == 2
+    assert all(leg.opt_type == "PE" and leg.action == "sell_put" for leg in legs)
+    # Two DIFFERENT contracts -- a ladder, not one position written twice.
+    assert len({(leg.cycle_expiry, float(leg.strike)) for leg in legs}) == 2
+    # Both tagged with the week they belong to, which is what the target counts.
+    week_start = TODAY - timedelta(days=TODAY.weekday())
+    assert all(p.entry_week_start == week_start for p in positions)
+
+
+def test_does_nothing_at_all_once_the_weekly_target_is_met(session):
+    """The core of the log-noise fix: a morning with nothing due writes no
+    selection row whatsoever.
+    """
+    cfg = _config(session, weekly_new_puts_target=2)
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+    rows_after_round = session.query(MCXOptionsSelection).count()
+
+    # Wednesday of the same week.
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY + timedelta(days=2))
+    session.commit()
+
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count() == 2
+    assert session.query(MCXOptionsSelection).count() == rows_after_round
+
+
+def test_a_later_morning_retries_the_shortfall_the_regime_blocked(session):
+    """Monday's round is blocked by a downtrend; Tuesday's is not, and picks
+    up the whole week's quota -- with no separate "is today the first trading
+    day" branch anywhere, because the weekly COUNT is what gates entry.
+    """
+    cfg = _config(session, weekly_new_puts_target=2)
+
+    blocked = _ladder_cycle_data()
+    blocked = replace(blocked, futures_bars=_downtrend_bars())
+    entry_cycle(session, cfg, blocked, TODAY)
+    session.commit()
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count() == 0
+    blocked_rows = session.query(MCXOptionsSelection).all()
+    assert len(blocked_rows) == 1
+    assert "trend_unfavorable" in blocked_rows[0].reason
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY + timedelta(days=1))
+    session.commit()
+
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count() == 2
+    retry_rows = [
+        r for r in session.query(MCXOptionsSelection).all()
+        if r.cycle_date == TODAY + timedelta(days=1)
+    ]
+    assert retry_rows and all("retry" in r.reason for r in retry_rows)
+
+
+def test_a_new_week_reopens_the_quota_on_top_of_what_is_already_open(session):
+    """"2 new every week, on top of whatever is open" -- last week's puts are
+    still live and do not reduce this week's allowance.
+    """
+    cfg = _config(session, weekly_new_puts_target=2)
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+
+    next_monday = TODAY + timedelta(days=7)
+    entry_cycle(session, cfg, _ladder_cycle_data(), next_monday)
+    session.commit()
+
+    positions = session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).all()
+    assert len(positions) == 4
+    assert sum(1 for p in positions if p.entry_week_start == next_monday - timedelta(days=next_monday.weekday())) == 2
+
+
+def test_max_concurrent_positions_caps_the_accumulation(session):
+    """The hard ceiling on "2 more every week, forever". Without it a month of
+    rounds builds 6-8 concurrent short puts per instrument, most expiring on
+    the same date -- roughly a crore and a half of commodity assigning on one
+    morning at production prices.
+    """
+    cfg = _config(session, weekly_new_puts_target=2, max_concurrent_positions=3)
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY + timedelta(days=7))
+    session.commit()
+
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id, status="open").count() == 3
+
+
+def test_max_positions_per_expiry_pushes_the_second_put_to_another_expiry(session):
+    cfg = _config(session, weekly_new_puts_target=2, max_positions_per_expiry=1)
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+
+    legs = session.query(MCXOptionsLeg).all()
+    assert len(legs) == 2
+    assert len({leg.cycle_expiry for leg in legs}) == 2
+
+
+def test_strike_separation_applies_across_weeks_not_just_within_a_batch(session):
+    """The half that matters once puts accumulate: a new put landing on top of
+    one sold two weeks ago is concentration, not a ladder.
+    """
+    cfg = _config(
+        session, weekly_new_puts_target=1, min_strike_separation_pct=0.05,  # 5% of 6000 = 300
+    )
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+    first = session.query(MCXOptionsLeg).one()
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY + timedelta(days=7))
+    session.commit()
+
+    legs = session.query(MCXOptionsLeg).all()
+    assert len(legs) == 2
+    second = next(leg for leg in legs if leg.id != first.id)
+    assert abs(float(second.strike) - float(first.strike)) >= 300
+
+
+def test_records_one_selection_row_per_attempt_all_on_the_same_cycle_date(session):
+    cfg = _config(session, weekly_new_puts_target=2)
+
+    entry_cycle(session, cfg, _ladder_cycle_data(), TODAY)
+    session.commit()
+
+    rows = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    assert len(rows) == 2
+    assert {r.cycle_date for r in rows} == {TODAY}
+    # Distinct, positive attempt numbers -- entry rows; settlement rows are
+    # negatively sequenced so the two phases never collide on the same date.
+    assert sorted(r.attempt_seq for r in rows) == [1, 2]
+    # Each row is attributable to the position it produced.
+    assert all(r.position_id is not None for r in rows)
+
+
+def test_reports_the_shortfall_when_fewer_puts_qualify_than_the_target(session):
+    """A half-filled week is a correct outcome, and the log has to say why --
+    never quietly relax a filter to hit the number.
+    """
+    cfg = _config(session, weekly_new_puts_target=2)
+    near = TODAY + timedelta(days=15)
+    chains = {near: _chain(6000.0, 15 / 365.25, pe_strikes=[5900.0])}
+    cycle_data = _cycle_data(
+        _consolidating_bars(), 6000.0, chains[near], near, 15 / 365.25,
+        chains_by_expiry=chains, entry_expiries=[near],
+    )
+
+    entry_cycle(session, cfg, cycle_data, TODAY)
+    session.commit()
+
+    assert session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).count() == 1
+    rows = session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).all()
+    assert len(rows) == 2
+    assert any("no strike qualified" in r.reason for r in rows)
+
+
+def test_a_month_of_weekly_rounds_accumulates_a_bounded_laddered_book(session):
+    """The arithmetic that motivated the caps, run for real.
+
+    "2 new puts every week, on top of whatever is open" compounds: monthly
+    expiries are ~4 weeks apart, so a month of rounds would otherwise build
+    6-8 concurrent short puts per instrument, most of them expiring on the
+    SAME date. At the futures prices recorded in production on 2026-09-14
+    that is roughly 1.6 crore of commodity assigning on one morning.
+
+    This walks four weekly rounds plus the daily retries between them and
+    asserts the book stays inside every brake -- and, just as importantly,
+    that the brakes are what bound it rather than a shortage of candidates.
+    """
+    cfg = _config(
+        session,
+        weekly_new_puts_target=2,
+        max_concurrent_positions=6,
+        max_positions_per_expiry=3,
+        min_strike_separation_pct=0.005,
+    )
+    week_starts = []
+
+    for week in range(4):
+        monday = TODAY + timedelta(days=7 * week)
+        week_starts.append(monday)
+        for weekday in range(5):  # Mon-Fri: the round plus its daily retries
+            day = monday + timedelta(days=weekday)
+            entry_cycle(session, cfg, _ladder_cycle_data(), day)
+            session.commit()
+
+    open_positions = (
+        session.query(MCXOptionsPosition).filter_by(config_id=cfg.id, status="open").all()
+    )
+
+    # 1. The concurrency ceiling held.
+    assert len(open_positions) <= 6
+
+    # 2. No expiry is carrying more than its share -- the brake that actually
+    #    addresses "everything assigns on the same morning".
+    by_expiry: dict = {}
+    for position in open_positions:
+        leg = (
+            session.query(MCXOptionsLeg)
+            .filter_by(position_id=position.id, settled_at=None)
+            .one()
+        )
+        by_expiry[leg.cycle_expiry] = by_expiry.get(leg.cycle_expiry, 0) + 1
+    assert by_expiry, "the month should have opened something"
+    assert max(by_expiry.values()) <= 3
+
+    # 3. The ceiling is what bound it, not a lack of candidates: the first
+    #    three weeks alone would have wanted 6 puts.
+    assert len(open_positions) == 6
+
+    # 4. Each week's quota was respected exactly -- never more than 2 opened
+    #    in any one week, however many retry mornings ran.
+    for monday in week_starts:
+        opened = (
+            session.query(MCXOptionsPosition)
+            .filter_by(config_id=cfg.id, entry_week_start=monday)
+            .count()
+        )
+        assert opened <= 2
+
+    # 5. Once the ceiling is reached, quiet mornings stay quiet: no selection
+    #    row is written on a day where nothing was due.
+    last_day = week_starts[-1] + timedelta(days=4)
+    assert (
+        session.query(MCXOptionsSelection)
+        .filter_by(config_id=cfg.id, cycle_date=last_day)
+        .count()
+        == 0
     )

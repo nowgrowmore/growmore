@@ -23,9 +23,18 @@ Stdlib only -- no dependency on `research.*` or on pandas/numpy, matching
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 _MIN_VOL, _MAX_VOL = 1e-4, 5.0
+
+
+#: Trading days in an MCX year, for annualising a realised-vol estimate.
+#: 252 is the repo-wide convention (`growmore_bot/indicators.py`'s
+#: `periods_per_year` default, `research/stock_options/pricing.py`'s
+#: TRADING_DAYS). Note this is deliberately NOT the 365.25 used for an
+#: option's time-to-expiry: `T_years` measures CALENDAR decay, while vol is
+#: annualised over the days the market actually printed a return.
+MCX_TRADING_DAYS = 252
 
 
 def _norm_cdf(x: float) -> float:
@@ -95,4 +104,51 @@ def implied_vol_b76(
     return 0.5 * (low + high)
 
 
-__all__ = ["black76_price", "black76_delta", "implied_vol_b76"]
+def realised_vol(closes: Sequence[float], periods_per_year: int = MCX_TRADING_DAYS) -> float:
+    """Annualised stdev of log returns -- population stdev, matching every
+    other stdev in this project (`backtest/metrics.py`, `regime.py`'s
+    Bollinger bands).
+
+    Mirrored from `research/stock_options/pricing.py` rather than imported:
+    `growmore_bot` never imports from `research` (the one-directional
+    convention documented in `growmore_bot/wheel_basket/universe.py`), and
+    that module additionally pulls in pandas, which the live bot does not
+    carry.
+
+    Used as the baseline for the variance-risk-premium filter
+    (`MCXOptionsConfig.min_iv_minus_realised_vol`): selling options whose
+    implied vol exceeds the underlying's realised vol is the actual edge in
+    put selling, so "how volatile has this thing really been" is the number
+    an implied vol has to beat.
+
+    Returns 0.0 rather than raising when there is too little usable history to
+    say anything -- callers treat a 0.0 baseline as "no opinion", which makes
+    the VRP filter trivially satisfiable rather than silently blocking every
+    entry on a short series.
+    """
+    usable = [float(c) for c in closes if c and c > 0]
+    if len(usable) < 3:
+        return 0.0
+    rets = [math.log(b / a) for a, b in zip(usable, usable[1:])]
+    if len(rets) < 2:
+        return 0.0
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / len(rets)
+    return math.sqrt(var) * math.sqrt(periods_per_year)
+
+
+def realised_vol_from_bars(bars: Sequence[Any], periods_per_year: int = MCX_TRADING_DAYS) -> float:
+    """`realised_vol` over the `.close` of each bar -- the shape
+    `MCXCycleData.futures_bars` already provides.
+    """
+    return realised_vol([bar.close for bar in bars], periods_per_year)
+
+
+__all__ = [
+    "black76_price",
+    "black76_delta",
+    "implied_vol_b76",
+    "realised_vol",
+    "realised_vol_from_bars",
+    "MCX_TRADING_DAYS",
+]

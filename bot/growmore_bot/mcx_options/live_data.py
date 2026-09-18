@@ -57,7 +57,8 @@ into a wrong number.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
@@ -87,6 +88,19 @@ FUTURES_HISTORY_WARMUP_DAYS = 180
 #: tunable).
 MIN_OPTION_DTE_DAYS = 1
 
+#: How many upcoming expiries to fetch chains for by default. The weekly
+#: ladder can straddle two expiry months (see `MCXOptionsConfig.
+#: entry_min_dte_days` and `max_positions_per_expiry`), so one chain is no
+#: longer enough -- but every extra expiry is another `get_option_chain` call
+#: into the same Dhan burst-limit window that caused the 2026-09-15 incident,
+#: so this stays deliberately small.
+DEFAULT_EXPIRY_COUNT = 2
+
+#: Pause between the per-expiry `get_option_chain` calls for ONE commodity.
+#: Same reasoning, and the same order of magnitude, as
+#: `scheduler_job._INTER_CONFIG_DELAY_SECONDS`.
+INTER_CHAIN_DELAY_SECONDS = 1.0
+
 
 @dataclass(frozen=True)
 class MCXCycleData:
@@ -108,6 +122,9 @@ class MCXCycleData:
     #: docstring for the confirmed incident that made a historical-bar
     #: source unsafe here.
     futures_price: float
+    #: The NEAREST tradeable expiry's chain. Retained as a distinct field so
+    #: every pre-ladder caller (settlement, covered calls) is unaffected by
+    #: the move to several chains; it is always `chains_by_expiry[option_expiry]`.
     option_chain: OptionChainSnapshot
     option_expiry: date
     #: Years to `option_expiry` from `today`, floored at 0.
@@ -124,6 +141,16 @@ class MCXCycleData:
     #: nullable) -- rollover detection is then simply skipped, same as
     #: before this field existed.
     instrument_contract_expiry: date | None = None
+    #: Every fetched expiry's chain, nearest first. The weekly put ladder
+    #: picks across all of these so a pair can straddle two expiry months.
+    chains_by_expiry: dict[date, OptionChainSnapshot] = field(default_factory=dict)
+    #: The subset of `chains_by_expiry` a NEW put may be opened into --
+    #: those at least `MCXOptionsConfig.entry_min_dte_days` away. Distinct
+    #: from "tradeable at all": an expiry 4 days out is perfectly fine to
+    #: settle or to write a covered call against, it is just not one to open
+    #: a fresh month-long put into. Can legitimately be empty, which means
+    #: "nothing to open today" -- never an error.
+    entry_expiries: list[date] = field(default_factory=list)
 
 
 def _parse_expiry(raw: str) -> date:
@@ -144,6 +171,9 @@ def fetch_cycle_data(
     today: date,
     min_dte_days: int | None = None,
     max_dte_days: int | None = None,
+    entry_min_dte_days: int | None = None,
+    expiry_count: int = DEFAULT_EXPIRY_COUNT,
+    sleep: Any = time.sleep,
 ) -> MCXCycleData:
     """Fetch this cycle's futures history, live futures price, nearest
     upcoming option expiry, and that expiry's option chain for one
@@ -207,7 +237,28 @@ def fetch_cycle_data(
         )
     option_expiry = upcoming[0]
 
-    chain = dhan_client.get_option_chain(instrument, expiry=option_expiry.isoformat())
+    # One chain per targeted expiry, spaced out -- see
+    # INTER_CHAIN_DELAY_SECONDS. `expiry_count` is capped by what Dhan
+    # actually lists, so a commodity with a single upcoming expiry costs
+    # exactly one call, as before.
+    targeted = upcoming[: max(1, expiry_count)]
+    chains_by_expiry: dict[date, OptionChainSnapshot] = {}
+    for index, expiry in enumerate(targeted):
+        if index > 0:
+            sleep(INTER_CHAIN_DELAY_SECONDS)
+        chains_by_expiry[expiry] = dhan_client.get_option_chain(
+            instrument, expiry=expiry.isoformat()
+        )
+    chain = chains_by_expiry[option_expiry]
+
+    # Which of them a NEW put may be opened into. An empty list is a real,
+    # non-exceptional outcome ("nothing far enough out to sell today") --
+    # settlement and covered calls carry on regardless.
+    entry_expiries = [
+        e
+        for e in targeted
+        if entry_min_dte_days is None or (e - today).days >= entry_min_dte_days
+    ]
 
     T_years = max((option_expiry - today).days, 0) / 365.25
     lot_size = int(getattr(instrument, "lot_size", 1))
@@ -221,6 +272,8 @@ def fetch_cycle_data(
         T_years=T_years,
         lot_size=lot_size,
         instrument_contract_expiry=instrument_contract_expiry,
+        chains_by_expiry=chains_by_expiry,
+        entry_expiries=entry_expiries,
     )
 
 
@@ -228,5 +281,7 @@ __all__ = [
     "MCXCycleData",
     "FUTURES_HISTORY_WARMUP_DAYS",
     "MIN_OPTION_DTE_DAYS",
+    "DEFAULT_EXPIRY_COUNT",
+    "INTER_CHAIN_DELAY_SECONDS",
     "fetch_cycle_data",
 ]

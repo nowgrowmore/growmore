@@ -206,19 +206,22 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from growmore_bot.broker.dhan_client import OptionChainSnapshot
 from growmore_bot.costs import DEFAULT_COST_MODEL, FREE_COST_MODEL, leg_cost
 from growmore_bot.mcx_options import regime as regime_module
+from growmore_bot.mcx_options.ladder import select_put_ladder
 from growmore_bot.mcx_options.live_data import MCXCycleData
+from growmore_bot.mcx_options.pricing import realised_vol_from_bars
 from growmore_bot.mcx_options.regime import Regime
 from growmore_bot.mcx_options.strike_selection import (
     evaluate_candidates,
     select_strike_by_target_delta,
 )
 from growmore_bot.persistence.models import MCXOptionsLeg, MCXOptionsPosition, MCXOptionsSelection
+from growmore_bot.scheduler.market_hours import is_first_mcx_trading_day_of_week
 
 logger = logging.getLogger(__name__)
 
@@ -555,18 +558,31 @@ def _position_snapshot(position: Optional[MCXOptionsPosition]) -> dict:
     }
 
 
+#: Selection rows written by the EVENING settlement phase use negative
+#: `attempt_seq` values, the morning entry phase positive ones. Both phases
+#: run on the same `cycle_date`, so they need disjoint, DETERMINISTIC
+#: sequences: deterministic so re-running a phase corrects its own rows in
+#: place rather than stacking duplicates (what migration 0026's uniqueness was
+#: really protecting), and disjoint so the two phases never collide on the
+#: `(config_id, cycle_date, attempt_seq)` key. 0 is left unused.
+SETTLE_SEQ_SIGN = -1
+ENTRY_SEQ_SIGN = 1
+
+
 def _record_selection(
     session: Any,
     config: Any,
     today: date,
     cycle_data: MCXCycleData,
     *,
+    attempt_seq: int,
     reason: str,
     position: Optional[MCXOptionsPosition],
     regime: Optional[str] = None,
     target_delta: Optional[float] = None,
     selected_strike: Optional[float] = None,
     candidates_considered: Optional[list] = None,
+    option_expiry: Optional[date] = None,
 ) -> None:
     """Write EXACTLY ONE `MCXOptionsSelection` row per (config, cycle_date),
     replacing that day's row in place if the cycle is re-run.
@@ -593,14 +609,15 @@ def _record_selection(
         selected_strike=selected_strike,
         reason=reason,
         futures_price=cycle_data.futures_price,
-        option_expiry=cycle_data.option_expiry,
+        option_expiry=option_expiry if option_expiry is not None else cycle_data.option_expiry,
         candidates_considered=candidates_considered,
+        position_id=position.id if position is not None else None,
         **_position_snapshot(position),
     )
 
     existing = (
         session.query(MCXOptionsSelection)
-        .filter_by(config_id=config.id, cycle_date=today)
+        .filter_by(config_id=config.id, cycle_date=today, attempt_seq=attempt_seq)
         .all()
     )
     if existing:
@@ -610,33 +627,55 @@ def _record_selection(
         for duplicate in existing[1:]:
             logger.warning(
                 "mcx_options: collapsing a duplicate MCXOptionsSelection row for "
-                "config_id=%s cycle_date=%s (one cycle_date is one decision)",
+                "config_id=%s cycle_date=%s attempt_seq=%s",
                 config.id,
                 today,
+                attempt_seq,
             )
             session.delete(duplicate)
         return
 
     session.add(
-        MCXOptionsSelection(id=uuid.uuid4(), config_id=config.id, cycle_date=today, **fields)
-    )
-
-
-def _open_position_for(session: Any, config: Any) -> Optional[MCXOptionsPosition]:
-    """The config's single open position, or None. Raises rather than picking
-    one when there are somehow two -- see `MCXOptionsStateError`.
-    """
-    open_positions = (
-        session.query(MCXOptionsPosition).filter_by(config_id=config.id, status="open").all()
-    )
-    if len(open_positions) > 1:
-        raise MCXOptionsStateError(
-            f"config_id={config.id} (symbol={getattr(config, 'symbol', '?')!r}) has "
-            f"{len(open_positions)} open positions: {[str(p.id) for p in open_positions]}. "
-            "Exactly one is expected -- refusing to guess which one to trade, because the "
-            "other would then be orphaned (never settled, never marked to market)."
+        MCXOptionsSelection(
+            id=uuid.uuid4(),
+            config_id=config.id,
+            cycle_date=today,
+            attempt_seq=attempt_seq,
+            **fields,
         )
-    return open_positions[0] if open_positions else None
+    )
+
+
+def _open_positions_for(session: Any, config: Any) -> list[MCXOptionsPosition]:
+    """Every open position for `config`, oldest first.
+
+    Migration 0028 removed 0026's "one open position per config" partial
+    unique index: the weekly ladder deliberately holds several concurrent
+    short puts, each running its own put -> assignment -> covered-call chain.
+    This fans out the way `wheel_basket_engine.run_cycle` always has, rather
+    than raising on the second one.
+
+    The PER-POSITION invariant is unchanged and still enforced, in the
+    database and in `_open_leg_for`: one unsettled leg per position.
+    """
+    return (
+        session.query(MCXOptionsPosition)
+        .filter_by(config_id=config.id, status="open")
+        .order_by(MCXOptionsPosition.opened_at.asc())
+        .all()
+    )
+
+
+def _ist_week_start(today: date) -> date:
+    """The Monday of `today`'s week -- the key the weekly new-put target is
+    counted against (`MCXOptionsPosition.entry_week_start`).
+
+    `today` is already an IST calendar date everywhere this engine is called
+    (`scheduler.run` passes `datetime.now(MCX_TIMEZONE).date()`), which is
+    exactly why the week start is stored rather than derived from the UTC
+    `opened_at` timestamp at query time.
+    """
+    return today - timedelta(days=today.weekday())
 
 
 def _open_leg_for(session: Any, position: MCXOptionsPosition) -> Optional[MCXOptionsLeg]:
@@ -656,44 +695,84 @@ def _open_leg_for(session: Any, position: MCXOptionsPosition) -> Optional[MCXOpt
     return open_legs[0] if open_legs else None
 
 
-def run_cycle(
-    session: Any, config: Any, cycle_data: MCXCycleData, today: date,
-) -> None:
-    """Run one commodity's daily cycle: settle any leg expiring `today`,
-    then decide whether to open a new leg today, writing
-    `MCXOptionsPosition`/`MCXOptionsLeg` rows and exactly one
-    `MCXOptionsSelection` row via `session.add(...)` regardless of whether
-    an entry happened (dashboard "why didn't it enter" transparency, mirrors
-    wheel_basket_engine._record_selections).
+def _maybe_roll(
+    session: Any, config: Any, position: MCXOptionsPosition, cycle_data: MCXCycleData,
+    now: datetime,
+) -> bool:
+    """Roll a held futures position if the Instrument's own contract has moved
+    on underneath it. Idempotent -- a no-op once the two expiries agree, which
+    is why both the morning and evening phases can safely call it.
     """
-    now = datetime.now(timezone.utc)
-
-    position = _open_position_for(session, config)
-
-    # Roll a held futures position FIRST, before any settle/entry decision --
-    # see module docstring. A mismatch means the Instrument-level rollover
-    # mechanism (contract_rollover.roll_to_next_contract) has already advanced
-    # the underlying contract out from under this position.
     if (
-        position is not None
-        and position.state == "long_futures"
+        position.state == "long_futures"
         and position.futures_contract_expiry is not None
         and cycle_data.instrument_contract_expiry is not None
         and position.futures_contract_expiry != cycle_data.instrument_contract_expiry
     ):
         _roll_futures_position(session, config, position, cycle_data, now)
+        return True
+    return False
 
-    entry_needed = True
-    if position is not None:
+
+def _maybe_stop_out(
+    session: Any, config: Any, position: MCXOptionsPosition, cycle_data: MCXCycleData,
+    now: datetime,
+) -> bool:
+    """Flatten `position` if `stop_loss_premium_multiple` is set and its
+    unrealized loss has exceeded that multiple of the premium collected on it.
+    Default-OFF; see `_stop_out_position`.
+    """
+    stop_multiple = getattr(config, "stop_loss_premium_multiple", None)
+    if stop_multiple is None or position.state != "long_futures" or position.status != "open":
+        return False
+    collected = _premium_collected(session, position, cycle_data.lot_size)
+    if collected <= 0:
+        return False
+    if float(position.unrealized_pnl) > -(float(stop_multiple) * collected):
+        return False
+    booked = _stop_out_position(session, config, position, cycle_data, now)
+    logger.warning(
+        "mcx_options: STOPPED OUT position=%s config_id=%s at futures price %g -- unrealized "
+        "loss exceeded %g x the %g premium collected; booked %.2f",
+        position.id, config.id, cycle_data.futures_price, float(stop_multiple), collected, booked,
+    )
+    return True
+
+
+def settle_cycle(session: Any, config: Any, cycle_data: MCXCycleData, today: date) -> None:
+    """**Evening phase** (23:59 IST cron): resolve what the day's close
+    decided, and nothing else.
+
+    Settles every position whose leg is due, marks the book to market, and
+    applies the stop-loss. **Opens nothing** -- writing a new leg is the
+    morning phase's job (`entry_cycle`).
+
+    The split exists because the two halves need different prices. Assignment
+    is an ITM/OTM call the exchange makes against the day's SETTLEMENT price,
+    so it has to run after the close -- which is why the 23:59 trigger and its
+    seasonal-close reasoning in `scheduler/run.py` are unchanged. Opening a
+    leg, by contrast, is an order: at 23:59 it could only ever be placed at
+    the next morning's open, leaving an overnight gap between the decision and
+    the fill (a blocker `docs/technical-debt.md` recorded against any live
+    phase). Moving entry to the morning closes that gap.
+
+    A selection row is written only for positions where something actually
+    HAPPENED -- a settlement, a roll, a stop-out. A quiet position produces no
+    row at all: the old "position already has an open leg, not due for
+    settlement today" heartbeat is gone.
+    """
+    now = datetime.now(timezone.utc)
+    event_seq = 0
+
+    for position in _open_positions_for(session, config):
+        events: list[str] = []
+
+        if _maybe_roll(session, config, position, cycle_data, now):
+            events.append(
+                f"rolled the futures leg to the {cycle_data.instrument_contract_expiry} contract"
+            )
+
         open_leg = _open_leg_for(session, position)
-        # `<=`, not `==`. Exact equality meant that a single missed cycle --
-        # the VPS down or restarting at 23:59, an MCX partial-session holiday
-        # absent from MCX_HOLIDAYS_2026, or a DhanApiError that exhausted
-        # scheduler_job's retries -- left the leg unsettled FOREVER: that date
-        # never came round again, `entry_needed` stayed False on every later
-        # cycle, and the commodity silently stopped trading with nothing but a
-        # log line to show for it. Found by independent code review
-        # 2026-09-15.
         if open_leg is not None and open_leg.cycle_expiry <= today:
             if open_leg.cycle_expiry < today:
                 logger.warning(
@@ -701,131 +780,212 @@ def run_cycle(
                     "the first cycle since, running on %s. The ITM/OTM call below is made "
                     "against TODAY's futures price, not the expiry day's, so the outcome may "
                     "differ from what the exchange actually settled.",
-                    open_leg.id,
-                    open_leg.cycle_expiry,
-                    today,
+                    open_leg.id, open_leg.cycle_expiry, today,
                 )
             _settle_leg(position, open_leg, cycle_data, now)
-            entry_needed = True  # settling always leaves room for a fresh decision
-        elif open_leg is not None:
-            entry_needed = False  # a leg is live and not due yet
-        # else: an open position with no open leg at all -- fall through and
-        # let entry_needed=True try to write one (should not normally arise).
+            events.append(f"{open_leg.opt_type} {open_leg.strike:g} -> {open_leg.action}")
 
-        # Mark to market ONCE, here, for every code path below. This used to
-        # live only on the "live leg, not due" branch, which meant a
-        # long_futures position's unrealized_pnl (and the selection-log
-        # snapshot built from it) went stale on exactly the cycles that
-        # matter most: the cycle a put was ASSIGNED (the position is already
-        # underwater by (F - strike) * qty the moment it opens, and that read
-        # as 0), and any cycle where a new covered call was skipped by regime
-        # or by the strike filters. Found by independent code review
-        # 2026-09-15. `_mark_to_market` is a no-op for any non-long_futures
-        # state, so calling it unconditionally is safe on every path.
         _mark_to_market(position, cycle_data)
 
-    # Stop-loss -- DEFAULT-OFF (migration 0027). Checked after the mark above,
-    # so it reads a fresh unrealized figure, and before any entry decision, so
-    # a stopped-out position never has a new leg written against it the same
-    # cycle. `stop_loss_premium_multiple` unset means the strategy's original
-    # stop-less design applies unchanged.
-    stop_multiple = getattr(config, "stop_loss_premium_multiple", None)
-    if (
-        stop_multiple is not None
-        and position is not None
-        and position.status == "open"
-        and position.state == "long_futures"
-    ):
-        collected = _premium_collected(session, position, cycle_data.lot_size)
-        allowed_loss = float(stop_multiple) * collected
-        # `collected > 0` is a real guard, not a formality: a long_futures
-        # position always came from an assigned put, so zero premium means the
-        # leg history is incomplete -- and an allowed loss of 0 would stop out
-        # a position sitting at exactly break-even. Refusing to act on
-        # incomplete data matches this engine's "no opinion, never permissive"
-        # discipline everywhere else.
-        if collected > 0 and float(position.unrealized_pnl) <= -allowed_loss:
-            booked = _stop_out_position(session, config, position, cycle_data, now)
-            logger.warning(
-                "mcx_options: STOPPED OUT config_id=%s at futures price %g -- unrealized loss "
-                "exceeded %g x the %g premium collected; booked %.2f",
-                config.id, cycle_data.futures_price, float(stop_multiple),
-                collected, booked,
+        if _maybe_stop_out(session, config, position, cycle_data, now):
+            events.append(
+                f"stop-loss hit -- flattened the futures position at "
+                f"{cycle_data.futures_price:g}"
             )
+
+        if events:
+            event_seq += 1
             _record_selection(
                 session, config, today, cycle_data,
-                reason=(
-                    f"Stop-loss hit: unrealized loss exceeded "
-                    f"{float(stop_multiple):g}x premium collected -- flattened the futures "
-                    f"position at {cycle_data.futures_price:g}"
-                ),
+                attempt_seq=SETTLE_SEQ_SIGN * event_seq,
+                reason="; ".join(events),
                 position=position,
             )
-            return
 
-    active_position = position if (position is not None and position.status == "open") else None
 
-    if not entry_needed:
-        opt_type = (
-            "CE" if (active_position is not None and active_position.state == "long_futures") else "PE"
-        )
-        # No entry decision is made on a hold day, but today's regime read is
-        # still cheap and side-effect-free to compute -- recorded purely so
-        # the dashboard can show "today's regime read was X" for every day,
-        # not just entry days.
-        hold_regime_label = regime_module.classify_today(cycle_data.futures_bars)
-        hold_side_regime = hold_regime_label.for_option_type(opt_type) if hold_regime_label else None
-        basis = active_position.basis if active_position is not None else None
-        unrealized = active_position.unrealized_pnl if active_position is not None else None
-        reason = "position already has an open leg, not due for settlement today"
-        if basis is not None and unrealized is not None:
-            reason += f" (basis {float(basis):g}, unrealized P&L {float(unrealized):.2f})"
-        _record_selection(
-            session, config, today, cycle_data,
-            regime=hold_side_regime.value if hold_side_regime is not None else None,
-            reason=reason, position=active_position,
-        )
-        return
+def entry_cycle(session: Any, config: Any, cycle_data: MCXCycleData, today: date) -> None:
+    """**Morning phase** (09:15 IST cron): everything that is an ORDER.
 
-    opt_type = "CE" if (active_position is not None and active_position.state == "long_futures") else "PE"
+    In order: roll any futures contract that moved on overnight, mark the book
+    to market, write a covered call against any assigned position that lacks
+    one, then top up this week's new-put target.
+
+    **The weekly target.** The strategy sells `weekly_new_puts_target` (2) NEW
+    puts per week per instrument, ON TOP of whatever is already open, counted
+    by `MCXOptionsPosition.entry_week_start`. Counting by the week a position
+    was OPENED -- rather than by what is currently open -- is what makes
+    "irrespective of assigned or not" true: a put sold Monday and assigned on
+    Wednesday still counts as that week's. It also makes the retry fall out
+    for free: any morning on which the week's count is short, the shortfall is
+    attempted again, with no separate "is today the first trading day"
+    branch.
+
+    **No row when nothing was due.** If the week's target is already met and
+    no covered call is owed, this writes no selection row at all. That, plus
+    the removal of the evening heartbeat row, is the whole of the log-noise
+    fix: the selection log now contains only decisions.
+    """
+    now = datetime.now(timezone.utc)
+    attempt_seq = 0
+
+    positions = _open_positions_for(session, config)
+    for position in positions:
+        _maybe_roll(session, config, position, cycle_data, now)
+        _mark_to_market(position, cycle_data)
 
     regime_label = regime_module.classify_today(cycle_data.futures_bars)
 
-    # No tradeable expiry => no meaningful strike pick. `live_data
-    # .fetch_cycle_data` already refuses to return an expiry dated today (see
-    # its MIN_OPTION_DTE_DAYS), so this is a defence-in-depth guard for any
-    # other caller that hand-builds an MCXCycleData: at T=0 every Black-76
-    # delta is its 0/+-1 boundary, the whole chain ties on |delta - target|,
-    # and the pick degenerates to "first strike in ascending order".
-    if cycle_data.T_years <= 0:
+    # ---- 1. covered calls against assigned positions ---------------------
+    for position in positions:
+        if position.status != "open" or position.state != "long_futures":
+            continue
+        if _open_leg_for(session, position) is not None:
+            continue
+        attempt_seq += 1
+        _write_covered_call(
+            session, config, position, cycle_data, regime_label, today, now, attempt_seq
+        )
+
+    # ---- 2. this week's new short puts -----------------------------------
+    week_start = _ist_week_start(today)
+    opened_this_week = (
+        session.query(MCXOptionsPosition)
+        .filter_by(config_id=config.id, entry_week_start=week_start)
+        .count()
+    )
+    room = int(getattr(config, "weekly_new_puts_target", 0) or 0) - opened_this_week
+    cap = getattr(config, "max_concurrent_positions", None)
+    if cap is not None:
+        still_open = [p for p in _open_positions_for(session, config)]
+        room = min(room, int(cap) - len(still_open))
+    if room <= 0:
+        return  # nothing due -- deliberately no selection row
+
+    _open_new_puts(
+        session, config, cycle_data, regime_label, today, now, week_start, room, attempt_seq
+    )
+
+
+def _write_covered_call(
+    session: Any, config: Any, position: MCXOptionsPosition, cycle_data: MCXCycleData,
+    regime_label: Any, today: date, now: datetime, attempt_seq: int,
+) -> None:
+    """Write a covered call against an assigned futures position, or record
+    why one wasn't written. Called the morning AFTER assignment, which is the
+    first moment such an order could actually be placed.
+    """
+    side_regime = regime_label.for_option_type("CE") if regime_label is not None else None
+    if side_regime is None:
         _record_selection(
-            session, config, today, cycle_data,
-            regime=(
-                regime_label.for_option_type(opt_type).value if regime_label is not None else None
-            ),
-            reason=(
-                f"Option expiry {cycle_data.option_expiry} leaves no time to expiry "
-                "(T_years=0) -- skipped entry rather than picking a strike off "
-                "boundary deltas"
-            ),
-            position=active_position,
+            session, config, today, cycle_data, attempt_seq=attempt_seq,
+            reason="No regime label for today (insufficient warm-up data) -- no covered call",
+            position=position,
         )
         return
-
-    if regime_label is None:
-        _record_selection(
-            session, config, today, cycle_data,
-            reason="No regime label for today (insufficient warm-up data) -- skipped entry",
-            position=active_position,
-        )
-        return
-
-    side_regime = regime_label.for_option_type(opt_type)
     if side_regime == Regime.TREND_UNFAVORABLE:
         _record_selection(
-            session, config, today, cycle_data, regime=side_regime.value,
-            reason=f"{side_regime.value} regime for {opt_type} -- skipped entry",
-            position=active_position,
+            session, config, today, cycle_data, attempt_seq=attempt_seq,
+            regime=side_regime.value,
+            reason=f"{side_regime.value} regime for CE -- no covered call written",
+            position=position,
+        )
+        return
+
+    target_delta = float(
+        config.consolidating_target_delta
+        if side_regime == Regime.CONSOLIDATING
+        else config.trend_favorable_target_delta
+    )
+    chain = cycle_data.option_chain
+    if position.basis is not None:
+        chain = _floor_chain_for_covered_call(chain, float(position.basis))
+
+    sigma = _effective_sigma(config)
+    max_spread = getattr(config, "max_relative_spread", None)
+    candidates = evaluate_candidates(
+        chain, opt_type="CE", futures_price=cycle_data.futures_price,
+        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
+        min_open_interest=int(config.min_open_interest),
+        max_relative_spread=None if max_spread is None else float(max_spread),
+    )
+    candidates_considered = [
+        {"strike": c.strike, "delta": c.delta, "oi": c.oi, "ltp": c.ltp} for c in candidates
+    ]
+    picked = select_strike_by_target_delta(
+        chain, opt_type="CE", futures_price=cycle_data.futures_price,
+        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
+        target_delta=target_delta, min_open_interest=int(config.min_open_interest),
+        max_relative_spread=None if max_spread is None else float(max_spread),
+    )
+    if picked is None:
+        _record_selection(
+            session, config, today, cycle_data, attempt_seq=attempt_seq,
+            regime=side_regime.value, target_delta=target_delta,
+            reason="No call strike cleared the basis/OI/executability filters",
+            candidates_considered=candidates_considered, position=position,
+        )
+        return
+
+    # A COVERED call is covered by the futures actually held, never by
+    # whatever `config.lots` happens to say today.
+    held_qty = float(position.futures_qty)
+    lots = held_qty / cycle_data.lot_size if cycle_data.lot_size else float(config.lots)
+    premium = picked.ltp
+    if getattr(config, "use_bid_for_entry_premium", False) and picked.top_bid_price:
+        premium = float(picked.top_bid_price)
+
+    position.realized_pnl = float(position.realized_pnl) + _entry_leg_amount(
+        premium, lots, cycle_data.lot_size
+    )
+    session.add(
+        MCXOptionsLeg(
+            id=uuid.uuid4(), position_id=position.id, cycle_expiry=cycle_data.option_expiry,
+            opt_type="CE", strike=picked.strike, premium=premium, lots=lots,
+            action="sell_call", opened_at=now,
+        )
+    )
+    _record_selection(
+        session, config, today, cycle_data, attempt_seq=attempt_seq,
+        regime=side_regime.value, target_delta=target_delta, selected_strike=picked.strike,
+        reason=(
+            f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
+            f"wrote a covered call at strike {picked.strike:g}"
+        ),
+        candidates_considered=candidates_considered, position=position,
+    )
+
+
+def _open_new_puts(
+    session: Any, config: Any, cycle_data: MCXCycleData, regime_label: Any, today: date,
+    now: datetime, week_start: date, room: int, attempt_seq: int,
+) -> None:
+    """Attempt `room` new short puts for this week's target, recording one
+    selection row per attempt -- filled or not.
+    """
+    # Purely a label for the selection log, so a reader can tell this week's
+    # scheduled round from a later morning picking up a shortfall the regime
+    # blocked earlier in the week. It drives no decision: the weekly COUNT
+    # above is what actually gates entry, which is why a Monday holiday needs
+    # no special handling in the logic -- only in this wording.
+    round_label = "weekly round" if is_first_mcx_trading_day_of_week(today) else "retry"
+
+    side_regime = regime_label.for_option_type("PE") if regime_label is not None else None
+    if side_regime is None:
+        _record_selection(
+            session, config, today, cycle_data, attempt_seq=attempt_seq + 1,
+            reason=(
+                f"{round_label}: no regime label for today (insufficient warm-up data) "
+                "-- skipped entry"
+            ),
+            position=None,
+        )
+        return
+    if side_regime == Regime.TREND_UNFAVORABLE:
+        _record_selection(
+            session, config, today, cycle_data, attempt_seq=attempt_seq + 1,
+            regime=side_regime.value,
+            reason=f"{round_label}: {side_regime.value} regime for PE -- skipped entry",
+            position=None,
         )
         return
 
@@ -835,127 +995,92 @@ def run_cycle(
         else config.trend_favorable_target_delta
     )
 
-    chain = cycle_data.option_chain
-    if opt_type == "CE":
-        if active_position is not None and active_position.basis is not None:
-            chain = _floor_chain_for_covered_call(chain, float(active_position.basis))
-    else:
-        # A short put must be genuinely OTM -- see _cap_chain_for_short_put.
-        chain = _cap_chain_for_short_put(chain, cycle_data.futures_price)
-
-    sigma = _effective_sigma(config)
-    max_spread = getattr(config, "max_relative_spread", None)
-    candidates = evaluate_candidates(
-        chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
-        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
-        min_open_interest=int(config.min_open_interest),
-        max_relative_spread=None if max_spread is None else float(max_spread),
-    )
-    candidates_considered = [
-        {"strike": c.strike, "delta": c.delta, "oi": c.oi, "ltp": c.ltp} for c in candidates
-    ]
-    picked = select_strike_by_target_delta(
-        chain, opt_type=opt_type, futures_price=cycle_data.futures_price,
-        T_years=cycle_data.T_years, sigma=sigma, r=RISK_FREE_RATE,
-        target_delta=target_delta, min_open_interest=int(config.min_open_interest),
-        max_relative_spread=None if max_spread is None else float(max_spread),
-    )
-
-    if picked is None:
+    entry_chains = {
+        e: c for e, c in cycle_data.chains_by_expiry.items() if e in cycle_data.entry_expiries
+    }
+    if not entry_chains:
         _record_selection(
-            session, config, today, cycle_data, regime=side_regime.value,
-            target_delta=target_delta,
-            reason="No strike cleared the moneyness/OI/executability filters -- skipped entry",
-            candidates_considered=candidates_considered, position=active_position,
+            session, config, today, cycle_data, attempt_seq=attempt_seq + 1,
+            regime=side_regime.value, target_delta=target_delta,
+            reason=(
+                f"{round_label}: no expiry is far enough out to open a new put "
+                f"(entry_min_dte_days={getattr(config, 'entry_min_dte_days', None)})"
+            ),
+            position=None,
         )
         return
 
-    # A seller hits the BID, not the last-traded price -- DEFAULT-OFF
-    # (migration 0027), because switching it on changes every P&L number the
-    # dashboard has shown so far and breaks comparability with the offline
-    # backtest. Falls back to `ltp` when Dhan quotes no bid for the row (the
-    # executability gate has already established there IS one for any row
-    # that got this far, so this is belt-and-braces).
-    entry_premium = picked.ltp
-    if getattr(config, "use_bid_for_entry_premium", False) and picked.top_bid_price:
-        entry_premium = float(picked.top_bid_price)
+    open_positions = _open_positions_for(session, config)
+    existing_puts: list[float] = []
+    expiry_counts: dict[date, int] = {}
+    for position in open_positions:
+        leg = _open_leg_for(session, position)
+        if leg is not None and leg.opt_type == "PE" and leg.strike is not None:
+            existing_puts.append(float(leg.strike))
+        if leg is not None and leg.cycle_expiry is not None:
+            expiry_counts[leg.cycle_expiry] = expiry_counts.get(leg.cycle_expiry, 0) + 1
 
-    # Premium-richness gate -- DEFAULT-OFF. The engine otherwise writes its
-    # target delta at whatever the market pays, however thin.
-    min_credit_pct = getattr(config, "min_credit_pct_of_strike", None)
-    if min_credit_pct is not None:
-        required = float(min_credit_pct) * float(picked.strike)
-        if entry_premium < required:
-            _record_selection(
-                session, config, today, cycle_data, regime=side_regime.value,
-                target_delta=target_delta,
-                reason=(
-                    f"Best strike {picked.strike:g} pays {entry_premium:g}, below the required "
-                    f"credit of {float(min_credit_pct):g} x strike ({required:g}) -- "
-                    "skipped entry"
-                ),
-                candidates_considered=candidates_considered, position=active_position,
-            )
-            return
+    picks, reasons, evaluated = select_put_ladder(
+        chains_by_expiry=entry_chains,
+        futures_price=cycle_data.futures_price,
+        existing_puts=existing_puts,
+        config=config,
+        target_delta=target_delta,
+        lot_size=cycle_data.lot_size,
+        today=today,
+        realised_vol=realised_vol_from_bars(cycle_data.futures_bars),
+        count=room,
+        existing_expiry_counts=expiry_counts,
+    )
 
-    if active_position is None:
-        active_position = MCXOptionsPosition(
+    for pick in picks:
+        attempt_seq += 1
+        position = MCXOptionsPosition(
             id=uuid.uuid4(), config_id=config.id, status="open", state="flat",
-            futures_qty=0, opened_at=now, realized_pnl=0, unrealized_pnl=0,
+            futures_qty=0, opened_at=now, entry_week_start=week_start,
+            realized_pnl=0, unrealized_pnl=0,
         )
-        session.add(active_position)
+        session.add(position)
         session.flush()
 
-    # A COVERED call is covered by the futures actually held, not by whatever
-    # `config.lots` happens to say today. These are normally the same number,
-    # but `lots` is an operator-editable config column and the position may
-    # have been opened under a different value -- in which case sizing the
-    # call off `config.lots` would quietly write a partially NAKED short call.
-    # Found by independent code review 2026-09-15.
-    entry_lots = float(config.lots)
-    if opt_type == "CE" and active_position is not None:
-        held_qty = float(active_position.futures_qty)
-        if held_qty > 0 and cycle_data.lot_size:
-            held_lots = held_qty / cycle_data.lot_size
-            if held_lots != entry_lots:
-                logger.warning(
-                    "mcx_options: sizing the covered call for config_id=%s from the futures "
-                    "actually held (%g lots) rather than config.lots (%g) -- writing %g lots "
-                    "would leave %g lots of the call uncovered",
-                    config.id, held_lots, entry_lots, entry_lots, entry_lots - held_lots,
-                )
-            entry_lots = held_lots
-
-    # The premium collected for selling this option is real cash credited
-    # the moment it is sold -- book it into realized_pnl right here, at
-    # entry, not deferred to settlement. See module docstring's "Option
-    # premium booking" section and `_entry_leg_amount`'s docstring for the
-    # formula (matches research/mcx_options/engine.py's `add_leg` exactly).
-    # `leg.pnl` is deliberately left unset here -- it represents the leg's
-    # fully-resolved outcome once SETTLED (see `_settle_leg`), not the
-    # entry credit; the raw `premium` column already shows what an open
-    # leg collected.
-    entry_leg_amount = _entry_leg_amount(entry_premium, entry_lots, cycle_data.lot_size)
-    active_position.realized_pnl = float(active_position.realized_pnl) + entry_leg_amount
-
-    action = "sell_call" if opt_type == "CE" else "sell_put"
-    session.add(
-        MCXOptionsLeg(
-            id=uuid.uuid4(), position_id=active_position.id, cycle_expiry=cycle_data.option_expiry,
-            opt_type=opt_type, strike=picked.strike, premium=entry_premium, lots=entry_lots,
-            action=action, opened_at=now,
+        lots = float(config.lots)
+        position.realized_pnl = _entry_leg_amount(pick.premium, lots, cycle_data.lot_size)
+        session.add(
+            MCXOptionsLeg(
+                id=uuid.uuid4(), position_id=position.id, cycle_expiry=pick.expiry,
+                opt_type="PE", strike=pick.strike, premium=pick.premium, lots=lots,
+                action="sell_put", opened_at=now,
+            )
         )
-    )
+        _record_selection(
+            session, config, today, cycle_data, attempt_seq=attempt_seq,
+            regime=side_regime.value, target_delta=target_delta, selected_strike=pick.strike,
+            option_expiry=pick.expiry,
+            candidates_considered=evaluated,
+            reason=(
+                f"{round_label}: {side_regime.value} regime, target delta "
+                f"{target_delta:.2f} -- sold PE {pick.strike:g} exp {pick.expiry} "
+                f"(annualised yield {pick.annualized_yield:.1%}, breakeven cushion "
+                f"{pick.breakeven_cushion:.1%})"
+            ),
+            position=position,
+        )
 
-    _record_selection(
-        session, config, today, cycle_data, regime=side_regime.value,
-        target_delta=target_delta, selected_strike=picked.strike,
-        reason=(
-            f"{side_regime.value} regime, target delta {target_delta:.2f} -- "
-            f"entered {opt_type} at strike {picked.strike}"
-        ),
-        candidates_considered=candidates_considered, position=active_position,
-    )
+    for reason in reasons:
+        attempt_seq += 1
+        _record_selection(
+            session, config, today, cycle_data, attempt_seq=attempt_seq,
+            regime=side_regime.value, target_delta=target_delta,
+            reason=f"{round_label}: {reason}",
+            candidates_considered=evaluated,
+            position=None,
+        )
 
 
-__all__ = ["run_cycle", "MCXOptionsStateError", "DEFAULT_SIGMA", "RISK_FREE_RATE"]
+__all__ = [
+    "settle_cycle",
+    "entry_cycle",
+    "MCXOptionsStateError",
+    "DEFAULT_SIGMA",
+    "RISK_FREE_RATE",
+]

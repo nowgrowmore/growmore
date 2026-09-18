@@ -120,3 +120,63 @@ class TestEdgeCases:
 
     def test_implied_vol_price_too_high_returns_none(self):
         assert implied_vol_b76("CE", 1e6, 100.0, 100.0, 0.25, 0.05) is None
+
+
+# ---------------------------------------------------------------------------
+# realised_vol -- the denominator of the variance-risk-premium filter
+# (MCXOptionsConfig.min_iv_minus_realised_vol). Mirrored into growmore_bot
+# from research/stock_options/pricing.py, which the live bot may not import.
+# ---------------------------------------------------------------------------
+
+
+def test_realised_vol_of_a_flat_series_is_zero():
+    from growmore_bot.mcx_options.pricing import realised_vol
+
+    assert realised_vol([100.0] * 30) == 0.0
+
+
+def test_realised_vol_matches_a_hand_computed_annualisation():
+    import math
+
+    from growmore_bot.mcx_options.pricing import MCX_TRADING_DAYS, realised_vol
+
+    # Alternating +1%/-1% log steps: population stdev of the log returns is
+    # exactly the step size, annualised by sqrt(periods_per_year).
+    step = 0.01
+    closes = [100.0]
+    for i in range(20):
+        closes.append(closes[-1] * math.exp(step if i % 2 == 0 else -step))
+
+    assert realised_vol(closes) == pytest.approx(step * math.sqrt(MCX_TRADING_DAYS), rel=1e-9)
+
+
+def test_realised_vol_refuses_a_too_short_series_rather_than_guessing():
+    from growmore_bot.mcx_options.pricing import realised_vol
+
+    assert realised_vol([]) == 0.0
+    assert realised_vol([100.0]) == 0.0
+    assert realised_vol([100.0, 101.0]) == 0.0
+
+
+def test_realised_vol_ignores_non_positive_closes():
+    """A zero/None close is missing data, not a -100% return -- taking its log
+    would raise or produce a nonsense vol.
+    """
+    from growmore_bot.mcx_options.pricing import realised_vol
+
+    clean = [100.0, 101.0, 102.0, 101.5, 103.0]
+    dirty = [100.0, 101.0, 0.0, 102.0, 101.5, 103.0]
+
+    assert realised_vol(dirty) == pytest.approx(realised_vol(clean))
+
+
+def test_realised_vol_from_bars_reads_closes_off_bar_objects():
+    from growmore_bot.broker.dhan_client import Bar
+    from growmore_bot.mcx_options.pricing import realised_vol, realised_vol_from_bars
+
+    closes = [100.0, 102.0, 101.0, 104.0, 103.0]
+    bars = [
+        Bar(timestamp=None, open=c, high=c, low=c, close=c, volume=1) for c in closes
+    ]
+
+    assert realised_vol_from_bars(bars) == pytest.approx(realised_vol(closes))

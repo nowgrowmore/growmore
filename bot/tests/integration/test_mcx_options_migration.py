@@ -260,30 +260,6 @@ def test_one_selection_row_per_config_and_cycle_date(migrated_engine):
         session.rollback()
 
 
-def test_only_one_open_position_per_config(migrated_engine):
-    """0026's partial unique index. A second open position would be orphaned
-    forever -- `run_cycle` only ever acts on one.
-    """
-    from sqlalchemy.exc import IntegrityError
-
-    with Session(migrated_engine) as session:
-        cfg = _config_row(session)
-        _position_row(session, cfg, status="open", flush=False)
-        _position_row(session, cfg, status="open", flush=False)
-        with pytest.raises(IntegrityError):
-            session.commit()
-        session.rollback()
-
-    # ...but any number of CLOSED positions alongside one open one is normal:
-    # a put expiring OTM closes its position and the next cycle opens a new one.
-    with Session(migrated_engine) as session:
-        cfg = _config_row(session)
-        _position_row(session, cfg, status="closed", flush=False)
-        _position_row(session, cfg, status="closed", flush=False)
-        _position_row(session, cfg, status="open", flush=False)
-        session.commit()
-
-
 def test_only_one_unsettled_leg_per_position(migrated_engine):
     """0026's other partial unique index -- the state that used to raise a
     bare MultipleResultsFound and silently wedge that commodity every day.
@@ -386,3 +362,109 @@ def test_stop_legs_are_permitted_and_risk_flags_default_to_off(migrated_engine):
         # restores `premium` to NOT NULL.
         session.delete(leg)
         session.commit()
+
+
+def test_several_open_positions_per_config_are_now_allowed(migrated_engine):
+    """Migration 0028 dropped 0026's "one open position per config" partial
+    unique index -- a laddered book of concurrent short puts is the point.
+    """
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        for _ in range(4):
+            _position_row(session, cfg, status="open", flush=False)
+        session.commit()
+
+        from growmore_bot.persistence.models import MCXOptionsPosition
+
+        assert (
+            session.query(MCXOptionsPosition)
+            .filter_by(config_id=cfg.id, status="open")
+            .count()
+            == 4
+        )
+
+        # Clean up: the module fixture's teardown downgrades to base, and
+        # 0028's downgrade restores 0026's one-open-position-per-config index,
+        # which cannot be created over a book that violates it. That is
+        # inherent to undoing this feature, not a defect -- but this test must
+        # not be the thing that trips it.
+        session.query(MCXOptionsPosition).filter_by(config_id=cfg.id).delete()
+        session.commit()
+
+
+def test_one_unsettled_leg_per_position_is_still_enforced(migrated_engine):
+    """0028 relaxed the POSITION-level rule and deliberately kept the
+    LEG-level one: each position still runs a single-leg chain.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from growmore_bot.persistence.models import MCXOptionsLeg
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        position = _position_row(session, cfg)
+        for strike in (5900.0, 5800.0):
+            session.add(
+                MCXOptionsLeg(
+                    id=uuid.uuid4(), position_id=position.id, cycle_expiry=date(2026, 9, 24),
+                    opt_type="PE", strike=strike, premium=50.0, lots=1, action="sell_put",
+                    opened_at=datetime.now(timezone.utc),
+                )
+            )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_several_selection_rows_per_cycle_date_are_allowed_one_per_attempt(migrated_engine):
+    """0028 replaced 0026's `UNIQUE (config_id, cycle_date)` -- a weekly round
+    makes several attempts in one morning -- with per-attempt uniqueness, so a
+    re-run still corrects its own rows rather than stacking duplicates.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from growmore_bot.persistence.models import MCXOptionsSelection
+
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        for seq in (1, 2, -1):
+            session.add(
+                MCXOptionsSelection(
+                    id=uuid.uuid4(), config_id=cfg.id, cycle_date=date(2026, 9, 14),
+                    attempt_seq=seq, reason=f"attempt {seq}",
+                )
+            )
+        session.commit()
+        assert session.query(MCXOptionsSelection).filter_by(config_id=cfg.id).count() == 3
+
+        # ...but the SAME attempt twice is still refused.
+        session.add(
+            MCXOptionsSelection(
+                id=uuid.uuid4(), config_id=cfg.id, cycle_date=date(2026, 9, 14),
+                attempt_seq=1, reason="duplicate",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+
+def test_ladder_config_columns_arrive_with_the_intended_defaults(migrated_engine):
+    """The requested behaviour (2 per week, next month inside 10 days) plus
+    the brakes that bound it, all from the server defaults.
+    """
+    with Session(migrated_engine) as session:
+        cfg = _config_row(session)
+        session.commit()
+        session.refresh(cfg)
+
+        assert cfg.weekly_new_puts_target == 2
+        assert cfg.entry_min_dte_days == 10
+        assert cfg.max_concurrent_positions == 8
+        assert cfg.max_positions_per_expiry == 4
+        assert float(cfg.min_strike_separation_pct) == 0.01
+        assert cfg.min_volume == 0
+        # The quality filters stay opt-in, like every 0027 flag.
+        assert cfg.secondary_target_delta is None
+        assert cfg.min_breakeven_cushion_pct is None
+        assert cfg.min_iv_minus_realised_vol is None

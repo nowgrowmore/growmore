@@ -70,7 +70,7 @@ def test_runs_one_cycle_per_enabled_config(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock, \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock, \
          patch("growmore_bot.mcx_options.scheduler_job.time.sleep"):
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
@@ -90,7 +90,7 @@ def test_disabled_configs_are_skipped(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     fetch.assert_not_called()
@@ -112,7 +112,7 @@ def test_one_configs_failure_does_not_abort_the_others(session):
 
     with patch(
         "growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data", side_effect=_fetch,
-    ), patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock, \
+    ), patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock, \
        patch("growmore_bot.mcx_options.scheduler_job.time.sleep"):
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -133,7 +133,7 @@ def test_a_configs_run_cycle_failure_does_not_abort_the_others(session):
             raise RuntimeError("boom -- simulated engine failure for GOLDM")
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle", side_effect=_run_cycle) as run_cycle_mock, \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle", side_effect=_run_cycle) as run_cycle_mock, \
          patch("growmore_bot.mcx_options.scheduler_job.time.sleep"):
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
@@ -147,7 +147,7 @@ def test_missing_instrument_row_is_skipped_without_calling_dhan(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     fetch.assert_not_called()
@@ -191,7 +191,7 @@ def test_fetch_is_retried_on_dhan_api_error_and_then_succeeds(session):
 
     with patch(
         "growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data", side_effect=_fetch,
-    ), patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock, \
+    ), patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock, \
        patch("growmore_bot.mcx_options.scheduler_job.time.sleep") as sleep_mock:
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -224,7 +224,7 @@ def test_fetch_persistent_dhan_api_error_is_retried_then_skipped_without_abortin
 
     with patch(
         "growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data", side_effect=_fetch,
-    ), patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock, \
+    ), patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock, \
        patch("growmore_bot.mcx_options.scheduler_job.time.sleep"):
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -246,7 +246,7 @@ def test_inter_config_delay_when_more_than_one_enabled_config(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"), \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle"), \
          patch("growmore_bot.mcx_options.scheduler_job.time.sleep") as sleep_mock:
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
@@ -261,7 +261,7 @@ def test_no_inter_config_delay_with_a_single_enabled_config(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"), \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle"), \
          patch("growmore_bot.mcx_options.scheduler_job.time.sleep") as sleep_mock:
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
@@ -303,7 +303,7 @@ def test_rolls_the_instrument_contract_before_running_the_cycle(session):
          patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv", return_value="csv"), \
          patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract", return_value=True) as roll, \
          patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -329,7 +329,7 @@ def test_skips_the_commodity_when_the_contract_is_past_cutoff_and_the_roll_fails
          patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv", return_value="csv"), \
          patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract", return_value=False), \
          patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     fetch.assert_not_called()
@@ -346,7 +346,7 @@ def test_does_not_attempt_a_rollover_before_the_close_out_cutoff(session):
          patch("growmore_bot.mcx_options.scheduler_job.fetch_instrument_master_csv") as csv, \
          patch("growmore_bot.mcx_options.scheduler_job.roll_to_next_contract") as roll, \
          patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -367,7 +367,7 @@ def test_a_failing_instrument_master_fetch_skips_the_commodity_rather_than_tradi
              side_effect=RuntimeError("instrument master unreachable"),
          ), \
          patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle") as run_cycle_mock:
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as run_cycle_mock:
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     fetch.assert_not_called()
@@ -388,7 +388,7 @@ def test_passes_the_configs_dte_window_through_to_the_fetch(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"):
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle"):
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
@@ -403,9 +403,88 @@ def test_passes_no_dte_window_when_the_config_leaves_it_unset(session):
     dhan_client = MagicMock()
 
     with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
-         patch("growmore_bot.mcx_options.scheduler_job.run_cycle"):
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle"):
         fetch.return_value = MagicMock()
         run_mcx_options_configs(session, dhan_client, today=TODAY)
 
     assert fetch.call_args.kwargs["min_dte_days"] is None
     assert fetch.call_args.kwargs["max_dte_days"] is None
+
+
+# ---------------------------------------------------------------------------
+# The morning/evening phase split. Entry is order-shaped and belongs while the
+# exchange is open; settlement is an ITM/OTM call against the day's real close
+# and belongs after it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_entry_phase_runs_entry_cycle_and_never_settles(session):
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.entry_cycle") as entry, \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as settle:
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY, phase="entry")
+
+    entry.assert_called_once()
+    settle.assert_not_called()
+
+
+def test_the_settle_phase_runs_settle_cycle_and_never_enters(session):
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.entry_cycle") as entry, \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as settle:
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY, phase="settle")
+
+    settle.assert_called_once()
+    entry.assert_not_called()
+
+
+def test_settle_is_the_default_phase(session):
+    """Belt and braces: an un-migrated caller must not silently start opening
+    positions at 23:59.
+    """
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    _config(session, strategy, "GOLDM")
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.entry_cycle") as entry, \
+         patch("growmore_bot.mcx_options.scheduler_job.settle_cycle") as settle:
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY)
+
+    settle.assert_called_once()
+    entry.assert_not_called()
+
+
+def test_an_unknown_phase_is_rejected_rather_than_guessed(session):
+    with pytest.raises(ValueError, match="phase"):
+        run_mcx_options_configs(session, MagicMock(), today=TODAY, phase="whatever")
+
+
+def test_passes_the_entry_expiry_preference_through_to_the_fetch(session):
+    strategy = _strategy(session)
+    _instrument(session, "GOLDM")
+    cfg = _config(session, strategy, "GOLDM")
+    cfg.entry_min_dte_days = 10
+    session.commit()
+    dhan_client = MagicMock()
+
+    with patch("growmore_bot.mcx_options.scheduler_job.live_data.fetch_cycle_data") as fetch, \
+         patch("growmore_bot.mcx_options.scheduler_job.entry_cycle"):
+        fetch.return_value = MagicMock()
+        run_mcx_options_configs(session, dhan_client, today=TODAY, phase="entry")
+
+    assert fetch.call_args.kwargs["entry_min_dte_days"] == 10

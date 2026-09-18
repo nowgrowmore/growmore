@@ -21,7 +21,7 @@ from typing import Any, Optional
 from growmore_bot.broker.dhan_client import DhanApiError
 from growmore_bot.broker.instrument_master import fetch_instrument_master_csv
 from growmore_bot.mcx_options import live_data
-from growmore_bot.mcx_options.mcx_options_engine import run_cycle
+from growmore_bot.mcx_options.mcx_options_engine import entry_cycle, settle_cycle
 from growmore_bot.persistence.models import Instrument, MCXOptionsConfig
 from growmore_bot.scheduler.contract_rollover import (
     is_past_close_out_cutoff,
@@ -81,6 +81,7 @@ def _fetch_cycle_data_with_retry(
     # live_data -- so it has to be carried across from here.
     min_dte = getattr(config, "min_dte_days", None)
     max_dte = getattr(config, "max_dte_days", None)
+    entry_min_dte = getattr(config, "entry_min_dte_days", None)
 
     last_error: DhanApiError
     for attempt in range(1, _FETCH_MAX_ATTEMPTS + 1):
@@ -91,6 +92,7 @@ def _fetch_cycle_data_with_retry(
                 cycle_date,
                 min_dte_days=None if min_dte is None else int(min_dte),
                 max_dte_days=None if max_dte is None else int(max_dte),
+                entry_min_dte_days=None if entry_min_dte is None else int(entry_min_dte),
             )
         except DhanApiError as exc:
             last_error = exc
@@ -194,13 +196,31 @@ def _ensure_contract_is_current(
     return True
 
 
-def run_mcx_options_configs(session: Any, dhan_client: Any, today: Optional[date] = None) -> None:
-    """Fetch every enabled `MCXOptionsConfig` row and run one daily cycle
-    each: `live_data.fetch_cycle_data` builds that commodity's market data,
-    then `mcx_options_engine.run_cycle` makes (and persists) the day's
-    decision. No order placement anywhere in this path -- see
-    `mcx_options_engine`'s own module docstring.
+def run_mcx_options_configs(
+    session: Any,
+    dhan_client: Any,
+    today: Optional[date] = None,
+    phase: str = "settle",
+) -> None:
+    """Fetch every enabled `MCXOptionsConfig` row and run one cycle each.
+
+    `phase` selects which half of the day's work to do:
+
+      - ``"entry"`` -- the MORNING job (09:15 IST). Rolls contracts, writes
+        covered calls against assigned positions, and tops up the week's new
+        short puts. Everything here is order-shaped, so it belongs while the
+        exchange is open.
+      - ``"settle"`` -- the EVENING job (23:59 IST). Settles legs that came
+        due against the day's real settlement price, marks to market, applies
+        the stop-loss. Opens nothing.
+
+    See `mcx_options_engine`'s module docstring for why the two need different
+    prices and therefore different times. No order placement anywhere in this
+    path either way.
     """
+    if phase not in ("entry", "settle"):
+        raise ValueError(f"phase must be 'entry' or 'settle', got {phase!r}")
+    run_phase = entry_cycle if phase == "entry" else settle_cycle
     cycle_date = today or date.today()
 
     configs = session.query(MCXOptionsConfig).filter_by(enabled=True).all()
@@ -225,10 +245,11 @@ def run_mcx_options_configs(session: Any, dhan_client: Any, today: Optional[date
             cycle_data = _fetch_cycle_data_with_retry(
                 dhan_client, instrument, cycle_date, config
             )
-            run_cycle(session, config, cycle_data, today=cycle_date)
+            run_phase(session, config, cycle_data, today=cycle_date)
         except Exception:  # noqa: BLE001 -- one commodity must not lose the whole cycle
             logger.exception(
-                "mcx_options: cycle failed for symbol=%s -- skipping this commodity today",
+                "mcx_options: %s cycle failed for symbol=%s -- skipping this commodity today",
+                phase,
                 config.symbol,
             )
             continue

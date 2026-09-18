@@ -7,7 +7,7 @@ same as MCX special/shortened sessions -- see docs/technical-debt.md item #4.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytz
 
@@ -188,3 +188,53 @@ class TestIsMcxTradingDay:
         # 2026-09-05 18:31 UTC == 2026-09-06 00:01 IST, a Sunday.
         utc = pytz.utc.localize(datetime(2026, 9, 5, 18, 31))
         assert is_mcx_trading_day(utc) is False
+
+
+# ---------------------------------------------------------------------------
+# is_first_mcx_trading_day_of_week -- the weekly MCX options entry round.
+# ---------------------------------------------------------------------------
+
+
+def test_monday_is_the_first_trading_day_of_its_week():
+    from growmore_bot.scheduler.market_hours import is_first_mcx_trading_day_of_week
+
+    assert is_first_mcx_trading_day_of_week(date(2026, 9, 14)) is True  # a Monday
+
+
+def test_tuesday_is_not_when_monday_was_a_trading_day():
+    from growmore_bot.scheduler.market_hours import is_first_mcx_trading_day_of_week
+
+    assert is_first_mcx_trading_day_of_week(date(2026, 9, 15)) is False
+
+
+def test_a_monday_holiday_promotes_tuesday_to_first_trading_day():
+    """2026-01-26 (Republic Day) is a Monday and an MCX full closure, so that
+    week's first tradeable day is the Tuesday. A plain `weekday() == 0` check
+    would skip the whole week's entry round.
+    """
+    from growmore_bot.scheduler.market_hours import is_first_mcx_trading_day_of_week
+
+    assert date(2026, 1, 26).weekday() == 0
+    assert is_first_mcx_trading_day_of_week(date(2026, 1, 26)) is False
+    assert is_first_mcx_trading_day_of_week(date(2026, 1, 27)) is True
+
+
+def test_a_weekend_day_is_never_the_first_trading_day():
+    from growmore_bot.scheduler.market_hours import is_first_mcx_trading_day_of_week
+
+    assert is_first_mcx_trading_day_of_week(date(2026, 9, 19)) is False  # Saturday
+    assert is_first_mcx_trading_day_of_week(date(2026, 9, 20)) is False  # Sunday
+
+
+def test_accepts_a_datetime_and_reads_it_in_ist():
+    """The morning entry job passes `datetime.now(MCX_TIMEZONE)`; a UTC
+    instant late on a Sunday is already Monday in IST.
+    """
+    from growmore_bot.scheduler.market_hours import (
+        MCX_TIMEZONE,
+        is_first_mcx_trading_day_of_week,
+    )
+
+    sunday_evening_utc = datetime(2026, 9, 13, 20, 0, tzinfo=timezone.utc)
+    assert sunday_evening_utc.astimezone(MCX_TIMEZONE).date() == date(2026, 9, 14)
+    assert is_first_mcx_trading_day_of_week(sunday_evening_utc) is True
