@@ -2,6 +2,9 @@
 .env
 .env.local
 .env.*.local
+# Ad-hoc backups of the above -- NOT covered by the patterns above, and a
+# real way to leave a live credential sitting untracked in the repo.
+.env*.bak*
 !.env.example
 !.env.test
 
