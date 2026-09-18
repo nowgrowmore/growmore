@@ -243,7 +243,7 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   actually satisfied, not just "the VPS exists." **Locked for 7 days from today** — don't try to
   change it before ~2026-09-11 even if the VPS needs to move.
 - [ ] SSH access to the droplet is at `ssh -i ~/.ssh/growmore_vps growmore@139.59.72.81` (key-only,
-  root login disabled). Ask the agent for `growmore-bot.service` status/logs/restart commands
+  root login disabled). **The full deploy runbook now lives in `docs/deployment.md`.** Ask the agent for `growmore-bot.service` status/logs/restart commands
   whenever needed — no need to remember `systemctl` syntax yourself.
 - [ ] **SEBI Algo-ID — smaller lift than originally thought, verified 2026-09-04.** This bot's order
   rate (polls every 5 minutes) is nowhere near the 10-orders/second-per-exchange threshold that

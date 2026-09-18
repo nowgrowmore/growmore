@@ -21,7 +21,13 @@ Vercel/Neon for analytics. See `docs/architecture.md` for the full picture.
 - **Never commit secrets.** Dhan API keys/tokens and Neon direct connection strings live only in
   gitignored `.env.local` / `.env.test.local`. `.env.test` (checked in) holds only safe local
   defaults. If you ever see a real credential about to be written to a tracked file, stop and flag it.
-- **Deploys go through the `vercel:*` skills**, not ad-hoc CLI guesses. Preview deploys happen
+- **Read `docs/deployment.md` before deploying anything.** There are three surfaces with three
+  different mechanisms, and none of them is `git pull` on a server: `bot/` goes to a DigitalOcean
+  VPS by **rsync + `systemctl restart`** (there is no `.git` on that host), schema migrations run
+  from the Mac against Neon, and only the dashboard goes to Vercel. That file also covers the Dhan
+  single-session rule — generating an access token locally while the bot is running kills the VPS's
+  session and takes the bot down.
+- **Dashboard deploys go through the `vercel:*` skills**, not ad-hoc CLI guesses. Preview deploys happen
   automatically via Vercel's GitHub integration on push — don't try to replicate that manually.
   **Production promotion (`vercel:deploy prod`) requires explicit user confirmation every time** —
   never run it unprompted, even if a task seems to imply "ship it."
