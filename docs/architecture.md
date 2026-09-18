@@ -18,7 +18,7 @@ flowchart LR
         Broker["Dhan client wrapper\n(Data API only)"]
         OrderClient["Dhan order client\n(the ONLY module allowed\nto call the Order API)"]
         WheelBasket["Wheel-basket engine\n(paper only, rotating\nhigh-IV stock basket,\nonce-daily cycle after\nNSE close)"]
-        MCXOptions["MCX options-selling engine\n(paper only, put-sell/covered-call\ncycle on GOLDM/SILVERM,\nonce-daily cron @ 23:59 IST,\nconfigs disabled by default)"]
+        MCXOptions["MCX options-selling engine\n(paper only, weekly put ladder\non GOLDM/SILVERM,\nentry cron @ 09:15 IST,\nsettle cron @ 23:59 IST)"]
     end
 
     DB[("Neon Postgres\ninstruments, strategies,\nbacktest_runs, paper_orders,\npaper_positions, live_orders,\nlive_positions, bot_config,\naudit_log,\nwheel_basket_configs/positions/\nlegs/selections,\nmcx_options_configs/positions/\nlegs/selections")]

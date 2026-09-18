@@ -343,18 +343,25 @@ The strategy now sells **2 new puts per instrument per week, on top of whatever 
 entered in the morning and settled in the evening. Built and pushed; the migration still needs
 applying.
 
-### Do first
+### Shipped 2026-09-18 — nothing to do here
 
-- [ ] **Apply migration `0028_mcx_options_ladder` to production Neon.** Dry-run the constraint
-  drops first. It relaxes two of migration 0026's invariants (one open position per config; one
-  selection row per cycle date) and adds the ladder configuration.
-- [ ] **Re-run `bot/research/provision_mcx_options_configs.py --apply`** — still outstanding from
-  the 2026-09-15 review, and now more pressing: `min_open_interest` is still 0 in production, so
-  the OI floor is a no-op, and the ladder evaluates far more candidate strikes than the old single
-  pick did.
-- [ ] **Redeploy the bot to the VPS (rsync, not git) and restart** — there is a NEW cron job
-  (`_mcx_options_entry_job`, 09:15 IST) that will not exist until you do. Until then the evening
-  job runs alone and **nothing will open at all**, because settlement no longer opens positions.
+- [x] **Migration `0028_mcx_options_ladder` applied to production Neon**, after dry-running its
+  preconditions. It only dropped constraints and added columns on this book — no rows were
+  deleted, row counts unchanged (2 configs / 2 positions / 2 legs / 8 selections).
+- [x] **`provision_mcx_options_configs --apply` run.** `min_open_interest` was **0** in production
+  from go-live until today, so the OI floor was a no-op for every cycle before this — worth
+  remembering when reading older selection rows. It is now 10.
+- [x] **Bot deployed to the VPS and restarted.** `rsync` of `growmore_bot/` (13 changed files,
+  byte-identical afterwards), backup taken first, alembic head on the host confirmed matching the
+  database, all four cron jobs registered including the new `_mcx_options_entry_job`.
+
+**The first weekly entry round runs Monday 2026-09-21 at 09:15 IST.** Today (Friday) that time had
+already passed when the deploy went out, and Saturday/Sunday are not trading days. Tonight's 23:59
+settle job runs on the new code and will correctly do nothing — no leg is due.
+
+**What to watch on Monday**, on `/mcx-options`: two new puts per instrument at different strikes
+(and possibly different expiries), the new Exposure card, and a selection log that contains only
+real decisions rather than a daily heartbeat row.
 
 ### Read this before enabling it for a full month
 
