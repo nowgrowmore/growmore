@@ -3,6 +3,7 @@ import {
   getMCXOptionsLegsForConfigs,
   getMCXOptionsPositionsForConfigs,
   getMCXOptionsSelectionsForConfigs,
+  getLotSizesBySymbol,
 } from "@/lib/db";
 import { MCXOptionsClient } from "@/components/MCXOptionsClient";
 import { toggleMCXOptionsConfigEnabled } from "./actions";
@@ -15,11 +16,13 @@ export default async function MCXOptionsPage() {
   // return rows already keyed by config_id, so there is no index-zipping
   // step that could silently attribute GOLDM's positions to SILVERM.
   const configIds = configs.map((c) => c.id);
-  const [positionsByConfigId, legsByConfigId, selectionsByConfigId] = await Promise.all([
-    getMCXOptionsPositionsForConfigs(configIds),
-    getMCXOptionsLegsForConfigs(configIds),
-    getMCXOptionsSelectionsForConfigs(configIds),
-  ]);
+  const [positionsByConfigId, legsByConfigId, selectionsByConfigId, lotSizeBySymbol] =
+    await Promise.all([
+      getMCXOptionsPositionsForConfigs(configIds),
+      getMCXOptionsLegsForConfigs(configIds),
+      getMCXOptionsSelectionsForConfigs(configIds),
+      getLotSizesBySymbol(),
+    ]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -56,6 +59,7 @@ export default async function MCXOptionsPage() {
           positionsByConfigId={positionsByConfigId}
           legsByConfigId={legsByConfigId}
           selectionsByConfigId={selectionsByConfigId}
+          lotSizeBySymbol={lotSizeBySymbol}
           onToggle={toggleMCXOptionsConfigEnabled}
         />
       )}

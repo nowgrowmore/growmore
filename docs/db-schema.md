@@ -324,3 +324,25 @@ erDiagram
   selection rows before adding the unique constraint.
   `0027_mcx_options_risk_flags` then adds the default-OFF risk/selection columns described in
   `docs/pending-actions.md` and widens the leg CHECKs to admit a `STOP` leg.
+- **`0028_mcx_options_ladder` (2026-09-18)** turns the single position into a weekly ladder, and so
+  has to undo two of 0026's invariants while keeping the third:
+  - **Dropped** `uq_mcx_options_positions_one_open_per_config` — several concurrent open positions
+    per config is now the whole point, each running its own put → assignment → covered-call chain.
+  - **Dropped** `uq_mcx_options_selections_config_cycle` — a weekly round makes several entry
+    attempts in one morning, so "one cycle_date is one decision" no longer holds. Replaced by
+    `UNIQUE (config_id, cycle_date, attempt_seq)`, with new `attempt_seq` and `position_id`
+    columns; morning entry rows are positively sequenced and evening settlement rows negatively,
+    so the two phases share a date without colliding. A re-run still corrects its own rows in
+    place rather than stacking duplicates, which is what 0026 was really protecting.
+  - **Kept** `uq_mcx_options_legs_one_unsettled_per_position` — still true, and the reason the
+    dashboard's `openLegFor` can stay singular.
+
+  Also adds `mcx_options_positions.entry_week_start` (the IST Monday the position's entry round
+  belongs to — stored rather than derived because `opened_at` is UTC and the week boundary is IST)
+  and the ladder configuration on `mcx_options_configs`: `weekly_new_puts_target` (2),
+  `entry_min_dte_days` (10), the accumulation brakes `max_concurrent_positions` (8),
+  `max_positions_per_expiry` (4) and `min_strike_separation_pct` (0.01), plus the opt-in quality
+  filters `secondary_target_delta`, `min_breakeven_cushion_pct`, `min_iv_minus_realised_vol` and
+  `min_volume`. `downgrade()` de-duplicates selection rows before restoring 0026's per-day
+  uniqueness, but deliberately does NOT collapse a multi-position book — closing real positions is
+  not something a schema downgrade should do silently, so it fails loudly instead.

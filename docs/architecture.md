@@ -83,6 +83,36 @@ several things here; see `docs/technical-debt.md` for the full list. The load-be
 - **Migration 0026** adds the indexes, uniqueness (one selection row per cycle date, one open
   position per config, one unsettled leg per position) and state CHECK constraints these tables
   shipped without — including on `mode`, the live-trading gate, which was unconstrained text.
+- **Weekly put ladder (2026-09-18, migration 0028).** The strategy no longer holds one short put
+  per instrument. On the first MCX trading day of each week it attempts `weekly_new_puts_target`
+  (2) NEW puts per instrument **on top of whatever is already open**, retrying every trading
+  morning until that week's target is met. The cycle is split in two, because the halves need
+  different prices:
+  - `mcx_options_engine.settle_cycle` — the existing 23:59 IST cron. Settles legs that came due
+    against the day's real settlement price, marks to market, applies the stop-loss. **Opens
+    nothing.**
+  - `mcx_options_engine.entry_cycle` — a new **09:15 IST** cron (`_mcx_options_entry_job`). Rolls
+    contracts, writes covered calls against assigned positions, and sells the week's new puts.
+    Everything here is order-shaped, and an order can only be placed while the exchange is open —
+    which also closes the overnight decision-to-fill gap `docs/technical-debt.md` recorded against
+    any future live phase.
+
+  The weekly count is kept on `mcx_options_positions.entry_week_start` (the IST Monday) rather than
+  derived from what is currently open, so a put sold Monday and assigned Wednesday still counts as
+  that week's — and the daily retry falls out of the same count with no separate "is today the
+  first trading day" branch. `growmore_bot/mcx_options/ladder.py` picks the batch: filter-then-rank
+  over several expiries' chains, ranked on annualised return on margin. `MCXCycleData` now carries
+  a chain per expiry so a pair can straddle two months, and the entry expiry is the nearest at
+  least `entry_min_dte_days` (10) out, else the next.
+
+  **The accumulation is deliberate and bounded.** Monthly expiries are ~4 weeks apart, so a month
+  of rounds builds 6–8 concurrent short puts per instrument, most expiring on the same date;
+  `max_concurrent_positions` (8), `max_positions_per_expiry` (4) and `min_strike_separation_pct`
+  (1%) bound that tail without altering the intended behaviour. See `docs/pending-actions.md`.
+
+  The selection log now records only real decisions — no more
+  `"position already has an open leg, not due for settlement today"` heartbeats, and no row at all
+  on a morning where the week's target is already met.
 - **Migration 0027** adds risk/selection flags (`stop_loss_premium_multiple`, `min_dte_days`/
   `max_dte_days`, `min_credit_pct_of_strike`, `max_relative_spread`, `use_bid_for_entry_premium`,
   `fallback_sigma`). **All are null/false by default and every code path treats that as disabled**,

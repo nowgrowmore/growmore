@@ -671,6 +671,24 @@ function trimSelectionCandidates(row: MCXOptionsSelection): MCXOptionsSelection 
   };
 }
 
+//: Contract multiplier per MCX symbol. The /mcx-options exposure card needs
+//: it because strikes and premiums are quoted PER UNIT while the money at
+//: risk is `strike x lots x lot_size` -- a factor of 10 for GOLDM and 5 for
+//: SILVERM. Keyed by symbol rather than instrument id because
+//: `mcx_options_configs` references its commodity by symbol, not by FK.
+export async function getLotSizesBySymbol(): Promise<Record<string, number>> {
+  const sql = getClient();
+  const rows = await sql`
+    select symbol, lot_size from instruments
+  `;
+  return Object.fromEntries(
+    (rows as unknown as { symbol: string; lot_size: number }[]).map((r) => [
+      r.symbol,
+      Number(r.lot_size),
+    ])
+  );
+}
+
 export async function setMCXOptionsConfigEnabled(id: string, enabled: boolean): Promise<void> {
   const sql = getClient();
   await sql.transaction((tx) => [

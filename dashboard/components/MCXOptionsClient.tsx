@@ -5,6 +5,7 @@ import {
   formatIstDate,
   formatIstDateTime,
   formatNumber,
+  istWeekStart,
   formatPercent,
   formatPositionAge,
   toNumber,
@@ -50,6 +51,11 @@ function stateBadgeClass(state: string): string {
 //: option is live (see Trade History for it instead, confusingly). Surface
 //: it here so "what's actually outstanding right now" doesn't require
 //: cross-referencing the trade-history table.
+//: Still singular after the move to a laddered book, deliberately: migration
+//: 0028 dropped the "one open POSITION per config" rule but kept
+//: `uq_mcx_options_legs_one_unsettled_per_position`, so each position really
+//: does have at most one unsettled leg. Returning a list here would imply a
+//: state the database forbids.
 function openLegFor(legs: MCXOptionsLeg[], positionId: string): MCXOptionsLeg | null {
   return legs.find((l) => l.position_id === positionId && l.settled_at === null) ?? null;
 }
@@ -100,6 +106,43 @@ function activeRiskFlags(config: MCXOptionsConfig): string[] {
     flags.push(`fallback σ ${formatNumber(toNumber(config.fallback_sigma))}`);
   }
   return flags;
+}
+
+//: Short, stable label for a position within its config -- "#1", "#2" -- so
+//: trade-history rows from several concurrent positions can be grouped by
+//: eye. A raw UUID identifies a database row; the reader needs to know which
+//: put became which covered call.
+function positionOrdinals(positions: MCXOptionsPosition[]): Record<string, string> {
+  const ordered = [...positions].sort(
+    (a, b) => new Date(a.opened_at).getTime() - new Date(b.opened_at).getTime()
+  );
+  return Object.fromEntries(ordered.map((p, i) => [p.id, `#${i + 1}`]));
+}
+
+//: Total rupees of commodity this config could be required to take delivery
+//: of: every open short put's strike (the price assignment happens at) plus
+//: every assigned futures position at its basis. There was no exposure figure
+//: anywhere on this page before the ladder, which mattered far less when a
+//: config could hold exactly one position.
+function totalExposure(
+  positions: MCXOptionsPosition[],
+  legs: MCXOptionsLeg[],
+  lotSize: number | undefined
+): number | null {
+  if (!lotSize) return null;
+  let exposure = 0;
+  for (const p of positions) {
+    if (p.status !== "open") continue;
+    if (p.state === "long_futures") {
+      exposure += toNumber(p.basis) * toNumber(p.futures_qty);
+      continue;
+    }
+    const leg = openLegFor(legs, p.id);
+    if (leg !== null && leg.opt_type === "PE" && leg.strike !== null) {
+      exposure += toNumber(leg.strike) * toNumber(leg.lots) * lotSize;
+    }
+  }
+  return exposure;
 }
 
 function regimeLabel(regime: string | null): string {
@@ -187,12 +230,19 @@ export function MCXOptionsClient({
   positionsByConfigId,
   legsByConfigId,
   selectionsByConfigId,
+  lotSizeBySymbol,
   onToggle,
 }: {
   configs: MCXOptionsConfig[];
   positionsByConfigId: Record<string, MCXOptionsPosition[]>;
   legsByConfigId: Record<string, MCXOptionsLeg[]>;
   selectionsByConfigId: Record<string, MCXOptionsSelection[]>;
+  //: Contract multiplier per symbol, from the `instruments` table. Needed to
+  //: express exposure in rupees: strikes and premiums are quoted PER UNIT
+  //: while the money at stake is `strike x lots x lot_size`. Absent, the
+  //: exposure card says so rather than showing a number that is wrong by a
+  //: factor of 5 (SILVERM) or 10 (GOLDM).
+  lotSizeBySymbol?: Record<string, number>;
   onToggle: (id: string, enabled: boolean) => Promise<void>;
 }) {
   return (
@@ -213,6 +263,17 @@ export function MCXOptionsClient({
           .filter((p) => p.state === "long_futures")
           .reduce((sum, p) => sum + toNumber(p.unrealized_pnl), 0);
         const latestSelection = selections[0] ?? null;
+        const ordinals = positionOrdinals(positions);
+        const lotSize = lotSizeBySymbol?.[config.symbol];
+        const exposure = totalExposure(positions, legs, lotSize);
+        // Which of this week's new-put quota has been used. Counted on
+        // `entry_week_start` -- the week a position was OPENED -- exactly as
+        // the bot counts it, so the page and the engine can never disagree
+        // about how much of the week is left.
+        const weekStart = istWeekStart(new Date());
+        const openedThisWeek = positions.filter(
+          (p) => p.entry_week_start !== null && formatIstDate(p.entry_week_start) === weekStart
+        ).length;
 
         return (
           <section
@@ -233,6 +294,12 @@ export function MCXOptionsClient({
                   (trend favorable) · Min OI {config.min_open_interest} · Roll cost{" "}
                   {formatCurrency(toNumber(config.futures_roll_cost_per_lot))}/lot
                 </p>
+                <p className="mt-1 text-xs text-[color:var(--text-secondary)]">
+                  Ladder: {config.weekly_new_puts_target} new puts/week ({openedThisWeek} used
+                  this week) · expiry ≥ {config.entry_min_dte_days}d out · max{" "}
+                  {config.max_concurrent_positions ?? "∞"} open,{" "}
+                  {config.max_positions_per_expiry ?? "∞"} per expiry
+                </p>
                 <p className="mt-1 text-xs text-[color:var(--text-muted)]">
                   Risk flags:{" "}
                   {activeRiskFlags(config).length === 0
@@ -243,7 +310,7 @@ export function MCXOptionsClient({
               <StrategyToggle configId={config.id} initialEnabled={config.enabled} onToggle={onToggle} />
             </div>
 
-            <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-5">
               <div>
                 <dt className="text-xs text-[color:var(--text-muted)]">Open positions</dt>
                 <dd className="text-lg font-semibold tabular-nums">{openPositions.length}</dd>
@@ -261,7 +328,20 @@ export function MCXOptionsClient({
                 </dd>
               </div>
               <div>
-                <dt className="text-xs text-[color:var(--text-muted)]">Last cycle</dt>
+                {/* Assignment liability across the whole book -- the number
+                    that matters once several puts accumulate, and which this
+                    page did not show at all before the ladder. */}
+                <dt className="text-xs text-[color:var(--text-muted)]">Exposure</dt>
+                <dd className="text-lg font-semibold tabular-nums">
+                  {exposure !== null ? formatCurrency(exposure) : "—"}
+                </dd>
+              </div>
+              <div>
+                {/* "Last decision", not "Last cycle": the uninformative daily
+                    heartbeat rows are gone, so this date is the last time the
+                    bot actually did something and can legitimately be weeks
+                    old without anything being wrong. */}
+                <dt className="text-xs text-[color:var(--text-muted)]">Last decision</dt>
                 <dd className="text-lg font-semibold tabular-nums">
                   {latestSelection ? formatIstDate(latestSelection.cycle_date) : "—"}
                 </dd>
@@ -270,10 +350,10 @@ export function MCXOptionsClient({
 
             <section className="mt-6">
               <h4 className="mb-2 text-xs font-semibold uppercase text-[color:var(--text-secondary)]">
-                Current position
+                Open positions
               </h4>
               {openPositions.length === 0 ? (
-                <p className="text-sm text-[color:var(--text-muted)]">No open position.</p>
+                <p className="text-sm text-[color:var(--text-muted)]">No open positions.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
                   <table className="w-full min-w-[880px] text-sm">
@@ -420,9 +500,10 @@ export function MCXOptionsClient({
                 <p className="text-sm text-[color:var(--text-muted)]">No legs written yet.</p>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[color:var(--border-hairline)]">
-                  <table className="w-full min-w-[780px] text-sm">
+                  <table className="w-full min-w-[860px] text-sm">
                     <thead>
                       <tr className="border-b border-[color:var(--border-hairline)] text-left text-[color:var(--text-secondary)]">
+                        <th className="px-3 py-2 font-medium">Position</th>
                         <th className="px-3 py-2 font-medium">Type</th>
                         <th className="px-3 py-2 font-medium">Action</th>
                         <th className="px-3 py-2 font-medium text-right">Strike</th>
@@ -436,6 +517,13 @@ export function MCXOptionsClient({
                     <tbody>
                       {legs.map((leg) => (
                         <tr key={leg.id} className="border-b border-[color:var(--border-hairline)] last:border-0">
+                          {/* Several positions run concurrently now, so an
+                              undifferentiated stream of PE/CE/ROLL rows makes
+                              the put -> assignment -> covered-call chain
+                              impossible to follow. */}
+                          <td className="px-3 py-2 tabular-nums text-[color:var(--text-secondary)]">
+                            {ordinals[leg.position_id] ?? "—"}
+                          </td>
                           <td className="px-3 py-2 font-medium">{leg.opt_type}</td>
                           <td className="px-3 py-2 capitalize">{leg.action.replace(/_/g, " ")}</td>
                           {/* A ROLL leg is a futures contract rollover, not an

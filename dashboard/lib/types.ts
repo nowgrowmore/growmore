@@ -335,6 +335,20 @@ export interface MCXOptionsConfig {
   max_relative_spread: string | null;
   use_bid_for_entry_premium: boolean;
   fallback_sigma: string | null;
+  // Weekly put ladder (migration 0028). The strategy sells
+  // `weekly_new_puts_target` NEW puts per week on top of whatever is open, so
+  // a config now holds SEVERAL concurrent positions rather than one.
+  weekly_new_puts_target: number;
+  entry_min_dte_days: number;
+  // Accumulation brakes -- see docs/pending-actions.md for the arithmetic
+  // they bound.
+  max_concurrent_positions: number | null;
+  max_positions_per_expiry: number | null;
+  min_strike_separation_pct: string | null;
+  secondary_target_delta: string | null;
+  min_breakeven_cushion_pct: string | null;
+  min_iv_minus_realised_vol: string | null;
+  min_volume: number;
   updated_at: PgDate;
 }
 
@@ -349,6 +363,9 @@ export interface MCXOptionsPosition {
   futures_qty: string;
   futures_contract_expiry: PgDate | null;
   opened_at: PgDate;
+  // The IST Monday of the week whose entry round opened this position
+  // (migration 0028) -- what the weekly target is counted against.
+  entry_week_start: PgDate | null;
   closed_at: PgDate | null;
   realized_pnl: string;
   unrealized_pnl: string;
@@ -381,6 +398,10 @@ export interface MCXOptionsCandidate {
   delta: number;
   oi: number;
   ltp: number;
+  // Which expiry's board this candidate came from (migration 0028). Entry now
+  // evaluates several expiries at once, and a strike is only interpretable
+  // alongside its expiry. Absent on rows written before the ladder.
+  expiry?: string | null;
 }
 
 // The raw JSONB shape as it actually arrives: written by the bot, never
@@ -393,6 +414,15 @@ export interface MCXOptionsSelection {
   id: string;
   config_id: string;
   cycle_date: PgDate;
+  // Which attempt of that cycle this row records (migration 0028): a weekly
+  // round makes several entry attempts in one morning. Positive for the
+  // morning entry phase, negative for the evening settlement phase, so the
+  // two never collide on one date.
+  attempt_seq: number;
+  // The position this row produced or relates to. Null when the attempt
+  // opened nothing -- and what makes the position_* snapshot below
+  // attributable now that a config holds several positions.
+  position_id: string | null;
   // consolidating|trend_favorable|trend_unfavorable, or null for "no
   // opinion" (treated the same as trend_unfavorable: never permissive).
   regime: string | null;

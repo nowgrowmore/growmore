@@ -14,6 +14,7 @@ import {
   getPortfolioHoldings,
   getRecentSignals,
   getRecentSignalsForConfigs,
+  getLotSizesBySymbol,
   getMCXOptionsConfigs,
   getMCXOptionsLegsForConfigs,
   getMCXOptionsPositionsForConfigs,
@@ -542,5 +543,19 @@ describe("setMCXOptionsConfigEnabled", () => {
 
     const auditCallParams = fakeSql.calls[1];
     expect(JSON.stringify(auditCallParams)).toContain("mcx_options_disabled");
+  });
+});
+
+describe("getLotSizesBySymbol", () => {
+  it("keys the contract multiplier by symbol", async () => {
+    // GOLDM quotes per 10g on a 100g lot and SILVERM per kg on a 5kg lot, so
+    // exposure is wrong by 10x / 5x without this.
+    const fakeSql = makeFakeSql([
+      { symbol: "GOLDM", lot_size: 10 },
+      { symbol: "SILVERM", lot_size: 5 },
+    ]);
+    __setTestClient(fakeSql as never);
+
+    expect(await getLotSizesBySymbol()).toEqual({ GOLDM: 10, SILVERM: 5 });
   });
 });

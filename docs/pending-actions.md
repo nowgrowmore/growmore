@@ -337,6 +337,61 @@ paper-trading implementation — schema, decision engine, scheduler wiring, and 
   Sec 8 for what would be worth trying next.
 
 
+## MCX options — weekly put ladder (2026-09-18)
+
+The strategy now sells **2 new puts per instrument per week, on top of whatever is already open**,
+entered in the morning and settled in the evening. Built and pushed; the migration still needs
+applying.
+
+### Do first
+
+- [ ] **Apply migration `0028_mcx_options_ladder` to production Neon.** Dry-run the constraint
+  drops first. It relaxes two of migration 0026's invariants (one open position per config; one
+  selection row per cycle date) and adds the ladder configuration.
+- [ ] **Re-run `bot/research/provision_mcx_options_configs.py --apply`** — still outstanding from
+  the 2026-09-15 review, and now more pressing: `min_open_interest` is still 0 in production, so
+  the OI floor is a no-op, and the ladder evaluates far more candidate strikes than the old single
+  pick did.
+- [ ] **Redeploy the bot to the VPS (rsync, not git) and restart** — there is a NEW cron job
+  (`_mcx_options_entry_job`, 09:15 IST) that will not exist until you do. Until then the evening
+  job runs alone and **nothing will open at all**, because settlement no longer opens positions.
+
+### Read this before enabling it for a full month
+
+"2 new every week, on top of whatever is open" compounds. Monthly expiries are ~4 weeks apart, so a
+month of rounds accumulates **6–8 concurrent short puts per instrument, most expiring on the same
+date**. At the futures prices recorded in production on 2026-09-14 (GOLDM ₹15.3 lakh/lot, SILVERM
+₹11.8 lakh/lot), six of each assigning on one morning is **≈ ₹1.63 crore of physical commodity**,
+on an account with no margin model in the bot at all.
+
+Three brakes ship with it, defaulted permissively enough not to alter what you asked for:
+
+| Column | Default | What it bounds |
+|---|---|---|
+| `max_concurrent_positions` | 8 | Hard ceiling per instrument |
+| `max_positions_per_expiry` | 4 | **Simultaneous assignment** — the one I'd tighten first |
+| `min_strike_separation_pct` | 0.01 | Stops the ladder collapsing onto one strike |
+
+`/mcx-options` now shows total assignment exposure, so the number is on screen rather than
+implied. Watch it for the first month and tighten `max_positions_per_expiry` if a single date
+starts carrying too much.
+
+### Opt-in quality filters, all OFF
+
+Added alongside the ladder, none enabled: `secondary_target_delta` (makes the weekly pair a real
+ladder — e.g. 0.30 near + 0.18 far — rather than two near-identical puts),
+`min_breakeven_cushion_pct` (how far the market may fall before the trade loses),
+`min_iv_minus_realised_vol` (the variance risk premium — selling when implied vol exceeds realised
+is the actual edge in put selling, and this is the only filter that speaks to whether there is an
+edge at all), and `min_volume`.
+
+### Still deliberately not built
+
+- [ ] **Portfolio exposure cap across GOLDM and SILVERM**, and **operational alerting** — both
+  carried over unchanged from the 2026-09-15 review. The exposure cap matters more now than it did
+  then: the per-instrument brakes above do nothing about the two commodities being correlated
+  bullion moving together.
+
 ## MCX options strategy — independent code review (2026-09-15)
 
 An independent review of `bot/growmore_bot/mcx_options/` and the `/mcx-options` page, run after the

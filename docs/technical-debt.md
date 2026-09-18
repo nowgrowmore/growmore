@@ -32,6 +32,23 @@
   None of this blocks the code from running or being tested — it blocks trusting any CAGR/Sharpe
   number this produces as a real trading conclusion until the above are sourced/verified.
 
+- **(2026-09-18) MCX options moved to a weekly put ladder with morning entry.** Two new pieces of
+  debt, and one pre-existing item made materially worse:
+  - **The accumulation is bounded by config defaults, not by a margin model.**
+    `max_concurrent_positions`/`max_positions_per_expiry`/`min_strike_separation_pct` are
+    judgement calls chosen to bound a tail, not figures derived from available margin — the bot
+    still has no margin model at all and `margin_multiple_of_premium` is a flat placeholder. The
+    annualised-yield ranking in `ladder.py` divides by that placeholder, so the RANKING between
+    candidates is sound (it reduces to margin turnover) while the absolute yield figure printed in
+    the selection log is only as real as that multiple.
+  - **`entry_min_dte_days` approximates "month end" by days-to-expiry, not by expiry series.** It
+    targets the nearest expiry at least N days out, which lands on the monthly series in practice
+    but would pick a weekly expiry if MCX ever listed one for these contracts. Sourcing the real
+    Goldmini/Silvermini expiry calendar would make this exact rather than incidental.
+  - **Option costs and lot size (both open since 2026-09-15) now scale with the book.** Costs are
+    modelled as exactly zero and the option lot size is assumed equal to the futures lot size; a
+    ladder of eight puts multiplies whatever error each carries by eight.
+
 - **(2026-09-15) Independent code review of the MCX options strategy and its dashboard.** Run after
   the strategy's first real paper cycles. Correctness findings were fixed outright; strategy
   findings became default-OFF config flags (migration 0027) because they are the account owner's

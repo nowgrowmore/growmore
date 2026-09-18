@@ -28,6 +28,15 @@ function config(overrides: Partial<MCXOptionsConfig> = {}): MCXOptionsConfig {
     max_relative_spread: null,
     use_bid_for_entry_premium: false,
     fallback_sigma: null,
+    weekly_new_puts_target: 2,
+    entry_min_dte_days: 10,
+    max_concurrent_positions: 8,
+    max_positions_per_expiry: 4,
+    min_strike_separation_pct: "0.01",
+    secondary_target_delta: null,
+    min_breakeven_cushion_pct: null,
+    min_iv_minus_realised_vol: null,
+    min_volume: 0,
     updated_at: "2026-09-06T00:00:00Z",
     ...overrides,
   };
@@ -59,6 +68,7 @@ describe("MCXOptionsClient", () => {
       futures_qty: "100",
       futures_contract_expiry: "2026-10-28",
       opened_at: "2026-09-01T00:00:00Z",
+      entry_week_start: "2026-08-31",
       closed_at: null,
       realized_pnl: "0",
       unrealized_pnl: "1250.50",
@@ -90,6 +100,7 @@ describe("MCXOptionsClient", () => {
       futures_qty: "0",
       futures_contract_expiry: null,
       opened_at: "2026-09-14T00:00:00Z",
+      entry_week_start: "2026-08-31",
       closed_at: null,
       realized_pnl: "0",
       unrealized_pnl: "0",
@@ -128,6 +139,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-1",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-09-01",
         regime: "consolidating",
         target_delta: "0.30",
@@ -148,6 +161,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-2",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-08-25",
         regime: "trend_unfavorable",
         target_delta: null,
@@ -182,6 +197,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-1",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-09-01",
         regime: "consolidating",
         target_delta: "0.30",
@@ -201,6 +218,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-2",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-08-31",
         regime: "consolidating",
         target_delta: null,
@@ -333,6 +352,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-early",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-09-14",
         regime: "consolidating",
         target_delta: "0.30",
@@ -349,6 +370,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-later",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-09-14",
         regime: "consolidating",
         target_delta: "0.30",
@@ -400,6 +423,8 @@ describe("MCXOptionsClient", () => {
       {
         id: "sel-1",
         config_id: "config-1",
+        attempt_seq: 1,
+        position_id: null,
         cycle_date: "2026-09-14",
         regime: "consolidating",
         target_delta: "0.30",
@@ -536,6 +561,8 @@ describe("MCXOptionsClient — review fixes", () => {
     const selection: MCXOptionsSelection = {
       id: "sel-zero",
       config_id: "config-1",
+      attempt_seq: 1,
+      position_id: null,
       cycle_date: "2026-09-14",
       regime: "consolidating",
       target_delta: "0.30",
@@ -574,6 +601,8 @@ describe("MCXOptionsClient — review fixes", () => {
     const selection: MCXOptionsSelection = {
       id: "sel-bad",
       config_id: "config-1",
+      attempt_seq: 1,
+      position_id: null,
       cycle_date: "2026-09-14",
       regime: "consolidating",
       target_delta: "0.30",
@@ -665,6 +694,7 @@ describe("MCXOptionsClient — review fixes", () => {
       futures_qty: "0",
       futures_contract_expiry: null,
       opened_at: "2026-09-01T00:00:00Z",
+      entry_week_start: "2026-08-31",
       closed_at: null,
       realized_pnl: "1000",
       unrealized_pnl: "9999",
@@ -720,5 +750,204 @@ describe("MCXOptionsClient — risk flags", () => {
     expect(screen.getByText(/stop-loss at 2\.5× premium/)).toBeInTheDocument();
     expect(screen.getByText(/DTE 7…45d/)).toBeInTheDocument();
     expect(screen.getByText(/entry priced at bid/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The weekly put ladder (bot migration 0028). A config now holds SEVERAL
+// concurrent open positions, each running its own put -> assignment ->
+// covered-call chain, and a cycle date can carry several entry attempts.
+// ---------------------------------------------------------------------------
+
+function ladderPosition(
+  id: string,
+  overrides: Partial<MCXOptionsPosition> = {}
+): MCXOptionsPosition {
+  return {
+    id,
+    config_id: "config-1",
+    status: "open",
+    state: "flat",
+    basis: null,
+    futures_qty: "0",
+    futures_contract_expiry: null,
+    opened_at: "2026-09-14T04:00:00Z",
+    entry_week_start: "2026-09-14",
+    closed_at: null,
+    realized_pnl: "5000",
+    unrealized_pnl: "0",
+    ...overrides,
+  };
+}
+
+function ladderLeg(id: string, positionId: string, overrides: Partial<MCXOptionsLeg> = {}): MCXOptionsLeg {
+  return {
+    id,
+    position_id: positionId,
+    cycle_expiry: "2026-09-25",
+    opt_type: "PE",
+    strike: "5900",
+    premium: "50",
+    lots: "1",
+    action: "sell_put",
+    opened_at: "2026-09-14T04:00:00Z",
+    settled_at: null,
+    assigned: false,
+    called_away: false,
+    pnl: null,
+    ...overrides,
+  };
+}
+
+describe("MCXOptionsClient — weekly ladder", () => {
+  it("renders every concurrent open position, not just the first", () => {
+    const positions = [
+      ladderPosition("pos-1"),
+      ladderPosition("pos-2", { basis: "5800" }),
+      ladderPosition("pos-3", { state: "long_futures", basis: "5700", futures_qty: "100" }),
+    ];
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{ "config-1": positions }}
+        legsByConfigId={{
+          "config-1": [
+            ladderLeg("leg-1", "pos-1", { strike: "5900" }),
+            ladderLeg("leg-2", "pos-2", { strike: "5800" }),
+            ladderLeg("leg-3", "pos-3", { opt_type: "CE", strike: "6100", action: "sell_call" }),
+          ],
+        }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+
+    // Heading is plural now -- a config holds a book, not "the" position.
+    // (The summary card carries the same words, hence the H4 scoping.)
+    expect(
+      screen.getAllByText(/Open positions/).some((el) => el.tagName === "H4")
+    ).toBe(true);
+    for (const strike of ["₹5,900.00", "₹5,800.00", "₹6,100.00"]) {
+      expect(screen.getAllByText(new RegExp(strike.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).length)
+        .toBeGreaterThan(0);
+    }
+  });
+
+  it("shows total assignment exposure across the whole book", () => {
+    // The number that matters once puts accumulate: 2 short puts at 5900 and
+    // 5800, 1 lot each of lot_size 100, is (5900 + 5800) x 100 = ₹11,70,000
+    // of commodity that could be delivered.
+    const positions = [ladderPosition("pos-1"), ladderPosition("pos-2")];
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{ "config-1": positions }}
+        legsByConfigId={{
+          "config-1": [
+            ladderLeg("leg-1", "pos-1", { strike: "5900" }),
+            ladderLeg("leg-2", "pos-2", { strike: "5800" }),
+          ],
+        }}
+        selectionsByConfigId={{}}
+        lotSizeBySymbol={{ GOLDM: 100 }}
+        onToggle={vi.fn()}
+      />
+    );
+
+    const card = screen
+      .getAllByText(/Exposure/)
+      .find((el) => el.tagName === "DT")!
+      .closest("div")!;
+    expect(within(card).getByText("₹11,70,000.00")).toBeInTheDocument();
+  });
+
+  it("attributes each leg to its position in trade history", () => {
+    // With N interleaved positions the put -> assignment -> covered-call
+    // narrative is unreadable without this.
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{ "config-1": [ladderPosition("pos-1"), ladderPosition("pos-2")] }}
+        legsByConfigId={{
+          "config-1": [
+            ladderLeg("leg-1", "pos-1", { strike: "5900" }),
+            ladderLeg("leg-2", "pos-2", { strike: "5800" }),
+          ],
+        }}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+
+    const row = screen.getByText("₹5,900.00").closest("tr")!;
+    // Positions are labelled by a short, stable ordinal rather than a raw
+    // UUID -- the reader needs to group rows, not identify a database row.
+    expect(within(row).getByText("#1")).toBeInTheDocument();
+  });
+
+  it("renders several entry attempts on one cycle date", () => {
+    const attempts: MCXOptionsSelection[] = [1, 2].map((seq) => ({
+      id: `sel-${seq}`,
+      config_id: "config-1",
+      attempt_seq: seq,
+      position_id: `pos-${seq}`,
+      cycle_date: "2026-09-14",
+      regime: "consolidating",
+      target_delta: "0.30",
+      selected_strike: seq === 1 ? "5900" : "5800",
+      reason: `weekly round: sold PE ${seq === 1 ? 5900 : 5800}`,
+      futures_price: "6000",
+      position_state: "flat",
+      position_basis: null,
+      position_unrealized_pnl: null,
+      candidates_considered: null,
+      option_expiry: "2026-09-25",
+      created_at: `2026-09-14T04:0${seq}:00Z`,
+    }));
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{ "config-1": attempts }}
+        onToggle={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/sold PE 5900/)).toBeInTheDocument();
+    expect(screen.getByText(/sold PE 5800/)).toBeInTheDocument();
+  });
+
+  it("surfaces the weekly target and how much of it this week has used", () => {
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{
+          "config-1": [ladderPosition("pos-1", { entry_week_start: "2026-09-14" })],
+        }}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/2 new puts\/week/)).toBeInTheDocument();
+  });
+
+  it("labels the last-decision card as a decision, not a heartbeat", () => {
+    // With the hold rows gone this date is "the last day the bot did
+    // something", which can legitimately be weeks ago -- "Last cycle" would
+    // read as "the bot is dead".
+    render(
+      <MCXOptionsClient
+        configs={[config()]}
+        positionsByConfigId={{}}
+        legsByConfigId={{}}
+        selectionsByConfigId={{}}
+        onToggle={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Last decision")).toBeInTheDocument();
+    expect(screen.queryByText("Last cycle")).not.toBeInTheDocument();
   });
 });

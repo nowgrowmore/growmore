@@ -63,6 +63,27 @@ export function formatIstDate(value: PgDate | null | undefined): string {
   });
 }
 
+/** The IST Monday of `value`'s week, formatted like `formatIstDate`.
+ *
+ * Mirrors `mcx_options_engine._ist_week_start`, which is what the bot counts
+ * its weekly new-put target against (`MCXOptionsPosition.entry_week_start`).
+ * Computed in IST specifically so the page and the engine can never disagree
+ * about which week a position belongs to. */
+export function istWeekStart(value: PgDate | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const d = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  // Read the weekday in IST, not in the runtime's own zone.
+  const istNoon = new Date(
+    new Date(d).toLocaleString("en-US", { timeZone: IST_TIME_ZONE })
+  );
+  const daysSinceMonday = (istNoon.getDay() + 6) % 7;
+  istNoon.setDate(istNoon.getDate() - daysSinceMonday);
+  return formatIstDate(
+    new Date(Date.UTC(istNoon.getFullYear(), istNoon.getMonth(), istNoon.getDate()))
+  );
+}
+
 /** A precise INSTANT (e.g. `created_at`), always rendered in IST. */
 export function formatIstDateTime(value: PgDate | null | undefined): string {
   if (value === null || value === undefined || value === "") return "—";
